@@ -1,0 +1,76 @@
+[project]
+name = "piece"
+version = "0.1.0"
+description = "Piece - 个人知识库 RAG MCP Server"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # 核心 HTTP 服务（本地管理 API）
+    "fastapi==0.141.1",
+    "uvicorn==0.52.4",
+    # SQLite向量扩展
+    "sqlite-vec==0.1.6",
+    # 工作流编排和语言模型集成
+    "langchain-core==0.3.76",
+    "langchain-openai==0.3.33",
+    "langgraph==0.6.8",
+    # 数据验证和序列化
+    "pydantic==2.11.7",
+    "markitdown[all]==0.1.4",
+    "PyMuPDF==1.26.7",
+    # 读取插图尺寸，过滤页眉 logo 等装饰性小图
+    "Pillow==12.0.0",
+    # Markdown 公式渲染（markdown2 latex extra 依赖）
+    "latex2mathml==3.81.0",
+    # HTTP客户端和嵌入模型调用
+    "httpx==0.28.1",
+    "jieba==0.42.1",
+    # 异步文件操作和工具
+    "aiofiles>=24.0.0",
+    "webdav4==0.10.0",
+    # 文件属性 front matter
+    "pyyaml==6.0.3",
+]
+
+[project.optional-dependencies]
+# NiceGUI 管理界面；仅核心服务、API 和 CLI 不需要。
+gui = [
+    "nicegui==3.3.1",
+]
+# 两个 MCP 服务及其 FastMCP 框架。
+mcp = [
+    "fastmcp==2.14.4",
+]
+# 完整桌面模式：GUI、MCP、托盘和 Windows 原生窗口。
+# 托盘在 macOS 需要 Cocoa 主循环，故不装；原生窗口仅 Windows 走 WebView2，
+# mac / Linux 由 window.py 降级为浏览器 --app 窗口。
+desktop = [
+    "nicegui==3.3.1",
+    "fastmcp==2.14.4",
+    "pystray==0.19.5; sys_platform != 'darwin'",
+    "pywebview==6.1; sys_platform == 'win32'",
+]
+
+[dependency-groups]
+dev = [
+    "pyinstaller==6.17.0",
+    "pytest==9.1.1",
+]
+
+[project.scripts]
+piece = "app.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app", "indexing", "retrieval"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"assets/icon.ico" = "app/assets/icon.ico"
+# 内置 Skill 打进包内（不能叫 app/skills：与模块 app/skills.py 同名）
+"skills" = "app/builtin_skills"
+
+[tool.hatch.build.targets.sdist]
+include = ["app", "indexing", "retrieval", "assets/icon.ico", "skills", "README.md", "LICENSE", "pyproject.toml"]

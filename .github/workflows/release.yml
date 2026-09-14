@@ -1,0 +1,82 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # 当推送版本标签时触发（如 v0.1.0）
+  workflow_dispatch:  # 允许手动触发
+
+permissions:
+  contents: write  # 允许创建 Release 和上传文件
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: uv sync --frozen --extra desktop
+
+      - name: 运行打包脚本
+        run: |
+          uv run python build.py
+
+      - name: 获取版本号
+        id: get_version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION="0.1.0"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: 查找 ZIP 文件
+        id: find_zip
+        shell: bash
+        run: |
+          ZIP_FILE=$(ls dist/Piece_v*.zip | head -n 1)
+          echo "zip_file=$ZIP_FILE" >> $GITHUB_OUTPUT
+          echo "Found: $ZIP_FILE"
+
+      - name: 创建 Release
+        uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          draft: false
+          makeLatest: true
+          tag: ${{ github.ref_name }}
+          artifacts: "${{ steps.find_zip.outputs.zip_file }}"
+          body: |
+            ## Piece v${{ steps.get_version.outputs.version }}
+
+            ### 安装说明
+            1. 下载 `Piece_v${{ steps.get_version.outputs.version }}_*.zip` 文件
+            2. 解压到任意目录
+            3. 双击 `Piece.exe` 启动应用；终端与 AI 命令行使用 `piece-cli.exe`
+
+            ### MCP 服务配置
+            - 检索服务（只读）: http://localhost:8686/mcp
+            - 索引服务（读写）: http://localhost:8687/mcp
+            - 端口可在应用「设置」中修改
+
+            ### 更新内容
+            详见下方自动生成的 Release Notes
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Piece-Windows-${{ steps.get_version.outputs.version }}
+          path: ${{ steps.find_zip.outputs.zip_file }}
+          retention-days: 30

@@ -1,0 +1,170 @@
+# ========== 项目特定文件 ==========
+
+# 用户数据目录（包含配置、数据库、上传的文件）
+data/
+.claude/
+doc/*
+# 允许 GitHub Actions 工作流
+!.github/
+# 手工验证脚本的解析产物（含用户文档内容，禁止入库）
+tests/output/
+# 打包输出目录
+dist/
+build/
+*.spec.bak
+
+# PDF 处理临时文件
+data_injection/pdf_process/
+
+# MCP 配置文件（可能包含敏感信息）
+.mcp.json
+AGENTS.md
+
+# ========== Python 相关 ==========
+
+# 字节码文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 编译扩展
+*.pyd
+
+# 分发/打包
+*.egg
+*.egg-info/
+dist-info/
+.eggs/
+*.whl
+
+# PyInstaller
+*.manifest
+
+# 单元测试/覆盖率
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+*.cover
+.hypothesis/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath
+*.sage.py
+
+
+# ========== 虚拟环境 ==========
+
+venv/
+env/
+ENV/
+.venv/
+virtualenv/
+
+
+# ========== IDE/编辑器配置 ==========
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+
+# ========== 操作系统相关 ==========
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+.Trash-*
+
+
+# ========== 环境变量和敏感信息 ==========
+
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.crt
+credentials.json
+
+
+# ========== 日志文件 ==========
+
+*.log
+logs/
+*.log.*
+
+
+# ========== 数据库文件（运行时生成）==========
+
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+
+
+# ========== 临时文件 ==========
+
+*.tmp
+*.temp
+*.bak
+*.cache
+.cache/
+tmp/
+temp/
+
+
+# ========== 文档构建输出 ==========
+
+docs/_build/
+site/

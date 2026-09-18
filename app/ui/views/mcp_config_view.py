@@ -8,6 +8,8 @@ MCP 配置视图
 
 import json
 import shlex
+from collections.abc import Callable
+
 from nicegui import ui
 
 from app.i18n import t
@@ -18,8 +20,12 @@ from indexing.settings import get_settings
 # MCP 客户端配置模板
 # 使用 {port} 占位符，运行时替换为实际端口
 # 协议：Streamable HTTP，端点：/mcp
+# 各客户端的顶层键（mcpServers / servers / mcp / context_servers）和 URL 字段
+# （url / serverUrl / httpUrl）互不兼容，type 取值也不统一，修改时请以官方文档为准。
+# icon 只能取内置 Material Icons 字体里已有的字形（不含 Material Symbols 新增名，
+# 例如 code_blocks 会显示为空白），新增前请先确认名字存在。
 MCP_CLIENTS = [
-    # ==================== 代码编辑器 ====================
+    # ==================== 代码编辑器 / IDE ====================
     {
         "id": "cursor",
         "name": "Cursor",
@@ -36,35 +42,18 @@ MCP_CLIENTS = [
         }
     },
     {
-        "id": "windsurf",
-        "name": "Windsurf",
-        "icon": "surfing",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "serverUrl": "http://localhost:{port}/mcp"
-                },
-                "piece-index": {
-                    "serverUrl": "http://localhost:{index_port}/mcp"
-                }
-            }
-        }
-    },
-    {
         "id": "vscode",
         "name": "VS Code",
         "icon": "laptop_mac",
         "config": {
-            "mcp": {
-                "servers": {
-                    "piece-kb": {
-                        "type": "http",
-                        "url": "http://localhost:{port}/mcp"
-                    },
-                    "piece-index": {
-                        "type": "http",
-                        "url": "http://localhost:{index_port}/mcp"
-                    }
+            "servers": {
+                "piece-kb": {
+                    "type": "http",
+                    "url": "http://localhost:{port}/mcp"
+                },
+                "piece-index": {
+                    "type": "http",
+                    "url": "http://localhost:{index_port}/mcp"
                 }
             }
         }
@@ -86,7 +75,116 @@ MCP_CLIENTS = [
             }
         }
     },
-    # ==================== AI 助手插件 ====================
+    {
+        # Windsurf 于 2026-06 更名 Devin Desktop，配置字段仍为 serverUrl
+        "id": "devin_desktop",
+        "name": "Devin Desktop (ex-Windsurf)",
+        "icon": "surfing",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "serverUrl": "http://localhost:{port}/mcp"
+                },
+                "piece-index": {
+                    "serverUrl": "http://localhost:{index_port}/mcp"
+                }
+            }
+        }
+    },
+    {
+        "id": "zed",
+        "name": "Zed",
+        "icon": "electric_bolt",
+        "config": {
+            "context_servers": {
+                "piece-kb": {
+                    "url": "http://localhost:{port}/mcp"
+                },
+                "piece-index": {
+                    "url": "http://localhost:{index_port}/mcp"
+                }
+            }
+        }
+    },
+    {
+        "id": "trae",
+        "name": "Trae",
+        "icon": "route",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "url": "http://localhost:{port}/mcp"
+                },
+                "piece-index": {
+                    "url": "http://localhost:{index_port}/mcp"
+                }
+            }
+        }
+    },
+    {
+        "id": "qoder",
+        "name": "Qoder",
+        "icon": "travel_explore",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "url": "http://localhost:{port}/mcp"
+                },
+                "piece-index": {
+                    "url": "http://localhost:{index_port}/mcp"
+                }
+            }
+        }
+    },
+    {
+        "id": "codebuddy",
+        "name": "CodeBuddy",
+        "icon": "handshake",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "type": "http",
+                    "url": "http://localhost:{port}/mcp"
+                },
+                "piece-index": {
+                    "type": "http",
+                    "url": "http://localhost:{index_port}/mcp"
+                }
+            }
+        }
+    },
+    {
+        # 未收录 JetBrains AI Assistant：官方未提供自定义鉴权 header 入口（YouTrack LLM-25012）
+        "id": "jetbrains_junie",
+        "name": "JetBrains Junie",
+        "icon": "assistant",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "url": "http://localhost:{port}/mcp"
+                },
+                "piece-index": {
+                    "url": "http://localhost:{index_port}/mcp"
+                }
+            }
+        }
+    },
+    {
+        "id": "google_antigravity",
+        "name": "Google Antigravity",
+        "icon": "public",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "serverUrl": "http://localhost:{port}/mcp"
+                },
+                "piece-index": {
+                    "serverUrl": "http://localhost:{index_port}/mcp"
+                }
+            }
+        }
+    },
+    # ==================== AI 编程助手插件 ====================
     {
         "id": "cline",
         "name": "Cline",
@@ -100,78 +198,6 @@ MCP_CLIENTS = [
                 "piece-index": {
                     "url": "http://localhost:{index_port}/mcp",
                     "type": "streamableHttp"
-                }
-            }
-        }
-    },
-    {
-        "id": "github_copilot",
-        "name": "GitHub Copilot",
-        "icon": "hub",
-        "config": {
-            "mcp": {
-                "servers": {
-                    "piece-kb": {
-                        "type": "http",
-                        "url": "http://localhost:{port}/mcp"
-                    },
-                    "piece-index": {
-                        "type": "http",
-                        "url": "http://localhost:{index_port}/mcp"
-                    }
-                }
-            }
-        }
-    },
-    {
-        "id": "copilot_coding_agent",
-        "name": "Copilot Coding Agent",
-        "icon": "precision_manufacturing",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "type": "http",
-                    "url": "http://localhost:{port}/mcp"
-                },
-                "piece-index": {
-                    "type": "http",
-                    "url": "http://localhost:{index_port}/mcp"
-                }
-            }
-        }
-    },
-    {
-        "id": "augment_code",
-        "name": "Augment Code",
-        "icon": "add_circle",
-        "config": {
-            "augment.advanced": {
-                "mcpServers": [
-                    {
-                        "name": "piece-kb",
-                        "url": "http://localhost:{port}/mcp"
-                    },
-                    {
-                        "name": "piece-index",
-                        "url": "http://localhost:{index_port}/mcp"
-                    }
-                ]
-            }
-        }
-    },
-    {
-        "id": "roo_code",
-        "name": "Roo Code",
-        "icon": "pets",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "type": "streamable-http",
-                    "url": "http://localhost:{port}/mcp"
-                },
-                "piece-index": {
-                    "type": "streamable-http",
-                    "url": "http://localhost:{index_port}/mcp"
                 }
             }
         }
@@ -196,8 +222,9 @@ MCP_CLIENTS = [
         }
     },
     {
-        "id": "qodo_gen",
-        "name": "Qodo Gen",
+        # 原 Qodo Gen，官方已更名为 Qodo IDE
+        "id": "qodo_ide",
+        "name": "Qodo IDE",
         "icon": "auto_fix_high",
         "config": {
             "mcpServers": {
@@ -210,11 +237,47 @@ MCP_CLIENTS = [
             }
         }
     },
-    # ==================== Claude 系列 ====================
     {
-        "id": "claude_desktop",
-        "name": "Claude Desktop",
-        "icon": "smart_toy",
+        "id": "augment_code",
+        "name": "Augment Code",
+        "icon": "add_circle",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "type": "http",
+                    "url": "http://localhost:{port}/mcp"
+                },
+                "piece-index": {
+                    "type": "http",
+                    "url": "http://localhost:{index_port}/mcp"
+                }
+            }
+        }
+    },
+    {
+        # 云端 agent 在 GitHub 网页端配置，每个服务必须声明 tools
+        "id": "copilot_coding_agent",
+        "name": "GitHub Copilot Coding Agent",
+        "icon": "precision_manufacturing",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "type": "http",
+                    "url": "http://localhost:{port}/mcp",
+                    "tools": ["*"]
+                },
+                "piece-index": {
+                    "type": "http",
+                    "url": "http://localhost:{index_port}/mcp",
+                    "tools": ["*"]
+                }
+            }
+        }
+    },
+    {
+        "id": "zencoder",
+        "name": "Zencoder",
+        "icon": "self_improvement",
         "config": {
             "mcpServers": {
                 "piece-kb": {
@@ -226,6 +289,7 @@ MCP_CLIENTS = [
             }
         }
     },
+    # ==================== 终端 / CLI Agent ====================
     {
         "id": "claude_code",
         "name": "Claude Code",
@@ -233,163 +297,9 @@ MCP_CLIENTS = [
         "config": {},
         "format": "bash",
     },
-    # ==================== 独立 AI 客户端 ====================
-    {
-        "id": "cherrystudio",
-        "name": "CherryStudio",
-        "icon": "chat",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "isActive": True,
-                    "name": "piece-kb",
-                    "type": "streamableHttp",
-                    "url": "http://localhost:{port}/mcp",
-                    "baseUrl": "http://localhost:{port}/mcp"
-                },
-                "piece-index": {
-                    "isActive": True,
-                    "name": "piece-index",
-                    "type": "streamableHttp",
-                    "url": "http://localhost:{index_port}/mcp",
-                    "baseUrl": "http://localhost:{index_port}/mcp"
-                }
-            }
-        }
-    },
-    {
-        "id": "opencode",
-        "name": "Opencode",
-        "icon": "open_in_new",
-        "config": {
-            "mcp": {
-                "piece-kb": {
-                    "type": "remote",
-                    "url": "http://localhost:{port}/mcp",
-                    "enabled": True
-                },
-                "piece-index": {
-                    "type": "remote",
-                    "url": "http://localhost:{index_port}/mcp",
-                    "enabled": True
-                }
-            }
-        }
-    },
-    {
-        "id": "trae",
-        "name": "Trae",
-        "icon": "route",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "url": "http://localhost:{port}/mcp"
-                },
-                "piece-index": {
-                    "url": "http://localhost:{index_port}/mcp"
-                }
-            }
-        }
-    },
-    {
-        "id": "amp",
-        "name": "Amp",
-        "icon": "bolt",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "url": "http://localhost:{port}/mcp"
-                },
-                "piece-index": {
-                    "url": "http://localhost:{index_port}/mcp"
-                }
-            }
-        }
-    },
-    {
-        "id": "rovo_dev",
-        "name": "Rovo Dev CLI",
-        "icon": "developer_mode",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "url": "http://localhost:{port}/mcp"
-                },
-                "piece-index": {
-                    "url": "http://localhost:{index_port}/mcp"
-                }
-            }
-        }
-    },
-    # ==================== JetBrains ====================
-    {
-        "id": "jetbrains",
-        "name": "JetBrains AI Assistant",
-        "icon": "integration_instructions",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "url": "http://localhost:{port}/mcp"
-                },
-                "piece-index": {
-                    "url": "http://localhost:{index_port}/mcp"
-                }
-            }
-        }
-    },
-    {
-        "id": "kiro",
-        "name": "Kiro",
-        "icon": "lightbulb",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "url": "http://localhost:{port}/mcp",
-                    "disabled": False,
-                    "autoApprove": []
-                },
-                "piece-index": {
-                    "url": "http://localhost:{index_port}/mcp",
-                    "disabled": False,
-                    "autoApprove": []
-                }
-            }
-        }
-    },
-    # ==================== CLI 工具 ====================
-    {
-        "id": "gemini_cli",
-        "name": "Gemini CLI",
-        "icon": "stars",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "httpUrl": "http://localhost:{port}/mcp"
-                },
-                "piece-index": {
-                    "httpUrl": "http://localhost:{index_port}/mcp"
-                }
-            }
-        }
-    },
-    {
-        "id": "qwen_coder",
-        "name": "Qwen Coder",
-        "icon": "psychology",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "httpUrl": "http://localhost:{port}/mcp"
-                },
-                "piece-index": {
-                    "httpUrl": "http://localhost:{index_port}/mcp"
-                }
-            }
-        }
-    },
     {
         "id": "openai_codex",
-        "name": "OpenAI Codex",
+        "name": "OpenAI Codex CLI",
         "icon": "memory",
         "config": {
             "[mcp_servers.piece-kb]": {
@@ -419,94 +329,36 @@ MCP_CLIENTS = [
         }
     },
     {
-        "id": "amazon_q",
-        "name": "Amazon Q Developer",
-        "icon": "cloud",
+        # 原 Qwen Coder，官方名称为 Qwen Code，与 Gemini CLI 一致使用 httpUrl
+        "id": "qwen_code",
+        "name": "Qwen Code",
+        "icon": "psychology",
         "config": {
             "mcpServers": {
                 "piece-kb": {
-                    "url": "http://localhost:{port}/mcp"
+                    "httpUrl": "http://localhost:{port}/mcp"
                 },
                 "piece-index": {
-                    "url": "http://localhost:{index_port}/mcp"
+                    "httpUrl": "http://localhost:{index_port}/mcp"
                 }
             }
         }
     },
     {
-        "id": "factory",
-        "name": "Factory (droid)",
-        "icon": "factory",
+        "id": "opencode",
+        "name": "Opencode",
+        "icon": "open_in_new",
         "config": {
-            "mcpServers": {
+            "mcp": {
                 "piece-kb": {
-                    "type": "http",
-                    "url": "http://localhost:{port}/mcp"
+                    "type": "remote",
+                    "url": "http://localhost:{port}/mcp",
+                    "enabled": True
                 },
                 "piece-index": {
-                    "type": "http",
-                    "url": "http://localhost:{index_port}/mcp"
-                }
-            }
-        }
-    },
-    # ==================== 桌面应用 ====================
-    {
-        "id": "lm_studio",
-        "name": "LM Studio",
-        "icon": "science",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "url": "http://localhost:{port}/mcp"
-                },
-                "piece-index": {
-                    "url": "http://localhost:{index_port}/mcp"
-                }
-            }
-        }
-    },
-    {
-        "id": "warp",
-        "name": "Warp",
-        "icon": "rocket_launch",
-        "config": {
-            "piece-kb": {
-                "url": "http://localhost:{port}/mcp",
-                "start_on_launch": True
-            },
-            "piece-index": {
-                "url": "http://localhost:{index_port}/mcp",
-                "start_on_launch": True
-            }
-        }
-    },
-    {
-        "id": "perplexity",
-        "name": "Perplexity Desktop",
-        "icon": "search",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "url": "http://localhost:{port}/mcp"
-                },
-                "piece-index": {
-                    "url": "http://localhost:{index_port}/mcp"
-                }
-            }
-        }
-    },
-    {
-        "id": "boltai",
-        "name": "BoltAI",
-        "icon": "flash_on",
-        "config": {
-            "mcpServers": {
-                "piece-kb": {
-                    "url": "http://localhost:{port}/mcp"
-                },
-                "piece-index": {
-                    "url": "http://localhost:{index_port}/mcp"
+                    "type": "remote",
+                    "url": "http://localhost:{index_port}/mcp",
+                    "enabled": True
                 }
             }
         }
@@ -529,9 +381,112 @@ MCP_CLIENTS = [
         }
     },
     {
-        "id": "zencoder",
-        "name": "Zencoder",
-        "icon": "self_improvement",
+        "id": "factory",
+        "name": "Factory (droid)",
+        "icon": "factory",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "type": "http",
+                    "url": "http://localhost:{port}/mcp"
+                },
+                "piece-index": {
+                    "type": "http",
+                    "url": "http://localhost:{index_port}/mcp"
+                }
+            }
+        }
+    },
+    {
+        # Amp 写在 VS Code settings.json 的 amp.mcpServers 键下
+        "id": "amp",
+        "name": "Amp",
+        "icon": "bolt",
+        "config": {
+            "amp.mcpServers": {
+                "piece-kb": {
+                    "url": "http://localhost:{port}/mcp"
+                },
+                "piece-index": {
+                    "url": "http://localhost:{index_port}/mcp"
+                }
+            }
+        }
+    },
+    {
+        "id": "kiro",
+        "name": "Kiro",
+        "icon": "lightbulb",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "url": "http://localhost:{port}/mcp",
+                    "disabled": False,
+                    "autoApprove": []
+                },
+                "piece-index": {
+                    "url": "http://localhost:{index_port}/mcp",
+                    "disabled": False,
+                    "autoApprove": []
+                }
+            }
+        }
+    },
+    {
+        "id": "rovo_dev",
+        "name": "Rovo Dev CLI",
+        "icon": "developer_mode",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "url": "http://localhost:{port}/mcp",
+                    "transport": "http"
+                },
+                "piece-index": {
+                    "url": "http://localhost:{index_port}/mcp",
+                    "transport": "http"
+                }
+            }
+        }
+    },
+    {
+        "id": "warp",
+        "name": "Warp",
+        "icon": "rocket_launch",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "url": "http://localhost:{port}/mcp",
+                    "start_on_launch": True
+                },
+                "piece-index": {
+                    "url": "http://localhost:{index_port}/mcp",
+                    "start_on_launch": True
+                }
+            }
+        }
+    },
+    {
+        "id": "devin_cli",
+        "name": "Devin CLI",
+        "icon": "smart_toy",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "url": "http://localhost:{port}/mcp",
+                    "transport": "http"
+                },
+                "piece-index": {
+                    "url": "http://localhost:{index_port}/mcp",
+                    "transport": "http"
+                }
+            }
+        }
+    },
+    {
+        "id": "kimi_code",
+        "name": "Kimi Code CLI",
+        "icon": "nightlight",
         "config": {
             "mcpServers": {
                 "piece-kb": {
@@ -543,17 +498,60 @@ MCP_CLIENTS = [
             }
         }
     },
+    # ==================== 桌面客户端 ====================
     {
-        "id": "google_antigravity",
-        "name": "Google Antigravity",
-        "icon": "public",
+        "id": "workbuddy",
+        "name": "WorkBuddy",
+        "icon": "workspaces",
         "config": {
             "mcpServers": {
                 "piece-kb": {
-                    "serverUrl": "http://localhost:{port}/mcp"
+                    "type": "streamable-http",
+                    "url": "http://localhost:{port}/mcp",
+                    "disabled": False
                 },
                 "piece-index": {
-                    "serverUrl": "http://localhost:{index_port}/mcp"
+                    "type": "streamable-http",
+                    "url": "http://localhost:{index_port}/mcp",
+                    "disabled": False
+                }
+            }
+        }
+    },
+    {
+        "id": "cherrystudio",
+        "name": "Cherry Studio",
+        "icon": "chat",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "isActive": True,
+                    "name": "piece-kb",
+                    "type": "streamableHttp",
+                    "url": "http://localhost:{port}/mcp",
+                    "baseUrl": "http://localhost:{port}/mcp"
+                },
+                "piece-index": {
+                    "isActive": True,
+                    "name": "piece-index",
+                    "type": "streamableHttp",
+                    "url": "http://localhost:{index_port}/mcp",
+                    "baseUrl": "http://localhost:{index_port}/mcp"
+                }
+            }
+        }
+    },
+    {
+        "id": "lm_studio",
+        "name": "LM Studio",
+        "icon": "science",
+        "config": {
+            "mcpServers": {
+                "piece-kb": {
+                    "url": "http://localhost:{port}/mcp"
+                },
+                "piece-index": {
+                    "url": "http://localhost:{index_port}/mcp"
                 }
             }
         }
@@ -600,26 +598,32 @@ def _get_config_json(client: dict) -> str:
     return json.dumps(config, indent=2, ensure_ascii=False)
 
 
-def _add_auth_headers(config: dict, api_keys: dict[str, str]):
-    """覆盖现有客户端模板的不同层级，只为对应服务添加自己的密钥。"""
-    if "mcpServers" in config:
-        servers = config["mcpServers"]
-    elif "mcp" in config:
-        servers = config["mcp"].get("servers", config["mcp"])
-    elif "servers" in config:
-        servers = config["servers"]
-    elif "augment.advanced" in config:
-        servers = {
-            server["name"]: server
-            for server in config["augment.advanced"].get("mcpServers", [])
-        }
-    else:
-        servers = config  # Warp 把服务放在根级别
+def _add_auth_headers(config, api_keys: dict[str, str]):
+    """递归查找服务节点注入密钥，避免为每个客户端的模板层级单独写判断。"""
+    for name, api_key in api_keys.items():
+        server = _find_server(config, name)
+        if server is not None and api_key:
+            server.setdefault("headers", {})["Authorization"] = f"Bearer {api_key}"
 
-    for name, server_config in servers.items():
-        api_key = api_keys.get(name)
-        if api_key and isinstance(server_config, dict):
-            server_config.setdefault("headers", {})["Authorization"] = f"Bearer {api_key}"
+
+def _find_server(node, name: str) -> dict | None:
+    """服务节点可能是对象键、数组元素的 name 字段，或直接位于根级别。"""
+    if isinstance(node, dict):
+        if node.get("name") == name:
+            return node
+        value = node.get(name)
+        if isinstance(value, dict):
+            return value
+        for child in node.values():
+            found = _find_server(child, name)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for child in node:
+            found = _find_server(child, name)
+            if found is not None:
+                return found
+    return None
 
 
 def _get_config_language(client: dict) -> str:
@@ -630,7 +634,7 @@ def _get_config_language(client: dict) -> str:
 def render_mcp_config_middle(
     selected_client: dict,
     ui_refs: dict,
-    on_select_client: callable,
+    on_select_client: Callable[[str], None],
 ):
     """
     渲染 MCP 配置中栏（客户端列表）

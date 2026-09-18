@@ -278,7 +278,7 @@
     "provider_vlm": "Custom Multimodal Model",
     "provider_mineru": "MinerU (mineru.net)",
     "base_url": "Service URL",
-    "base_url_hint": "e.g. official cloud https://paddleocr.aistudio-app.com or a self-hosted service. Leave empty to parse PDFs locally with PyMuPDF.",
+    "base_url_hint": "Pre-filled with the official cloud service; replace it with a self-hosted address. Leave empty to parse PDFs locally with PyMuPDF.",
     "api_key": "API Key",
     "api_key_help": "No API key? Get one from Baidu AI Studio",
     "model": "Model",

@@ -161,7 +161,8 @@ class OcrSettings(BaseModel):
     provider: str = "paddle"  # paddle | vlm | mineru
 
     # PaddleOCR 兼容服务
-    base_url: str = ""  # OCR 服务地址，如官方 https://paddleocr.aipaddle.com
+    # 预置官方云服务地址，用户只需再填访问令牌即可启用；留空则回落本地解析
+    base_url: str = "https://paddleocr.aistudio-app.com"
     api_key: str = ""  # 访问令牌
     model: str = "PaddleOCR-VL"  # PaddleOCR-VL | PP-StructureV3
     payload: OcrOptionalPayload = OcrOptionalPayload()  # 解析参数（optionalPayload）

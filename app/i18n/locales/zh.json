@@ -278,7 +278,7 @@
     "provider_vlm": "自定义多模态模型",
     "provider_mineru": "MinerU（mineru.net）",
     "base_url": "服务地址",
-    "base_url_hint": "如官方云服务 https://paddleocr.aistudio-app.com，或本地自建服务地址。留空则使用本地 PyMuPDF 解析 PDF。",
+    "base_url_hint": "默认已填写官方云服务地址，可改为本地自建服务地址。留空则使用本地 PyMuPDF 解析 PDF。",
     "api_key": "API Key",
     "api_key_help": "没有 API Key？前往百度 AI Studio 获取",
     "model": "模型",

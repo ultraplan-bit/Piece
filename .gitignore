@@ -3,7 +3,7 @@
 # 用户数据目录（包含配置、数据库、上传的文件）
 data/
 .claude/
-doc/*
+doc/
 # 允许 GitHub Actions 工作流
 !.github/
 # 手工验证脚本的解析产物（含用户文档内容，禁止入库）

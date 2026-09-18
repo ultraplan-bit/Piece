@@ -10,7 +10,8 @@ from nicegui import ui
 
 from app.i18n import t
 from app.ui.components import status_badge, chunk_card, collection_labels
-from app.utils import MAX_FILE_SIZE, MAX_TOTAL_UPLOAD_SIZE, MAX_UPLOAD_FILES
+from app.utils import MAX_TOTAL_UPLOAD_SIZE, MAX_UPLOAD_FILES
+from indexing.services.file_service import get_max_file_size
 from indexing.services import metadata_service
 from indexing.services.chunking import ChunkerFactory
 from indexing.services.chunking.utils import HEADING_SEPARATOR
@@ -199,7 +200,9 @@ def render_files_middle(
             auto_upload=True,
             multiple=True,
             max_files=MAX_UPLOAD_FILES,
-            max_file_size=MAX_FILE_SIZE,
+            # 上限随当前解析后端变化；这里取渲染时的值，服务端导入时还会按同一
+            # 规则复核（切换解析后端后未重进页面，以服务端校验为准）
+            max_file_size=get_max_file_size(),
             max_total_size=MAX_TOTAL_UPLOAD_SIZE,
         ).props(
             f"accept={','.join(ChunkerFactory.get_supported_extensions())}"

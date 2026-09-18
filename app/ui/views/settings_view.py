@@ -11,9 +11,13 @@ from nicegui import ui
 from app.i18n import t, SUPPORTED_LANGUAGES
 from app.utils import open_external
 from indexing.mcp.config import get_mcp_port
+from indexing.settings import MINERU_LANGUAGES
 
 # PaddleOCR 官方云服务（aistudio-app.com）的 API Key 在这里申请
 PADDLE_TOKEN_URL = "https://aistudio.baidu.com/account/accessToken"
+
+# MinerU 的 Token 申请入口与接口说明同页
+MINERU_TOKEN_URL = "https://mineru.net/apiManage/docs"
 
 
 def render_settings_middle(
@@ -157,7 +161,7 @@ def _render_appearance_settings(settings_form: dict, settings_handlers, apply_th
                 },
                 value=current_theme,
                 on_change=on_theme_change,
-            ).classes("theme-text")
+            ).props("no-caps").classes("theme-text")
 
             ui.separator()
 
@@ -173,7 +177,7 @@ def _render_appearance_settings(settings_form: dict, settings_handlers, apply_th
                 options=SUPPORTED_LANGUAGES,
                 value=current_language,
                 on_change=on_language_change,
-            ).classes("theme-text")
+            ).props("no-caps").classes("theme-text")
 
             ui.label(t("settings_appearance.language_hint")).classes("text-xs theme-text-muted")
 
@@ -411,8 +415,11 @@ def _render_ocr_settings(settings_form: dict, settings_handlers):
 
             @ui.refreshable
             def provider_fields():
-                if settings_form.get("ocr_provider", "paddle") == "vlm":
+                provider = settings_form.get("ocr_provider", "paddle")
+                if provider == "vlm":
                     _render_ocr_vlm_fields(settings_form)
+                elif provider == "mineru":
+                    _render_ocr_mineru_fields(settings_form)
                 else:
                     _render_ocr_paddle_fields(settings_form)
 
@@ -424,10 +431,11 @@ def _render_ocr_settings(settings_form: dict, settings_handlers):
                 options={
                     "paddle": t("settings_ocr.provider_paddle"),
                     "vlm": t("settings_ocr.provider_vlm"),
+                    "mineru": t("settings_ocr.provider_mineru"),
                 },
                 value=settings_form.get("ocr_provider", "paddle"),
                 on_change=on_provider_change,
-            ).props("dense unelevated").classes("theme-text")
+            ).props("dense unelevated no-caps").classes("theme-text")
 
             ui.separator()
 
@@ -578,6 +586,53 @@ def _render_ocr_vlm_fields(settings_form: dict):
         ui.label(t("settings_ocr.vlm_hint")).classes("text-xs theme-text-muted")
 
 
+def _render_ocr_mineru_fields(settings_form: dict):
+    """MinerU 精准解析的配置字段"""
+    with ui.column().classes("w-full gap-3"):
+        ui.input(
+            label=t("settings_ocr.mineru_token"),
+            value=settings_form.get("ocr_mineru_token", ""),
+            password=True,
+            password_toggle_button=True,
+            on_change=lambda e: settings_form.update({"ocr_mineru_token": e.value}),
+        ).props("dense outlined").classes("w-full")
+
+        ui.button(
+            t("settings_ocr.mineru_token_help"),
+            on_click=lambda: open_external(MINERU_TOKEN_URL),
+        ).props("flat dense no-caps size=sm icon-right=open_in_new").classes(
+            "self-start px-1 text-xs theme-text-accent"
+        ).tooltip(MINERU_TOKEN_URL)
+
+        ui.select(
+            options=["vlm", "pipeline"],
+            value=settings_form.get("ocr_mineru_model_version", "vlm"),
+            label=t("settings_ocr.mineru_model_version"),
+            on_change=lambda e: settings_form.update({"ocr_mineru_model_version": e.value}),
+        ).props("dense outlined").classes("w-full")
+
+        ui.label(t("settings_ocr.mineru_model_version_hint")).classes("text-xs theme-text-muted")
+
+        # 文档语言只影响 OCR 阶段；选项为官方 language 取值全表
+        ui.select(
+            options=dict(MINERU_LANGUAGES),
+            value=settings_form.get("ocr_mineru_language", "ch"),
+            label=t("settings_ocr.mineru_language"),
+            on_change=lambda e: settings_form.update({"ocr_mineru_language": e.value}),
+        ).props("dense outlined").classes("w-full")
+
+        ui.label(t("settings_ocr.mineru_language_hint")).classes("text-xs theme-text-muted")
+
+        ui.switch(
+            t("settings_ocr.mineru_is_ocr"),
+            value=bool(settings_form.get("ocr_mineru_is_ocr", False)),
+            on_change=lambda e: settings_form.update({"ocr_mineru_is_ocr": e.value}),
+        ).props("dense").classes("theme-text")
+
+        ui.label(t("settings_ocr.mineru_is_ocr_hint")).classes("text-xs theme-text-muted")
+        ui.label(t("settings_ocr.mineru_hint")).classes("text-xs theme-text-muted")
+
+
 def _render_office_settings(settings_form: dict, settings_handlers):
     """渲染 Office 文档转换设置表单"""
     with ui.card().tight().classes("w-full theme-card").style("border: 1px solid var(--border-color)"):
@@ -593,7 +648,7 @@ def _render_office_settings(settings_form: dict, settings_handlers):
                 },
                 value=settings_form.get("office_converter", "auto"),
                 on_change=lambda e: settings_form.update({"office_converter": e.value}),
-            ).props("dense unelevated").classes("theme-text")
+            ).props("dense unelevated no-caps").classes("theme-text")
 
             ui.label(t("settings_office.converter_hint")).classes("text-xs theme-text-muted")
 

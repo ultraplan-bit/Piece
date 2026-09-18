@@ -29,6 +29,7 @@ from .chunking import ChunkerFactory, PageChunker
 from .converter import convert_to_markdown, iter_pdf_pages
 from .embedding_client import get_embeddings_model
 from .metadata_service import parse_frontmatter
+from .mineru_client import iter_mineru_pdf_pages
 from .ocr_client import iter_ocr_pdf_pages
 from .office_convert import (
     CONVERTER_ONLY_FORMATS,
@@ -281,9 +282,9 @@ def _iter_pdf_source_pages(
     stop_event=None,
     on_parse_progress=None,
 ):
-    """按配置选择 PDF 页面来源：PaddleOCR 服务、自定义多模态模型或本地 PyMuPDF 文本层。
+    """按配置选择 PDF 页面来源：PaddleOCR 服务、MinerU、自定义多模态模型或本地文本层。
 
-    三种来源的页面对象均提供 page_number/total_pages/page_text 属性，
+    四种来源的页面对象均提供 page_number/total_pages/page_text 属性，
     并通过 on_parse_progress(已解析页, 总页数) 上报解析进度。
     """
     parser = get_pdf_parser()
@@ -292,6 +293,16 @@ def _iter_pdf_source_pages(
         # 图片下载到工作文件同名目录，Markdown 中的相对引用可直接生效
         image_dir = working_file_path.parent / working_file_path.stem
         return iter_ocr_pdf_pages(
+            original_file_path,
+            image_dir,
+            on_parse_progress=on_parse_progress,
+            stop_check=stop_event.is_set if stop_event is not None else None,
+        )
+
+    if parser == "mineru":
+        # MinerU 同样产出插图，落盘规则与 PaddleOCR 路径一致
+        image_dir = working_file_path.parent / working_file_path.stem
+        return iter_mineru_pdf_pages(
             original_file_path,
             image_dir,
             on_parse_progress=on_parse_progress,
@@ -392,7 +403,7 @@ async def _process_pdf_file(
 ) -> None:
     """按页完成 PDF 解析、切片、向量生成和入库。
 
-    解析后端由 ocr.provider 选择：PaddleOCR 服务、自定义多模态模型，
+    解析后端由 ocr.provider 选择：PaddleOCR 服务、MinerU、自定义多模态模型，
     两者都未配置完整时使用本地 PyMuPDF 文本层。
     单页通常只切出 1 个切片，因此切片跨页累积到一定数量再统一发送，
     避免每页各发一次嵌入请求。

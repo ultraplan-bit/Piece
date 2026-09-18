@@ -68,7 +68,7 @@ def _validate(data):
     settings.data_path = str(path.resolve())
     if any(value <= 0 for value in settings.performance.model_dump().values()):
         raise BusinessError("INVALID_CONFIG", "并发、批量和限流配置必须大于零")
-    if settings.ocr.provider not in {"paddle", "vlm"} or settings.office.converter not in {"auto", "com", "libreoffice", "off"}:
+    if settings.ocr.provider not in {"paddle", "vlm", "mineru"} or settings.office.converter not in {"auto", "com", "libreoffice", "off"}:
         raise BusinessError("INVALID_CONFIG", "解析器或 Office 转换器选项无效")
     for base in (settings.embedding.base_url, settings.ocr.base_url, settings.ocr.vlm_base_url, settings.webdav.hostname):
         if base and not base.startswith(("http://", "https://")):

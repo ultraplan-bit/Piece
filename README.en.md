@@ -69,7 +69,7 @@ Other compatible services are also supported. External services may charge fees;
 
 On the **Files** page, click **+ → Upload file** and pick the documents to import, then wait for processing to finish. Your knowledge cards will appear. Supported formats include **PDF, Word, PowerPoint, Excel (`.xlsx`), Markdown, and TXT**.
 
-- **Scans, complex formulas, or tables**: Configure a PaddleOCR service or a custom multimodal model under **Settings → PDF Parsing Settings**. Follow the prompts to enter the service address and key, then test the connection. PDFs with a usable text layer can be imported without this setup.
+- **Scans, complex formulas, or tables**: Configure a PaddleOCR service, MinerU, or a custom multimodal model under **Settings → PDF Parsing Settings**. Follow the prompts to enter the service address and key, then test the connection. PDFs with a usable text layer can be imported without this setup.
 - **Word / PowerPoint**: Installing Microsoft Office or LibreOffice is recommended. Formats such as `.doc`, `.ppt`, `.rtf`, `.odt`, and `.odp` require a working conversion tool.
 
 After importing, open **Recall Test** and ask a relevant question to check whether Piece finds the content you need.

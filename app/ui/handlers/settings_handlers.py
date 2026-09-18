@@ -100,6 +100,10 @@ class SettingsHandlers:
             "ocr_vlm_model": settings.ocr.vlm_model,
             "ocr_vlm_dpi": settings.ocr.vlm_dpi,
             "ocr_vlm_concurrency": settings.ocr.vlm_concurrency,
+            "ocr_mineru_token": settings.ocr.mineru_token,
+            "ocr_mineru_model_version": settings.ocr.mineru_model_version,
+            "ocr_mineru_is_ocr": settings.ocr.mineru_is_ocr,
+            "ocr_mineru_language": settings.ocr.mineru_language,
             # OCR 解析参数（三态开关以字符串存表单，None/True/False 落库时转换）
             "ocr_use_doc_unwarping": _payload_form_value(settings.ocr.payload.use_doc_unwarping),
             "ocr_use_doc_orientation_classify": _payload_form_value(
@@ -173,6 +177,12 @@ class SettingsHandlers:
                     vlm_model=self.settings_form.get("ocr_vlm_model", "").strip(),
                     vlm_dpi=int(self.settings_form.get("ocr_vlm_dpi") or 150),
                     vlm_concurrency=int(self.settings_form.get("ocr_vlm_concurrency") or 4),
+                    mineru_token=self.settings_form.get("ocr_mineru_token", "").strip(),
+                    mineru_model_version=self.settings_form.get(
+                        "ocr_mineru_model_version", "vlm"
+                    ),
+                    mineru_is_ocr=bool(self.settings_form.get("ocr_mineru_is_ocr", False)),
+                    mineru_language=self.settings_form.get("ocr_mineru_language", "ch"),
                 ),
                 office=OfficeSettings(
                     converter=self.settings_form.get("office_converter", "auto"),
@@ -323,31 +333,40 @@ class SettingsHandlers:
         test_result_label.classes(remove="text-green-500 text-red-500", add="theme-text-muted")
 
         try:
-            if self.settings_form.get("ocr_provider", "paddle") == "vlm":
+            provider = self.settings_form.get("ocr_provider", "paddle")
+            if provider == "vlm":
                 from indexing.services.vlm_client import test_vlm_connection
 
-                base_url = self.settings_form.get("ocr_vlm_base_url", "").strip()
-                api_key = self.settings_form.get("ocr_vlm_api_key", "").strip()
-                model = self.settings_form.get("ocr_vlm_model", "").strip()
                 test_func = test_vlm_connection
-                filled = bool(base_url and api_key and model)
+                test_args = (
+                    self.settings_form.get("ocr_vlm_base_url", "").strip(),
+                    self.settings_form.get("ocr_vlm_api_key", "").strip(),
+                    self.settings_form.get("ocr_vlm_model", "").strip(),
+                )
+            elif provider == "mineru":
+                from indexing.services.mineru_client import test_mineru_connection
+
+                test_func = test_mineru_connection
+                test_args = (
+                    self.settings_form.get("ocr_mineru_token", "").strip(),
+                    self.settings_form.get("ocr_mineru_model_version", "vlm"),
+                )
             else:
                 from indexing.services.ocr_client import test_ocr_connection
 
-                base_url = self.settings_form.get("ocr_base_url", "").strip()
-                api_key = self.settings_form.get("ocr_api_key", "").strip()
-                model = self.settings_form.get("ocr_model", "PaddleOCR-VL")
                 test_func = test_ocr_connection
-                filled = bool(base_url and api_key)
+                test_args = (
+                    self.settings_form.get("ocr_base_url", "").strip(),
+                    self.settings_form.get("ocr_api_key", "").strip(),
+                    self.settings_form.get("ocr_model", "PaddleOCR-VL"),
+                )
 
-            if not filled:
+            if not all(test_args):
                 test_result_label.set_text(t("settings_ocr.test_failed", error="请填写完整配置"))
                 test_result_label.classes(remove="theme-text-muted", add="text-red-500")
                 return
 
-            success, message = await run_sync(
-                test_func, base_url, api_key, model
-            )
+            success, message = await run_sync(test_func, *test_args)
 
             if success:
                 test_result_label.set_text(t("settings_ocr.test_success"))

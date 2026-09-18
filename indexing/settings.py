@@ -40,6 +40,22 @@ def generate_api_key(length: int = 32) -> str:
 # 配置与默认数据目录不依赖当前工作目录，也不向 site-packages / .app 内写入。
 DEFAULT_DATA_PATH = get_default_data_dir()
 
+# MinerU 的单文件上限（服务端硬限制，超出返回 -60005）。
+# 定义在这里而不是 mineru_client：get_parser_max_size() 要用它，
+# 而 mineru_client 反过来要读 get_ocr_config()，放那边会形成循环导入。
+MINERU_MAX_FILE_SIZE = 200 * 1024 * 1024
+
+# MinerU 文档语言的合法取值（官方「language 取值参考」全表）。
+# 官方注明该参数仅影响 OCR 阶段，中日英混排文档保持默认 ch 即可；
+# 与语言族包（latin/arabic/…）对应的是整族共用一套 OCR 模型。
+MINERU_LANGUAGES = (
+    ("ch", "ch"), ("ch_server", "ch_server"), ("en", "en"),
+    ("japan", "japan"), ("korean", "korean"), ("chinese_cht", "chinese_cht"),
+    ("latin", "latin"), ("arabic", "arabic"), ("cyrillic", "cyrillic"),
+    ("east_slavic", "east_slavic"), ("devanagari", "devanagari"),
+    ("ta", "ta"), ("te", "te"), ("ka", "ka"), ("th", "th"), ("el", "el"),
+)
+
 
 class EmbeddingSettings(BaseModel):
     """嵌入模型配置"""
@@ -137,10 +153,12 @@ class OcrSettings(BaseModel):
     provider 选择解析后端：
     - "paddle": PaddleOCR 兼容服务，版面还原并产出插图（异步作业接口）
     - "vlm": 自定义多模态模型，逐页图片转 Markdown（OpenAI chat/completions 接口），不产出插图
+    - "mineru": mineru.net 精准解析 API，版面还原并产出插图（文件上传 + 批量结果接口）
 
-    所选后端的地址或密钥为空时，PDF 回落到本地 PyMuPDF 文本层解析。
+    所选后端的凭据填全时才启用。MinerU 未填 Token 同样视为未配置，
+    与其他后端一样回落到本地 PyMuPDF 文本层，不做静默降级。
     """
-    provider: str = "paddle"  # paddle | vlm
+    provider: str = "paddle"  # paddle | vlm | mineru
 
     # PaddleOCR 兼容服务
     base_url: str = ""  # OCR 服务地址，如官方 https://paddleocr.aipaddle.com
@@ -154,6 +172,12 @@ class OcrSettings(BaseModel):
     vlm_model: str = ""  # 需为支持图片输入的模型
     vlm_dpi: int = 150  # 页面渲染精度，越高越清晰也越费 token
     vlm_concurrency: int = 4  # 同时在途的单页请求数
+
+    # MinerU 精准解析（mineru.net API v4）
+    mineru_token: str = ""  # 注册 mineru.net 后申请
+    mineru_model_version: str = "vlm"  # pipeline | vlm；官方默认 pipeline，vlm 解析质量更好
+    mineru_is_ocr: bool = False  # 强制走 OCR，扫描件解析不出内容时开启
+    mineru_language: str = "ch"  # 文档语言，仅影响 OCR 阶段；取值见 MINERU_LANGUAGES
 
 
 class OfficeSettings(BaseModel):
@@ -343,18 +367,30 @@ def get_performance_config() -> PerformanceSettings:
 
 
 def get_pdf_parser() -> str:
-    """返回 PDF 解析后端: "paddle" | "vlm" | "local"。
+    """返回 PDF 解析后端: "paddle" | "vlm" | "mineru" | "local"。
 
-    所选后端的地址与密钥都填全时才启用，否则回落到本地 PyMuPDF 文本层。
+    所选后端的凭据填全时才启用，否则回落到本地 PyMuPDF 文本层。
     """
     ocr = get_ocr_config()
     if ocr.provider == "vlm":
         if ocr.vlm_base_url.strip() and ocr.vlm_api_key.strip() and ocr.vlm_model.strip():
             return "vlm"
         return "local"
+    if ocr.provider == "mineru":
+        return "mineru" if ocr.mineru_token.strip() else "local"
     if ocr.base_url.strip() and ocr.api_key.strip():
         return "paddle"
     return "local"
+
+
+def get_parser_max_size() -> Optional[int]:
+    """当前生效解析后端的单文件上限（字节）；None 表示仅受全局 MAX_FILE_SIZE 约束。
+
+    限制绑定"当前生效的后端"而不是对所有后端取交集：provider 是单选的，
+    没配 MinerU 的用户不该因此丧失导入大文件的能力。
+    等出现第二个受限后端再把 if 换成映射表。
+    """
+    return MINERU_MAX_FILE_SIZE if get_pdf_parser() == "mineru" else None
 
 
 def is_mcp_auth_enabled(service: McpService = "retrieval") -> bool:

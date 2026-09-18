@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 
 from ..database import get_db_cursor
-from ..settings import get_settings
+from ..settings import get_parser_max_size, get_settings
 from ..repositories import FileRepository, ChunkRepository
 from . import task_service
 from .task_service import serialized_mutation
@@ -21,7 +21,24 @@ import logging
 logger = logging.getLogger(__name__)
 _file_repo = FileRepository()
 _chunk_repo = ChunkRepository()
+# 单文件大小上限（500MB）。上传与解析全程流式（>1MB 由 NiceGUI spool 到临时
+# 文件，PDF 逐页解析），放宽上限不会抬高内存峰值；真正的处理闸门是
+# converter.MAX_PDF_PAGES，500MB 大致对应 300dpi 彩色扫描的数百页。
+# 解析后端另有更严的限制时以 get_max_file_size() 为准。
 MAX_FILE_SIZE = 500 * 1024 * 1024
+
+
+def get_max_file_size() -> int:
+    """当前解析后端的单文件上限；后端没有额外限制时用全局上限。
+
+    解析后端由 ocr.provider 单选，限制只跟着当前选中的那个走；
+    切换后端只影响之后导入的文件，已入库的解析结果不受影响。
+    """
+    return get_parser_max_size() or MAX_FILE_SIZE
+
+
+def _file_too_large_message(limit: int) -> str:
+    return f"单文件不能超过 {limit // (1024 * 1024)} MiB"
 
 
 def get_files_dir():
@@ -100,8 +117,10 @@ def validate_import(filename, size):
     extension = Path(filename).suffix.lower()
     if extension not in ChunkerFactory.get_supported_extensions():
         raise BusinessError("UNSUPPORTED_FORMAT", f"不支持的文档格式：{extension}")
-    if size > MAX_FILE_SIZE:
-        raise BusinessError("FILE_TOO_LARGE", "单文件不能超过 500 MiB")
+    limit = get_max_file_size()
+    if size > limit:
+        # 先于快照复制拒绝，避免为一份注定失败的文件白拷一份哈希
+        raise BusinessError("FILE_TOO_LARGE", _file_too_large_message(limit))
     from .office_convert import CONVERTER_ONLY_FORMATS, list_converters
     if extension in CONVERTER_ONLY_FORMATS and not list_converters():
         raise BusinessError("CONVERTER_UNAVAILABLE", f"解析 {extension} 需要 Microsoft Office 或 LibreOffice")
@@ -128,6 +147,8 @@ def import_file(source_path, filename=None, collection_ids=None, *, managed_orig
     # 先快照再哈希，避免源文件在查重和复制之间变化。
     with tempfile.TemporaryDirectory(prefix=".import-", dir=get_files_dir()) as directory:
         snapshot = Path(directory) / name
+        # 源文件可能在快照开始后被替换，故这里按真实读到的字节再判一次上限
+        limit = get_max_file_size()
         with source.open("rb") as reader, snapshot.open("xb") as writer:
             if not stat.S_ISREG(os.fstat(reader.fileno()).st_mode):
                 raise BusinessError("INVALID_INPUT", "仅允许导入普通文件")
@@ -135,8 +156,8 @@ def import_file(source_path, filename=None, collection_ids=None, *, managed_orig
             digest = hashlib.sha256()
             for block in iter(lambda: reader.read(1024 * 1024), b""):
                 size += len(block)
-                if size > MAX_FILE_SIZE:
-                    raise BusinessError("FILE_TOO_LARGE", "单文件不能超过 500 MiB")
+                if size > limit:
+                    raise BusinessError("FILE_TOO_LARGE", _file_too_large_message(limit))
                 digest.update(block)
                 writer.write(block)
         file_hash = digest.hexdigest()

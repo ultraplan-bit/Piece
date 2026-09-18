@@ -26,10 +26,10 @@ from app.ui.components import (
 )
 from app.utils import (
     format_size,
-    MAX_FILE_SIZE,
     MAX_TOTAL_UPLOAD_SIZE,
     MAX_UPLOAD_FILES,
 )
+from indexing.services.file_service import get_max_file_size
 
 # 上传已改为流式落盘到临时文件，可并行处理多个文件而不叠加内存峰值。
 _UPLOAD_CONCURRENCY = 3
@@ -602,7 +602,7 @@ class FileHandlers:
             t(
                 "files.upload_rejected",
                 max_files=MAX_UPLOAD_FILES,
-                max_size=MAX_FILE_SIZE // (1024 * 1024),
+                max_size=get_max_file_size() // (1024 * 1024),
                 max_total=MAX_TOTAL_UPLOAD_SIZE // (1024 * 1024 * 1024),
             ),
             type="negative",

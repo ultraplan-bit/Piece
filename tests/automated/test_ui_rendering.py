@@ -60,6 +60,41 @@ def test_missing_formula_resource_is_logged_once_per_content(components, monkeyp
     assert "unimathsymbols.txt" in caplog.text
 
 
+def _find_elements(element, type_name):
+    """按 NiceGUI 元素类型名递归查找子元素。"""
+    found = []
+    for child in getattr(getattr(element, "default_slot", None), "children", []):
+        if type(child).__name__ == type_name:
+            found.append(child)
+        found.extend(_find_elements(child, type_name))
+    return found
+
+
+def test_ocr_provider_toggle_keeps_label_case():
+    """Quasar 按钮默认 text-transform: uppercase（PaddleOCR 会显示成 PADDLEOCR）。
+
+    解析后端选项是产品名，必须保持原样，故带上 no-caps。
+    """
+    from nicegui import ui
+    from app.ui.views import settings_view
+
+    handlers = SimpleNamespace(
+        test_ocr_connection=lambda *args: None,
+        save_settings_form=lambda *args: None,
+    )
+    with ui.column() as container:
+        settings_view._render_ocr_settings({"ocr_provider": "mineru"}, handlers)
+
+    toggles = _find_elements(container, "Toggle")
+    assert len(toggles) == 1, "解析后端应是一个三选一开关"
+    toggle = toggles[0]
+    assert toggle._props.get("no-caps") is True
+    # 选项顺序与取值由 _values 维护，展示文案即用户看到的原文
+    assert toggle._values == ["paddle", "vlm", "mineru"]
+    labels = [option["label"] for option in toggle._props["options"]]
+    assert "PaddleOCR" in labels[0] and "PADDLEOCR" not in labels[0]
+
+
 def test_bundle_collects_formula_symbols(monkeypatch):
     """执行真实 spec 的收集逻辑，但不运行 Analysis/EXE 等耗时构建阶段。"""
     hooks = pytest.importorskip("PyInstaller.utils.hooks")

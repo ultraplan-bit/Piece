@@ -216,7 +216,7 @@ Key = Annotated[str, Field(min_length=1, max_length=180)] | None
 def create_api(runtime):
     from indexing.services import file_service as files, chunk_service as chunks, task_service as tasks
     from indexing.services import collection_service as collections, metadata_service
-    from indexing.services import config_service, maintenance_service as maintenance
+    from indexing.services import config_service, maintenance_service as maintenance, zotero_service
     from retrieval.service import search
     from app.logging_config import get_log_buffer
 
@@ -278,8 +278,8 @@ def create_api(runtime):
     def collection_ids(names):
         return collections.resolve_collection_ids(names)
 
-    def import_file(path, collections=None):
-        return files.import_file(path, collection_ids=collection_ids(collections))
+    def import_file(path, collections=None, properties=None):
+        return files.import_file(path, collection_ids=collection_ids(collections), metadata=properties)
 
     def create_file(filename, collections=None):
         return files.create_empty_file(filename, collection_ids(collections))
@@ -344,7 +344,7 @@ def create_api(runtime):
     register("file/get", "read", file_id_model, maintenance.file_info)
     register("file/create", "write", _model("FileCreate", filename=(str, ...), collections=(Names | None, None)), create_file)
     # 本机路径读取是管理权限，索引凭据不能借导入读取任意本机文件。
-    register("file/import", "admin", _model("FileImport", path=(str, ...), collections=(Names | None, None)), import_file)
+    register("file/import", "admin", _model("FileImport", path=(str, ...), collections=(Names | None, None), properties=(dict[str, Any] | None, None)), import_file)
     register("file/reindex", "write", _model("Reindex", file_id=(Id, ...), source=(Literal["original", "working"] | None, None), confirmed=(bool, False), request_key=(Key, None), dry_run=(bool, False)), reindex)
     register("file/delete", "write", _model("DeleteFiles", file_ids=(Ids, ...), **confirm), maintenance.delete_files)
     register("file/properties", "write", _model("Properties", file_id=(Id, ...), properties=(dict[str, Any], ...)), lambda file_id, properties: {"file_id": file_id, "updated": metadata_service.save_file_metadata(file_id, properties)})
@@ -371,6 +371,10 @@ def create_api(runtime):
     register("config/test", "admin", _model("ConfigTest", component=(Literal["embedding", "ocr", "office", "webdav"], ...)), config_service.test_config)
     register("sync/status", "admin", empty, maintenance.sync_status)
     register("sync/run", "admin", _model("SyncRun", confirmed=(bool, False)), maintenance.run_sync_job)
+    # Zotero 导入读取本机附件路径并复制入库，与 file/import 同为管理权限
+    zotero_scope = {"collection_keys": (Names | None, None), "collection_mode": (Literal["path", "top", "none"], "path"), "base_url": (str | None, None)}
+    register("zotero/preview", "admin", _model("ZoteroPreview", **zotero_scope), zotero_service.preview_import)
+    register("zotero/import", "admin", _model("ZoteroImport", **zotero_scope, collections=(Names | None, None)), zotero_service.import_library)
     register("logs", "admin", _model("Logs", level=(str | None, None), limit=(Limit, 100)), get_log_buffer)
     register("mcp-config", "admin", _model("McpConfig", service=(Literal["retrieval", "index"], "retrieval"), include_secrets=(bool, False)), maintenance.mcp_config)
 

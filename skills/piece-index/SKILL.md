@@ -11,7 +11,8 @@ description: 使用 Piece CLI 导入原始文档、创建笔记、批量新增�
 
 1. 执行 `{{PIECE_CLI}} --version`、`{{PIECE_CLI}} status --json`，确认用户指定的知识库、端口、文件与集合。服务未启动时只提示先启动 `{{PIECE_CLI}} serve`；**没有用户明确要求，不得自行启动后台服务**。不要擅自修改密钥、模型、数据目录或注册自启。
 2. 区分两条路径：
-   - **导入原始文档**：`{{PIECE_CLI}} file import "资料.pdf" --collection "已存在集合" --wait --timeout 300 --json`。先发现或按用户意图创建集合。目录导入先查看 `--recursive` 的帮助，保留 skipped/duplicate/failed 报告，不把跳过项说成成功。
+   - **导入原始文档**：`{{PIECE_CLI}} file import "资料.pdf" --collection "已存在集合" --wait --timeout 300 --json`。先发现或按用户意图创建集合。目录导入先查看 `--recursive` 的帮助，保留 skipped/excluded/duplicate/failed 报告，不把跳过项说成成功。导入 Obsidian vault 时加 `--recursive --skip-link-notes`，隐藏目录（`.obsidian`、`.trash`）默认跳过，模板或附件目录用 `--exclude templates --exclude attachments` 排除。
+   - **导入 Zotero 文献库**：要求本机 Zotero 7+ 正在运行并已开启「设置 → 高级 → 允许本机其他应用程序与 Zotero 通信」。先 `{{PIECE_CLI}} zotero preview --json` 查看集合、可导入与跳过的条目，再 `{{PIECE_CLI}} zotero import --wait --timeout 600 --json`；`--zotero-collection KEY` 限定范围，`--collection-mode path|top|none` 决定 Zotero 集合如何映射为 Piece 集合。返回 `ZOTERO_DISABLED` 时提示用户开启上述开关，`ZOTERO_UNAVAILABLE` 时提示启动 Zotero。
    - **直接写卡片**：先 `{{PIECE_CLI}} file create "项目笔记" --json` 得到 `file_id`；将卡片写入 UTF-8 JSON 文件，每项只含 `doc_title`、`chunk_text`，再 `{{PIECE_CLI}} chunk batch-add FILE_ID --input cards.json --request-id UNIQUE_KEY --wait --timeout 300 --json`。创建空笔记不是解析文档。
 3. 保存所有已受理的 `task_id/task_ids` 和请求键。受理只表示已持久化入队，**不表示索引完成**。一次批量最多 50 张，标题和正文合计最多 200000 字符。
 4. 使用 CLI 的 `--wait` 或 `{{PIECE_CLI}} task wait ID... --timeout 300 --json` 获取终态，不另写轮询脚本。只有 `all_succeeded` 或所有任务 `completed` 才可报告成功；`all_done` 也可能包含失败或取消。

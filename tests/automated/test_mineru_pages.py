@@ -5,6 +5,7 @@
 """
 
 import json
+import logging
 import zipfile
 from pathlib import Path
 
@@ -144,10 +145,141 @@ def test_images_are_extracted_and_referenced_by_work_dir(mineru, tmp_path):
     }])
 
     image_dir = tmp_path / "working" / DOC_NAME
-    assert pages[0].page_text == f'<img src="{DOC_NAME}/ab-cd.jpg">\n\n图 1'
+    # 图与图注之间是单换行：空行是切分器的首选切点，会把图和说明拆到两张卡片
+    assert pages[0].page_text == f'<img src="{DOC_NAME}/ab-cd.jpg">\n图 1'
     assert (image_dir / "ab-cd.jpg").read_bytes() == b"jpeg-bytes"
     # 正文没引用的图不落盘
     assert not (image_dir / "unused.jpg").exists()
+
+
+def _jpeg(width: int, height: int) -> bytes:
+    import io
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height)).save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def test_caption_and_subfigure_labels_stay_with_their_images(mineru, tmp_path):
+    """vlm 后端把图注和子图标签放在紧随其后的 text 块里，必须与插图合成一段。
+
+    段落之间是空行，而空行是切分器的最高优先级切点：图和图注隔着空行就会
+    被拆到不同切片，留下一张只有若干 <img> 的卡片。
+    """
+    pages, _ = _run(mineru, tmp_path, 1, [{
+        "blocks": [
+            {"type": "text", "text": "正文一段。", "page_idx": 0},
+            {"type": "image", "img_path": "images/a.jpg", "page_idx": 0},
+            {"type": "text", "text": "(a) 甲", "page_idx": 0},
+            {"type": "image", "img_path": "images/b.jpg", "page_idx": 0},
+            {"type": "text", "text": "图 3 组合图说明\nFig.3 Composite", "page_idx": 0},
+            {"type": "text", "text": "后续正文。", "page_idx": 0},
+            # 没挨着插图的"表 N"说明保持独立段落，不能被吸进上一张图
+            {"type": "text", "text": "表 1 数据表", "page_idx": 0},
+            {"type": "table", "table_body": "<table><tr><td>1</td></tr></table>", "page_idx": 0},
+        ],
+        "images": {"a.jpg": _jpeg(300, 200), "b.jpg": _jpeg(300, 200)},
+    }])
+
+    assert pages[0].page_text == (
+        "正文一段。\n\n"
+        f'<img src="{DOC_NAME}/a.jpg">\n(a) 甲\n<img src="{DOC_NAME}/b.jpg">\n图 3 组合图说明\nFig.3 Composite\n\n'
+        "后续正文。\n\n"
+        "表 1 数据表\n\n"
+        "<table><tr><td>1</td></tr></table>"
+    )
+
+
+def test_long_text_after_image_is_not_treated_as_caption(mineru, tmp_path):
+    """以"图 N"开头的整段正文（如"图 2 展示了……"的长段落）不是图注。"""
+    long_text = "图 2 展示了" + "模型在各个数据集上的表现，" * 8
+    pages, _ = _run(mineru, tmp_path, 1, [{
+        "blocks": [
+            {"type": "image", "img_path": "images/a.jpg", "page_idx": 0},
+            {"type": "text", "text": long_text, "page_idx": 0},
+        ],
+        "images": {"a.jpg": _jpeg(300, 200)},
+    }])
+
+    assert pages[0].page_text == f'<img src="{DOC_NAME}/a.jpg">\n\n{long_text}'
+
+
+def test_decorative_small_images_are_dropped(mineru, tmp_path):
+    """刊头、logo、作者头像之类的小图不落盘，正文里的引用一并去掉。"""
+    pages, _ = _run(mineru, tmp_path, 1, [{
+        "blocks": [
+            {"type": "image", "img_path": "images/logo.jpg", "page_idx": 0},
+            {"type": "text", "text": "正文", "page_idx": 0},
+            {"type": "image", "img_path": "images/fig.jpg", "page_idx": 0},
+            {"type": "text", "text": "图 1 说明", "page_idx": 0},
+        ],
+        "images": {"logo.jpg": _jpeg(228, 65), "fig.jpg": _jpeg(640, 386)},
+    }])
+
+    image_dir = tmp_path / "working" / DOC_NAME
+    assert pages[0].page_text == f'正文\n\n<img src="{DOC_NAME}/fig.jpg">\n图 1 说明'
+    assert not (image_dir / "logo.jpg").exists()
+    assert (image_dir / "fig.jpg").exists()
+
+
+def test_unreadable_image_is_kept(tmp_path):
+    """读不出尺寸的图按保留处理，不能因为一张坏图丢掉整段引用。"""
+    archive_path = tmp_path / "result.zip"
+    _write_zip(archive_path, [], images={"odd.jpg": b"not-really-a-jpeg"})
+
+    with zipfile.ZipFile(archive_path) as archive:
+        text = mineru_client._store_images('<img src="images/odd.jpg">', archive, tmp_path / "doc")
+
+    assert text == '<img src="doc/odd.jpg">'
+    assert (tmp_path / "doc" / "odd.jpg").exists()
+
+
+def test_transient_batch_failure_is_retried(mineru, tmp_path, monkeypatch):
+    """服务端偶发在最后几页翻成 failed，重新提交同一批次即可，不能直接判死整份文档。"""
+    monkeypatch.setattr(mineru_client, "BATCH_RETRY_DELAY", 0.0)
+    attempts = {"n": 0}
+    original_wait = _FakeClient.wait_batch
+
+    def flaky_wait(self, batch_id, file_name, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise mineru_client.MineruTransientError("MinerU 任务失败: parsing failed, please try again later")
+        return original_wait(self, batch_id, file_name, **kwargs)
+
+    monkeypatch.setattr(_FakeClient, "wait_batch", flaky_wait)
+    pages, _ = _run(mineru, tmp_path, 1, [[{"type": "text", "text": "正文", "page_idx": 0}]])
+
+    assert [page.page_text for page in pages] == ["正文"]
+    assert attempts["n"] == 3
+    # 每次重试都重新申请上传链接，而不是复用已判失败的 batch
+    assert len(_FakeClient.calls) == 3
+
+
+def test_transient_failure_gives_up_after_max_attempts(mineru, tmp_path, monkeypatch):
+    monkeypatch.setattr(mineru_client, "BATCH_RETRY_DELAY", 0.0)
+
+    def always_fail(self, batch_id, file_name, **kwargs):
+        raise mineru_client.MineruTransientError("parsing failed")
+
+    monkeypatch.setattr(_FakeClient, "wait_batch", always_fail)
+    with pytest.raises(mineru_client.MineruTransientError, match="parsing failed"):
+        _run(mineru, tmp_path, 1, [[{"type": "text", "text": "正文", "page_idx": 0}]])
+    assert len(_FakeClient.calls) == mineru_client.MAX_BATCH_ATTEMPTS
+
+
+def test_deterministic_failure_is_not_retried(mineru, tmp_path, monkeypatch):
+    """Token 无效、额度用尽这类确定性错误重试只会白白等待。"""
+    monkeypatch.setattr(mineru_client, "BATCH_RETRY_DELAY", 0.0)
+
+    def auth_fail(self, name, **options):
+        type(self).calls.append({"name": name, **options})
+        raise mineru_client.MineruError("MinerU 认证失败 (401)，请检查 Token")
+
+    monkeypatch.setattr(_FakeClient, "request_upload", auth_fail)
+    with pytest.raises(mineru_client.MineruError, match="认证失败"):
+        _run(mineru, tmp_path, 1, [[{"type": "text", "text": "正文", "page_idx": 0}]])
+    assert len(_FakeClient.calls) == 1
 
 
 def test_image_reference_survives_the_ui_rewrite(mineru, tmp_path):
@@ -160,7 +292,10 @@ def test_image_reference_survives_the_ui_rewrite(mineru, tmp_path):
     }])
 
     rewritten = _absolutize_image_srcs(pages[0].page_text)
-    assert rewritten == f'<img src="/working/{DOC_NAME}/ab-cd.jpg">'
+    # 路径按 URL 编码发给浏览器，解码后必须还是同一个相对引用
+    from urllib.parse import unquote
+    assert rewritten.startswith('<img src="/working/')
+    assert unquote(rewritten) == f'<img src="/working/{DOC_NAME}/ab-cd.jpg">'
 
 
 def test_missing_image_reference_is_left_alone(tmp_path):
@@ -200,8 +335,42 @@ def test_block_rendering_covers_layout_types():
     assert render({"type": "header", "text": "页眉"}) == ""
     assert render({"type": "footer", "text": "页脚"}) == ""
     assert render({"type": "page_number", "text": "3"}) == ""
-    # 未知类型不能拖垮整页
-    assert render({"type": "brand_new_block", "text": "?"}) == ""
+    # 在线服务把参考文献每条输出为顶层 ref_text 块，不认它整份文档的参考文献都会丢
+    assert render({"type": "ref_text", "text": "[1] 甲. 乙[J]. 丙, 2020."}) == "[1] 甲. 乙[J]. 丙, 2020."
+    # 未知类型不能拖垮整页：带文本的按正文保留，没有文本才跳过
+    assert render({"type": "brand_new_block", "text": "?"}) == "?"
+    assert render({"type": "brand_new_block"}) == ""
+
+
+def test_unknown_block_type_is_warned_once(monkeypatch, caplog):
+    """新块类型只在首次出现时告警：一种类型一条，不按块数刷屏。"""
+    monkeypatch.setattr(mineru_client, "_UNKNOWN_TYPES_SEEN", set())
+    caplog.set_level(logging.WARNING, logger=mineru_client.__name__)
+    for _ in range(3):
+        mineru_client._render_block({"type": "brand_new_block", "text": "?"})
+    warnings = [
+        record for record in caplog.records
+        if record.name == mineru_client.__name__ and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "brand_new_block" in warnings[0].getMessage()
+
+
+def test_reference_entries_are_kept_on_their_pages(mineru, tmp_path):
+    """参考文献页：标题是 text 块，条目是 ref_text 块，二者都得进正文且分页正确。
+
+    实际文档里参考文献跨页时，后一页只有 ref_text 块；漏掉它那页就只剩
+    页尾的基金项目，知识卡片上参考文献凭空消失。
+    """
+    pages, _ = _run(mineru, tmp_path, 2, [[
+        {"type": "text", "text": "参考文献：", "text_level": 2, "page_idx": 0},
+        {"type": "ref_text", "text": "[1] 甲", "page_idx": 0},
+        {"type": "ref_text", "text": "[2] 乙", "page_idx": 1},
+        {"type": "text", "text": "基金项目：", "text_level": 2, "page_idx": 1},
+    ]])
+
+    assert pages[0].page_text == "## 参考文献：\n\n[1] 甲"
+    assert pages[1].page_text == "[2] 乙\n\n## 基金项目："
 
 
 def test_table_body_drops_html_wrapper():

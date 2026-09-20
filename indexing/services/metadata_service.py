@@ -104,6 +104,27 @@ def decode_metadata(metadata_json: Optional[str]) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+# 属性总量上限：超过会挤占 UI 面板，也不适合作为出处信息整段回给模型
+MAX_METADATA_LENGTH = 20000
+
+
+def encode_metadata(metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+    """校验并序列化属性；None 或空字典返回 None，表示不写属性。"""
+    if metadata is None:
+        return None
+    if not isinstance(metadata, dict):
+        raise BusinessError("INVALID_INPUT", f"文件属性必须为不超过 {MAX_METADATA_LENGTH} 字符的 JSON 对象")
+    if not metadata:
+        return None
+    try:
+        encoded = json.dumps(metadata, ensure_ascii=False)
+    except (TypeError, ValueError):
+        raise BusinessError("INVALID_INPUT", "文件属性必须可序列化为 JSON") from None
+    if len(encoded) > MAX_METADATA_LENGTH:
+        raise BusinessError("INVALID_INPUT", f"文件属性必须为不超过 {MAX_METADATA_LENGTH} 字符的 JSON 对象")
+    return encoded
+
+
 @serialized_mutation
 def save_file_metadata(file_id: int, metadata: Dict[str, Any]) -> bool:
     """
@@ -119,10 +140,6 @@ def save_file_metadata(file_id: int, metadata: Dict[str, Any]) -> bool:
     if not _file_repo.exists(file_id):
         raise BusinessError("NOT_FOUND", "文件不存在")
     ensure_file_idle(file_id)
-    if not isinstance(metadata, dict) or len(json.dumps(metadata, ensure_ascii=False)) > 20000:
-        raise BusinessError("INVALID_INPUT", "文件属性必须为不超过 20000 字符的 JSON 对象")
-    if not metadata:
-        return _file_repo.update_metadata(file_id, None)
-    return _file_repo.update_metadata(
-        file_id, json.dumps(metadata, ensure_ascii=False)
-    )
+    if not isinstance(metadata, dict):
+        raise BusinessError("INVALID_INPUT", f"文件属性必须为不超过 {MAX_METADATA_LENGTH} 字符的 JSON 对象")
+    return _file_repo.update_metadata(file_id, encode_metadata(metadata))

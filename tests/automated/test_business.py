@@ -173,3 +173,22 @@ def test_scope_mismatch_never_searches_whole_library(knowledge_base):
     assert found["candidates"][0]["file_id"] == file_id
     assert "chunk_text" not in found["candidates"][0]
     assert asyncio.run(search("研究方法", collections=["不存在的集合"]))["candidates"] == []
+
+
+def test_import_metadata_written_at_registration(knowledge_base):
+    """外部来源的属性随登记写入；重复文件不覆盖；PDF 路径重索引不清空。"""
+    from indexing.services import metadata_service
+    source = knowledge_base.path / "文献.md"
+    source.write_text("正文内容", encoding="utf-8")
+    accepted = files.import_file(source, metadata={"author": "张三", "year": 2024})
+    file_id = accepted["file_id"]
+    assert metadata_service.get_file_metadata(file_id) == {"author": "张三", "year": 2024}
+    again = files.import_file(source, metadata={"author": "李四"})
+    assert again["duplicate"] and again["file_id"] == file_id
+    assert metadata_service.get_file_metadata(file_id)["author"] == "张三"
+    knowledge_base.drain()
+    assert tasks.get_task(accepted["task_id"])["status"] == "completed"
+    # 正文无 frontmatter 时解析结果为空字典，发布阶段不得覆盖登记时写入的属性
+    assert metadata_service.get_file_metadata(file_id) == {"author": "张三", "year": 2024}
+    with pytest.raises(BusinessError, match="JSON 对象"):
+        files.import_file(knowledge_base.path / "文献.md", filename="另一份.md", metadata={"x": "y" * 30000})

@@ -71,6 +71,7 @@ On the **Files** page, click **+ → Upload file** and pick the documents to imp
 
 - **Scans, complex formulas, or tables**: Configure a PaddleOCR service, MinerU, or a custom multimodal model under **Settings → PDF Parsing Settings**. Follow the prompts to enter the service address and key, then test the connection. PDFs with a usable text layer can be imported without this setup.
 - **Word / PowerPoint**: Installing Microsoft Office or LibreOffice is recommended. Formats such as `.doc`, `.ppt`, `.rtf`, `.odt`, and `.odp` require a working conversion tool.
+- **Existing Obsidian notes or Zotero papers**: In the same menu, **Import local folder** brings in a whole Obsidian vault (skipping `.obsidian`, templates, and link-only index pages), and **Import from Zotero** imports every item that has a PDF together with its authors, year, DOI, and other properties. Zotero 7 or newer must be running with "Allow other applications on this computer to communicate with Zotero" enabled under Settings → Advanced. Both are one-time copies and never modify the source library.
 
 After importing, open **Recall Test** and ask a relevant question to check whether Piece finds the content you need.
 

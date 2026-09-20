@@ -328,10 +328,10 @@ def test_import_checks_linked_ancestors_and_subdirectories(tmp_path):
     else:
         alias.symlink_to(root, target_is_directory=True)
     try:
-        candidates, skipped = cli._import_candidates([alias / "sub" / "file.md", root], False)
+        candidates, skipped, _ = cli.import_candidates([alias / "sub" / "file.md", root], False)
         assert not candidates
         assert len(skipped) == 2
-        candidates, skipped = cli._import_candidates([root], True)
+        candidates, skipped, _ = cli.import_candidates([root], True)
         assert candidates == [file] and not skipped
     finally:
         if sys.platform == "win32":
@@ -346,6 +346,26 @@ def test_logs_mcp_config_and_search_diagnostics_contracts(endpoint, capsys):
     assert code == 0 and result["success"] is True
     assert endpoint.calls[-1]["path"] == "/api/v1/logs"
     assert endpoint.calls[-1]["payload"] == {"level": "ERROR", "limit": 5}
+
+    code, result, _ = invoke(endpoint, capsys, "zotero", "preview", "--zotero-collection", "ABCD1234", "--collection-mode", "top")
+    assert code == 0 and endpoint.calls[-1]["path"] == "/api/v1/zotero/preview"
+    assert endpoint.calls[-1]["payload"] == {"collection_keys": ["ABCD1234"], "collection_mode": "top", "base_url": None}
+
+    endpoint.routes["/api/v1/zotero/import"] = lambda *a: make_envelope(True, "accepted", {"task_ids": [5], "accepted_count": 1})
+    endpoint.routes["/api/v1/task/query"] = lambda *a: complete([5])
+    code, result, _ = invoke(endpoint, capsys, "zotero", "import", "--collection", "论文", "--wait")
+    assert code == 0 and result["success"] and result["data"]["task_ids"] == [5]
+    import_call = next(c for c in endpoint.calls if c["path"] == "/api/v1/zotero/import")
+    assert import_call["payload"] == {"collection_keys": None, "collection_mode": "path", "base_url": None, "collections": ["论文"]}
+
+    body = endpoint.config / "props.json"
+    body.write_text(json.dumps({"source": "obsidian"}), encoding="utf-8")
+    note = endpoint.config / "笔记.md"
+    note.write_text("正文", encoding="utf-8")
+    endpoint.routes["/api/v1/file/import"] = lambda *a: make_envelope(True, "accepted", {"file_id": 1, "task_ids": [9]})
+    code, result, _ = invoke(endpoint, capsys, "file", "import", str(note), "--properties", str(body))
+    assert code == 0 and result["data"]["excluded"] == []
+    assert endpoint.calls[-1]["payload"] == {"path": str(note), "collections": None, "properties": {"source": "obsidian"}}
 
     code, result, _ = invoke(endpoint, capsys, "mcp-config", "--service", "index")
     assert code == 0 and result["success"] is True
@@ -430,3 +450,39 @@ def test_skill_warning_goes_to_stderr_without_json(tmp_path, capsys):
     captured = capsys.readouterr()
     assert code == 0
     assert "未找到该目标的配置" in captured.err
+
+
+def test_import_excludes_hidden_patterns_and_link_notes(tmp_path):
+    """Obsidian vault 导入：隐藏目录默认跳过，--exclude 按段匹配，纯链接笔记可选跳过。"""
+    vault = tmp_path / "vault"
+    (vault / ".obsidian").mkdir(parents=True)
+    (vault / ".obsidian" / "app.json").write_text("{}", encoding="utf-8")
+    (vault / "templates").mkdir()
+    (vault / "templates" / "daily.md").write_text("{{date}}", encoding="utf-8")
+    (vault / "notes").mkdir()
+    note = vault / "notes" / "想法.md"
+    note.write_text("---\ntitle: 想法\n---\n# 想法\n\n这是一段真正的正文，讨论 [[另一篇]] 和 [[第三篇]] 与 [[第四篇]] 的关系。"
+                    "原子笔记通常只有几百字，但已经足以承载一个完整的想法，导入后一篇对应一张卡片，"
+                    "这正是知识库最理想的粒度，不应被当作索引页排除掉。", encoding="utf-8")
+    moc = vault / "MOC.md"
+    moc.write_text("# 索引\n\n- [[想法]]\n- [[另一篇]]\n- [[第三篇]]\n", encoding="utf-8")
+    (vault / "notes" / "draft.md").write_text("草稿", encoding="utf-8")
+
+    candidates, skipped, excluded = cli.import_candidates([vault], True)
+    assert not skipped
+    assert set(candidates) == {moc, vault / "notes" / "draft.md", note, vault / "templates" / "daily.md"}
+    assert [e["reason"] for e in excluded] == ["hidden"]
+    assert excluded[0]["path"] == str(vault / ".obsidian")
+
+    candidates, _, excluded = cli.import_candidates(
+        [vault], True, exclude=["templates", "notes/draft*"], skip_link_notes=True, include_hidden=True)
+    assert set(candidates) == {note, vault / ".obsidian" / "app.json"}
+    reasons = {e["path"]: e["reason"] for e in excluded}
+    assert reasons[str(vault / "templates")] == "pattern: templates"
+    assert reasons[str(vault / "notes" / "draft.md")] == "pattern: notes/draft*"
+    assert reasons[str(moc)] == "link_note"
+    assert str(vault / ".obsidian") not in reasons
+    # 显式指定单个文件不受目录排除规则约束，但仍受链接笔记判定
+    candidates, _, excluded = cli.import_candidates([vault / "templates" / "daily.md", moc], False,
+                                                     exclude=["templates"], skip_link_notes=True)
+    assert candidates == [vault / "templates" / "daily.md"] and [e["reason"] for e in excluded] == ["link_note"]

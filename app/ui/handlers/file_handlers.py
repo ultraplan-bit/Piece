@@ -12,10 +12,11 @@ import asyncio
 
 from nicegui import ui, events
 
-from indexing.services import file_service, task_service
+from indexing.services import file_service, task_service, zotero_service
 from indexing.utils import await_completion, run_sync
 from indexing.services import chunk_service, collection_service, metadata_service
 from app.i18n import t
+from app.import_scan import import_candidates
 from app.ui.components import (
     card_dialog,
     collection_manage_dialog,
@@ -24,6 +25,7 @@ from app.ui.components import (
     file_create_dialog,
     file_properties_dialog,
 )
+from app.ui.import_dialogs import folder_import_dialog, zotero_import_dialog
 from app.utils import (
     format_size,
     MAX_TOTAL_UPLOAD_SIZE,
@@ -613,6 +615,57 @@ class FileHandlers:
         file_create_dialog(
             on_create=self._do_create_file,
         )
+
+    # ==================== 外部知识库一次性导入 ====================
+
+    def handle_import_folder(self):
+        """导入本机目录（Obsidian vault 等），规则与 CLI file import 相同。"""
+        folder_import_dialog(on_preview=self._preview_folder, on_import=self._import_folder)
+
+    async def _preview_folder(self, options: dict) -> dict:
+        candidates, skipped, excluded = await run_sync(
+            import_candidates, [options["path"]], options["recursive"],
+            exclude=options["exclude"], skip_link_notes=options["skip_link_notes"],
+        )
+        return {"candidates": candidates, "skipped": skipped, "excluded": excluded}
+
+    async def _import_folder(self, options: dict):
+        preview = await self._preview_folder(options)
+        collection_ids = list(self.state.get("active_collection_ids") or [])
+        accepted = duplicates = failed = 0
+        for path in preview["candidates"]:
+            try:
+                result = await run_sync(file_service.import_file, path, None, collection_ids)
+            except (ValueError, OSError):
+                failed += 1
+                continue
+            if result["duplicate"]:
+                duplicates += 1
+            else:
+                accepted += 1
+        ui.notify(t("import.folder_done", accepted=accepted, duplicates=duplicates,
+                    failed=failed, excluded=len(preview["excluded"]) + len(preview["skipped"])),
+                  type="positive" if accepted else "warning")
+        await self.load_files()
+
+    def handle_import_zotero(self):
+        """从本机运行中的 Zotero 导入带 PDF 的条目。"""
+        zotero_import_dialog(on_preview=self._preview_zotero, on_import=self._import_zotero)
+
+    async def _preview_zotero(self, collection_keys, mode):
+        return await run_sync(zotero_service.preview_import, collection_keys, mode)
+
+    async def _import_zotero(self, collection_keys, mode):
+        try:
+            result = await run_sync(zotero_service.import_library, collection_keys, mode)
+        except ValueError as exc:
+            ui.notify(str(exc), type="negative")
+            return
+        ui.notify(t("import.zotero_done", accepted=result["accepted_count"], duplicates=result["duplicate_count"],
+                    failed=result["failed_count"], skipped=result["skipped_count"]),
+                  type="positive" if result["accepted_count"] else "warning")
+        await self.load_collections()
+        await self.load_files()
 
     async def _do_create_file(self, filename: str):
         """执行创建文件"""

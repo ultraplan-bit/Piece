@@ -29,6 +29,7 @@ from app.client import (
     make_envelope,
     read_json_file,
 )
+from app.import_scan import import_candidates
 from app.skills import get_version
 
 VERSION = get_version()
@@ -216,6 +217,13 @@ def _build_parser() -> CliParser:
     file_import.add_argument("--recursive", action="store_true", help="递归导入目录")
     file_import.add_argument("--collection", dest="collections", action="append",
                              help="已存在的完整集合名，可重复")
+    file_import.add_argument("--properties", help="附加到每个导入文件的属性：JSON 对象文件路径，或 - 读 stdin")
+    file_import.add_argument("--exclude", action="append", default=[], metavar="GLOB",
+                             help="目录导入时排除的相对路径或名称通配（如 templates、attachments/*），可重复")
+    file_import.add_argument("--include-hidden", action="store_true",
+                             help="目录导入时不跳过以点开头的隐藏目录和文件（默认跳过 .obsidian、.trash 等）")
+    file_import.add_argument("--skip-link-notes", action="store_true",
+                             help="跳过几乎只有链接的 Markdown 索引笔记（Obsidian 的 MOC / 目录页）")
     _add_wait_options(file_import)
 
     file_reindex = file_commands.add_parser("reindex", help="重新索引文件")
@@ -407,6 +415,21 @@ def _build_parser() -> CliParser:
     _add_runtime_options(logs)
     logs.add_argument("--level")
     logs.add_argument("--limit", type=_positive, default=100)
+
+    zotero_parser = commands.add_parser("zotero", help="从本机运行中的 Zotero 一次性导入带 PDF 的条目")
+    zotero_commands = zotero_parser.add_subparsers(dest="zotero_command", required=True)
+    zotero_preview = zotero_commands.add_parser("preview", help="列出 Zotero 集合与将要导入的条目，不写入")
+    zotero_import = zotero_commands.add_parser("import", help="导入条目：PDF 复制入库，元数据写入文件属性")
+    for sub in (zotero_preview, zotero_import):
+        _add_runtime_options(sub)
+        sub.add_argument("--zotero-collection", dest="collection_keys", action="append", metavar="KEY",
+                         help="只导入该 Zotero 集合（含子集合）的条目，可重复；不指定则整库")
+        sub.add_argument("--collection-mode", choices=("path", "top", "none"), default="path",
+                         help="Zotero 集合映射：path=按「父/子」路径建集合（默认），top=只取顶层，none=不映射")
+        sub.add_argument("--base-url", help="Zotero Local API 地址（默认 http://127.0.0.1:23119/api）")
+    zotero_import.add_argument("--collection", dest="collections", action="append",
+                               help="额外归入的已存在 Piece 集合名，可重复")
+    _add_wait_options(zotero_import)
 
     mcp_config = commands.add_parser("mcp-config", help="取得 MCP 客户端配置")
     _add_runtime_options(mcp_config)
@@ -721,72 +744,13 @@ def _with_wait(client: PieceClient, initial: dict[str, Any], args: argparse.Name
     return make_envelope(True, "任务已全部成功完成", data), 0
 
 
-def _import_candidates(paths: list[Path], recursive: bool) -> tuple[list[Path], list[dict[str, str]]]:
-    """展开导入目标；符号链接在 resolve 之前判定，读取错误如实报告为 skipped。"""
-    candidates: list[Path] = []
-    skipped: list[dict[str, str]] = []
-    seen: set[str] = set()
-
-    def linked(path: Path) -> bool:
-        # 包含祖先目录以及 Windows junction；必须在 resolve 之前检查。
-        return any(p.is_symlink() or p.is_junction() for p in (path, *path.parents))
-
-    def add_file(path: Path) -> None:
-        if linked(path):
-            skipped.append({"path": str(path), "reason": "linked_path"})
-            return
-        absolute = path.expanduser().resolve()
-        key = os.path.normcase(str(absolute))
-        if key in seen:
-            skipped.append({"path": str(absolute), "reason": "duplicate"})
-            return
-        seen.add(key)
-        if not absolute.is_file():
-            skipped.append({"path": str(absolute), "reason": "not_file"})
-            return
-        candidates.append(absolute)
-
-    def on_walk_error(error: OSError) -> None:
-        skipped.append({"path": str(error.filename or ""), "reason": f"read_error: {error.strerror or error}"})
-
-    for raw in paths:
-        raw = raw.expanduser()
-        if linked(raw):
-            skipped.append({"path": str(raw), "reason": "linked_path"})
-            continue
-        absolute = raw.resolve()
-        if absolute.is_dir():
-            if not recursive:
-                try:
-                    children = sorted(absolute.iterdir(), key=lambda item: str(item).casefold())
-                except OSError as exc:
-                    on_walk_error(exc)
-                    continue
-                for child in children:
-                    if linked(child):
-                        skipped.append({"path": str(child), "reason": "symlink"})
-                    elif child.is_dir():
-                        skipped.append({"path": str(child), "reason": "subdirectory_not_recursive"})
-                    else:
-                        add_file(child)
-            else:
-                for root, dirs, files in os.walk(absolute, topdown=True, followlinks=False, onerror=on_walk_error):
-                    root_path = Path(root)
-                    for directory in list(dirs):
-                        directory_path = root_path / directory
-                        if linked(directory_path):
-                            skipped.append({"path": str(directory_path), "reason": "symlink_directory"})
-                            dirs.remove(directory)
-                    for filename in sorted(files, key=str.casefold):
-                        add_file(root_path / filename)
-        else:
-            add_file(absolute)
-    return candidates, skipped
-
-
 def _file_import(client: PieceClient, args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     collections = _clean_strings(args.collections, "collection")
-    candidates, skipped = _import_candidates(args.paths, args.recursive)
+    properties = _object_input(args.properties) if getattr(args, "properties", None) else None
+    candidates, skipped, excluded = import_candidates(
+        args.paths, args.recursive, exclude=args.exclude, include_hidden=args.include_hidden,
+        skip_link_notes=args.skip_link_notes,
+    )
     accepted: list[int] = []
     failures: list[dict[str, Any]] = []
     items: list[dict[str, Any]] = []
@@ -795,6 +759,7 @@ def _file_import(client: PieceClient, args: argparse.Namespace) -> tuple[dict[st
             result = client.post("/api/v1/file/import", {
                 "path": str(path),
                 "collections": collections or None,
+                "properties": properties,
             })
         except (ClientError, KeyboardInterrupt) as exc:
             error = exc if isinstance(exc, ClientError) else ClientError("导入被中断，当前受理结果未知", code="SUBMISSION_INTERRUPTED")
@@ -822,10 +787,12 @@ def _file_import(client: PieceClient, args: argparse.Namespace) -> tuple[dict[st
         "task_ids": accepted,
         "items": items,
         "skipped": skipped,
+        "excluded": excluded,
         "failures": failures,
         "accepted_count": len(accepted),
         "duplicate_count": sum(bool((item["response"].get("data") or {}).get("duplicate")) for item in items),
         "skipped_count": len(skipped),
+        "excluded_count": len(excluded),
         "failed_count": len(failures),
     }
     initial_success = bool(candidates) and not failures and not skipped
@@ -1100,6 +1067,16 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
     if command == "logs":
         return _simple(client.post("/api/v1/logs", {"level": args.level, "limit": args.limit}))
+
+    if command == "zotero":
+        payload = {
+            "collection_keys": _clean_strings(args.collection_keys, "zotero-collection") or None,
+            "collection_mode": args.collection_mode, "base_url": args.base_url,
+        }
+        if args.zotero_command == "preview":
+            return _simple(client.post("/api/v1/zotero/preview", payload))
+        result = client.post("/api/v1/zotero/import", {**payload, "collections": _optional_names(args.collections)})
+        return _with_wait(client, result, args)
 
     if command == "mcp-config":
         return _simple(client.post("/api/v1/mcp-config", {

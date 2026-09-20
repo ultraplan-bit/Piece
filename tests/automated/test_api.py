@@ -22,6 +22,8 @@ def test_identity_permissions_and_origin(api, knowledge_base):
     assert api.post("/api/v1/file/create", json={"filename": "拒绝"}, headers=read).status_code == 403
     assert api.post("/api/v1/config/show", json={}, headers=write).status_code == 403
     assert api.post("/api/v1/file/import", json={"path": "anything.md"}, headers=write).status_code == 403
+    assert api.post("/api/v1/zotero/preview", json={}, headers=write).status_code == 403
+    assert api.post("/api/v1/zotero/import", json={"collection_mode": "tree"}).json()["error"]["code"] == "INVALID_INPUT"
     assert api.get("/api/v1/status", headers={"Origin": "http://evil.invalid"}).status_code == 403
     assert api.get("/api/v1/handshake", headers={"Host": "evil.invalid:8689"}).status_code == 403
     assert api.get("/working/anything.md").status_code == 404

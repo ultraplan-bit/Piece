@@ -182,6 +182,14 @@ def render_files_middle(
                                     t("files.upload"),
                                     on_click=file_handlers.open_file_picker,
                                 )
+                                ui.menu_item(
+                                    t("import.folder_menu"),
+                                    on_click=file_handlers.handle_import_folder,
+                                )
+                                ui.menu_item(
+                                    t("import.zotero_menu"),
+                                    on_click=file_handlers.handle_import_zotero,
+                                )
 
                         ui.button(
                             icon="delete_sweep",

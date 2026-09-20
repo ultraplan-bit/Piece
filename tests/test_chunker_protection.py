@@ -246,3 +246,48 @@ if __name__ == "__main__":
     print("=" * 60)
     print("测试完成")
     print("=" * 60)
+
+
+def test_strip_obsidian_noise_keeps_code_and_lone_markers():
+    from indexing.services.chunking.utils import strip_obsidian_noise
+    text = (
+        "正文 %%行内注释%% 继续\n"
+        "%%\n多行\n注释\n%%\n"
+        "```dataview\nTABLE file.name FROM #tag\n```\n"
+        "```python\nx = '%%' + '%%'\n```\n"
+        "~~~dataviewjs\ndv.list([])\n~~~\n"
+        "百分比 50%% 不成对时保留\n"
+    )
+    result = strip_obsidian_noise(text)
+    assert "行内注释" not in result and "多行" not in result
+    assert "TABLE file.name" not in result and "dv.list" not in result
+    assert "x = '%%' + '%%'" in result
+    assert "正文  继续" in result
+    assert "百分比 50%% 不成对时保留" in result
+    assert strip_obsidian_noise("普通文本") == "普通文本"
+
+
+def test_image_paragraph_is_not_split_and_image_only_chunks_are_merged():
+    """MinerU 把插图和图注用单换行连成一段，切分不能从段落中间切开，
+    也不能产出只剩若干 <img> 没有任何说明文字的切片。"""
+    from indexing.services.chunking.utils import merge_image_only_chunks
+
+    body = "这是正文句子。" * 60
+    figure = '<img src="d/a.jpg">\n(a) 甲\n<img src="d/b.jpg">\n图 1 组合图说明'
+    chunks = recursive_split(f"{body}\n\n{figure}\n\n{body}", chunk_size=500, overlap=100)
+
+    holders = [chunk for chunk in chunks if "<img" in chunk]
+    assert len(holders) == 1
+    assert figure in holders[0]
+    # 承载插图的切片必须带有正文，而不是一张只有图的卡片
+    assert "这是正文句子" in holders[0]
+
+    merged = merge_image_only_chunks(["前文" * 60, '<img src="x.jpg">\n<img src="y.jpg">', "后文" * 90], 500)
+    # 并入较短的那个邻居
+    assert merged == ['前文' * 60 + '\n\n<img src="x.jpg">\n<img src="y.jpg">', "后文" * 90]
+    # 相邻两段只有图片的切片各自并入，不会连锁把整页卷成一片
+    merged = merge_image_only_chunks(["前文" * 60, '<img src="x.jpg">', '<img src="y.jpg">', "后文" * 90], 500)
+    assert merged == ['前文' * 60 + '\n\n<img src="x.jpg">\n\n<img src="y.jpg">', "后文" * 90]
+    # 邻居都装不下时保留原样，宁可一张图卡也不产出超长切片
+    huge = "字" * 800
+    assert merge_image_only_chunks([huge, '<img src="x.jpg">'], 500) == [huge, '<img src="x.jpg">']

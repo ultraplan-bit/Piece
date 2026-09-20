@@ -26,6 +26,7 @@ from ..settings import (
 from ..utils import run_sync, serialize_float32
 from . import chunk_service, file_service, task_service
 from .chunking import ChunkerFactory, PageChunker
+from .chunking.utils import strip_obsidian_noise
 from .converter import convert_to_markdown, iter_pdf_pages
 from .embedding_client import get_embeddings_model
 from .metadata_service import parse_frontmatter
@@ -582,6 +583,9 @@ async def _process_regular_file(
     # 否则这段元数据会混进第一个切片污染检索
     metadata, content = await run_sync(parse_frontmatter, content)
     # 属性随成功发布的索引一起切换，失败不能提前覆盖现有属性。
+    if file_extension == ".md":
+        # Obsidian 笔记的 %% 注释和 dataview 查询块不是正文，不进切片
+        content = strip_obsidian_noise(content)
 
     await run_sync(
         working_file_path.write_text,

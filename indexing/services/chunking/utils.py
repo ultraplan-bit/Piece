@@ -28,6 +28,39 @@ _TABLE_STYLE_RE = re.compile(
 _HTML_TAG_RE = re.compile(r"<[^<>]{1,400}>")
 _HTML_DIV_RE = re.compile(r"<div\b[^>]*>.*?</div>", re.I | re.S)
 
+# 一个段落（连续的非空行）。MinerU 把插图和它的图注、子图标签用单换行连成
+# 一个段落，整段受保护，图和说明才不会被拆到两张卡片上
+_PARAGRAPH_RE = re.compile(r"[^\n]+(?:\n[^\n]+)*")
+_IMG_TAG_RE = re.compile(r"<img\b[^<>]*>", re.I)
+
+# 切片除去 <img> 标签后的正文少于这个字符数，就视为"只有图片"的切片：
+# 没有可检索的文字，卡片上也只是一串没说明的图，并入相邻切片才有上下文
+IMAGE_ONLY_MAX_TEXT = 80
+
+
+# Obsidian 语法中不属于正文的部分：%% 注释在预览里不显示，dataview /
+# dataviewjs 代码块是查询而非内容，两者都不该进入切片和向量
+_FENCE_RE = re.compile(r"^(`{3,}|~{3,})[^\n]*\n.*?^\1[ \t]*$", re.M | re.S)
+_QUERY_FENCE_RE = re.compile(r"^(`{3,}|~{3,})[ \t]*dataview(?:js)?[ \t]*\n.*?^\1[ \t]*$", re.M | re.S | re.I)
+_OBSIDIAN_COMMENT_RE = re.compile(r"%%.*?%%", re.S)
+
+
+def strip_obsidian_noise(text: str) -> str:
+    """去掉 Obsidian 的 %% 注释与 dataview 查询代码块；普通代码块内的内容原样保留。
+
+    只在 %% 成对出现时处理，孤立的 %% 视为正文。
+    """
+    if "%%" not in text and "dataview" not in text.lower():
+        return text
+    pieces = []
+    position = 0
+    for fence in _FENCE_RE.finditer(text):
+        pieces.append(_OBSIDIAN_COMMENT_RE.sub("", text[position:fence.start()]))
+        pieces.append("" if _QUERY_FENCE_RE.fullmatch(fence.group(0)) else fence.group(0))
+        position = fence.end()
+    pieces.append(_OBSIDIAN_COMMENT_RE.sub("", text[position:]))
+    return "".join(pieces)
+
 
 # 分隔符优先级列表（从高到低）
 SEPARATORS = [
@@ -117,6 +150,7 @@ def find_html_boundaries(text: str, max_span: int) -> List[Tuple[int, int]]:
 
     - 图注/居中容器 <div>...</div>：切开会让图和图注分家（超过一个切片的除外，
       那种只能切）
+    - 含 <img> 的段落：插图与紧随的图注、子图标签是一个整体
     - 任意单个标签 <...>：切开会留下 'le="text-align: center;">' 这种碎片
 
     Returns:
@@ -127,6 +161,11 @@ def find_html_boundaries(text: str, max_span: int) -> List[Tuple[int, int]]:
         for match in _HTML_DIV_RE.finditer(text)
         if match.end() - match.start() <= max_span
     ]
+    boundaries.extend(
+        (match.start(), match.end())
+        for match in _PARAGRAPH_RE.finditer(text)
+        if match.end() - match.start() <= max_span and _IMG_TAG_RE.search(match.group(0))
+    )
     boundaries.extend(
         (match.start(), match.end()) for match in _HTML_TAG_RE.finditer(text)
     )
@@ -412,15 +451,68 @@ def recursive_split(
             chunks.append(chunk)
 
         # 下一个切片的起始位置（考虑重叠）。重叠窗口不能落进表格/公式内部，
-        # 否则下一片会以半张表开头；也不能不前进，否则死循环
+        # 否则下一片会以半张表开头；也不能不前进，否则死循环。
+        # 重叠窗口里若有插图，整段插图会原样复制到下一片，同一张图出现在
+        # 两张卡片上，这种情况直接不重叠
         next_start = max(actual_end - overlap, 0)
-        if next_start <= start or not is_safe_split_point(
-            next_start, protected_boundaries
+        if (
+            next_start <= start
+            or not is_safe_split_point(next_start, protected_boundaries)
+            or _IMG_TAG_RE.search(text, next_start, actual_end)
         ):
             next_start = actual_end
         start = next_start
 
-    return chunks
+    return merge_image_only_chunks(chunks, chunk_size)
+
+
+def _is_image_only(chunk: str) -> bool:
+    text = _IMG_TAG_RE.sub("", chunk)
+    return bool(_IMG_TAG_RE.search(chunk)) and len("".join(text.split())) < IMAGE_ONLY_MAX_TEXT
+
+
+def _join_without_overlap(first: str, second: str, overlap: int) -> str:
+    """拼接相邻切片，去掉重叠窗口带来的重复尾巴。"""
+    for size in range(min(len(first), len(second), overlap), 0, -1):
+        if first.endswith(second[:size]):
+            return first + second[size:]
+    return f"{first}\n\n{second}"
+
+
+def merge_image_only_chunks(chunks: List[str], chunk_size: int, overlap: int = 150) -> List[str]:
+    """把只有图片没有正文的切片并入较短的那个邻居。
+
+    插图段落受保护不被切开，装不进当前切片时会整段落到下一片，若那一片
+    正好只剩这段插图，就会产出一张没有任何说明文字的卡片。并入邻居后
+    超出目标大小不超过一半，向量模型仍有余量（切片大小按上下文的 80% 算）。
+    """
+    merged = list(chunks)
+    index = 0
+    while index < len(merged):
+        chunk = merged[index]
+        if not _is_image_only(chunk):
+            index += 1
+            continue
+        neighbours = []
+        if index > 0:
+            neighbours.append(index - 1)
+        if index + 1 < len(merged):
+            neighbours.append(index + 1)
+        neighbours = [
+            n for n in sorted(neighbours, key=lambda n: len(merged[n]))
+            if len(merged[n]) + len(chunk) <= chunk_size * 1.5
+        ]
+        if not neighbours:
+            index += 1
+            continue
+        target = neighbours[0]
+        if target < index:
+            merged[target] = _join_without_overlap(merged[target], chunk, overlap)
+        else:
+            merged[target] = _join_without_overlap(chunk, merged[target], overlap)
+        # 并入后的邻居不再重判：它已经带着正文，再合并只会把更多正文卷进来
+        del merged[index]
+    return merged
 
 
 # 标题层级路径的分隔符（doc_title 用下划线拼接，路径用它拼接便于阅读和还原层级）

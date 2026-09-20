@@ -16,6 +16,7 @@ from . import task_service
 from .task_service import serialized_mutation
 from .errors import BusinessError
 from .chunking import ChunkerFactory
+from .metadata_service import encode_metadata
 
 import logging
 logger = logging.getLogger(__name__)
@@ -135,13 +136,19 @@ def _assign_collections(cursor, file_id, collection_ids):
 
 
 @serialized_mutation
-def import_file(source_path, filename=None, collection_ids=None, *, managed_original=False):
-    """复制到受控目录后原子登记和入队；补偿仅删除本次创建的副本，绝不删用户原件。"""
+def import_file(source_path, filename=None, collection_ids=None, *, managed_original=False, metadata=None):
+    """复制到受控目录后原子登记和入队；补偿仅删除本次创建的副本，绝不删用户原件。
+
+    ``metadata`` 随登记一并写入 files.metadata：导入后文件立刻进入在途任务，
+    此时不能再单独改属性；PDF 路径也不解析 frontmatter，外部来源（如 Zotero）
+    的元数据只有这一条入口。命中重复文件时不覆盖已有属性。
+    """
     source = Path(source_path).expanduser().resolve()
     if not source.is_file():
         raise BusinessError("NOT_FOUND", f"导入文件不存在：{source}")
     name = validate_filename(filename or source.name)
     validate_import(name, source.stat().st_size)
+    metadata_json = encode_metadata(metadata)
     ensure_files_dir()
     created = []
     # 先快照再哈希，避免源文件在查重和复制之间变化。
@@ -181,9 +188,9 @@ def import_file(source_path, filename=None, collection_ids=None, *, managed_orig
                 created.append(working)
             with get_db_cursor(write=True) as cursor:
                 cursor.execute(
-                    "INSERT INTO files (file_hash, filename, file_path, file_size, original_file_type, original_file_path) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (file_hash, working.name, str(working), size, Path(name).suffix.lower().lstrip("."), str(original)),
+                    "INSERT INTO files (file_hash, filename, file_path, file_size, original_file_type, original_file_path, metadata) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (file_hash, working.name, str(working), size, Path(name).suffix.lower().lstrip("."), str(original), metadata_json),
                 )
                 file_id = cursor.lastrowid
                 _assign_collections(cursor, file_id, collection_ids)

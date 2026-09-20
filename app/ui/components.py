@@ -7,10 +7,11 @@
 """
 
 from typing import Callable, Optional
-from functools import lru_cache
+from functools import cache
 import inspect
 import logging
 import re
+from urllib.parse import quote
 
 import markdown2
 from nicegui import context, ui
@@ -37,41 +38,69 @@ _RELATIVE_IMG_MD = re.compile(r'(\]\()(?!https?://|/|data:)([^)\s]+)(\))')
 
 
 class _PieceLatex(markdown2.Latex):
-    """修正 markdown2 2.5.5 对 nabla、neq 等块公式命令的误删。"""
+    """在 markdown2 2.5.5 的 latex 扩展基础上做三处修正。
+
+    - 块公式不再删除 ``\\n`` 字面量：上游 ``_convert_double_match`` 会把
+      ``\\nabla``、``\\neq`` 等命令删成 ``abla``、``eq``。
+    - 逐个公式兜底：OCR 产出的公式常有 ``x_a_b`` 双下标、``\\frac{`` 缺参数等错误，
+      latex2mathml 会抛错（除自有异常外还会漏出 StopIteration/ValueError/IndexError）。
+      转换失败的公式按原文放进行内代码显示，同一张卡片里的其余公式照常转成 MathML。
+    - 每次渲染前清空 ``code_blocks``：上游把它写成类属性，占位符会跨渲染累积，
+      既泄漏内存也让每次回填都遍历历史条目。
+    """
 
     name = "piece-latex"
 
+    def test(self, text: str) -> bool:
+        # 上游每次渲染会调用 run 四次；没有 $ 的正文（多数切片）直接跳过
+        return "$" in text
+
+    def run(self, text: str) -> str:
+        self.code_blocks = {}
+        try:
+            return super().run(text)
+        except Exception:
+            # 单个公式的转换异常已在 _convert_match 内兜底，能走到这里的只有 latex2mathml
+            # 装载失败（如冻结包漏掉 unimathsymbols.txt），此时整段退回普通 Markdown
+            _warn_formula_support_unavailable()
+            return text
+
+    def _convert_single_match(self, match):
+        return self._convert_match(match, display="inline")
+
     def _convert_double_match(self, match):
+        return self._convert_match(match, display="block")
+
+    def _convert_match(self, match, display: str) -> str:
         from latex2mathml.converter import convert
 
-        return convert(match.group(1), display="block")
+        try:
+            return convert(match.group(1), display=display)
+        except Exception as exc:
+            # 块公式跨行时压成一行，日志和回退显示都更紧凑
+            source = " ".join(match.group(0).split())
+            logger.info(
+                "[Markdown] 公式无法转换 (%s)，已按原文显示: %.120s",
+                type(exc).__name__, source,
+            )
+            # 借用 markdown2 处理反引号代码段的编码：转义 HTML 并把内容哈希占位，
+            # 其中的 _、* 不再被当成斜体/加粗，输出前统一还原。不能直接输出反引号：
+            # 段落首尾都是 <math> 时 markdown2 会把整行当作 HTML 块，行内语法不再解析
+            return f"<code>{self.md._encode_code(source)}</code>"
 
 
 _PieceLatex.register()
 
+
+@cache
+def _warn_formula_support_unavailable() -> None:
+    """latex2mathml 装载失败会让每张卡片都退回普通 Markdown，堆栈只记一次。"""
+    logger.warning("[Markdown] 公式转换不可用，已回退为普通 Markdown", exc_info=True)
+
+
 # 切片正文的 Markdown 扩展：表格、代码块，以及把 $...$ / $$...$$ 转为 MathML
-# （OCR 解析的文档常含公式，latex 扩展依赖 latex2mathml，在服务端完成转换无需联网）
+# （OCR 解析的文档常含公式，latex2mathml 在服务端完成转换无需联网）
 _MARKDOWN_EXTRAS = ["fenced-code-blocks", "tables", _PieceLatex.name]
-_MARKDOWN_EXTRAS_NO_LATEX = ["fenced-code-blocks", "tables"]
-
-
-@lru_cache(maxsize=1000)
-def _markdown_extras_for(text: str) -> list:
-    """选择切片可安全使用的 Markdown 扩展。
-
-    OCR 产出的公式可能不完整（如 `$ \\frac{ $`），latex2mathml 会直接抛错并
-    导致整张卡片渲染失败，因此先试渲染一次，失败则退回不含 latex 的扩展。
-
-    试渲染的开销与真实渲染相当（实测一页 31 张切片约 250ms），而卡片会随
-    每次 chunk_inspector.refresh() 重建，故按正文缓存结果。ui.markdown 内部
-    的 prepare_content 同样是 lru_cache，这里与之对齐用 1000 条上限。
-    """
-    try:
-        markdown2.markdown(text, extras=_MARKDOWN_EXTRAS)
-    except Exception:
-        logger.warning("[Markdown] 公式渲染失败，已回退为普通 Markdown", exc_info=True)
-        return _MARKDOWN_EXTRAS_NO_LATEX
-    return _MARKDOWN_EXTRAS
 
 
 def _absolutize_image_srcs(markdown_text: str, base_url: str = "/working/") -> str:
@@ -79,9 +108,10 @@ def _absolutize_image_srcs(markdown_text: str, base_url: str = "/working/") -> s
 
     浏览器按站点根解析相对路径，而工作文件图片挂载在 /working 下，
     需要补前缀才能命中 app.add_static_files 注册的路由。
+    路径按 URL 编码：文档名里的 #、%、? 不编码会被浏览器当成片段或查询串。
     """
-    text = _RELATIVE_IMG_SRC.sub(lambda m: f'src="{base_url}{m[1]}"', markdown_text)
-    return _RELATIVE_IMG_MD.sub(lambda m: f'{m[1]}{base_url}{m[2]}{m[3]}', text)
+    text = _RELATIVE_IMG_SRC.sub(lambda m: f'src="{base_url}{quote(m[1], safe="/")}"', markdown_text)
+    return _RELATIVE_IMG_MD.sub(lambda m: f'{m[1]}{base_url}{quote(m[2], safe="/")}{m[3]}', text)
 
 
 def status_badge(status: str):
@@ -178,7 +208,8 @@ def chunk_card(
 
 def chunk_markdown(chunk_text: str, chunk_id: int | None = None, file_path: str | None = None):
     """
-    切片正文的 Markdown 渲染（相对图片引用重写为 /working/ 绝对路径，公式转 MathML）
+    切片正文的 Markdown 渲染（相对图片引用重写为 /working/ 绝对路径，
+    公式转 MathML，转换失败的公式按原文显示）
 
     Args:
         chunk_text: 切片文本内容
@@ -195,7 +226,6 @@ def chunk_markdown(chunk_text: str, chunk_id: int | None = None, file_path: str 
         file_path = file["file_path"] if file else None
     if file_path:
         from pathlib import Path
-        from urllib.parse import quote
         from indexing.services.file_service import get_working_dir
         relative = Path(file_path).resolve().parent.relative_to(get_working_dir().resolve())
         if relative.parts:
@@ -203,7 +233,7 @@ def chunk_markdown(chunk_text: str, chunk_id: int | None = None, file_path: str 
     content = _absolutize_image_srcs(chunk_text, base_url)
     return ui.markdown(
         content,
-        extras=_markdown_extras_for(content),
+        extras=_MARKDOWN_EXTRAS,
     ).classes("chunk-content text-sm leading-relaxed")
 
 

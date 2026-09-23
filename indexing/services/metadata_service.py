@@ -87,6 +87,31 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     return metadata, content[match.end():]
 
 
+def render_frontmatter(metadata: Optional[Dict[str, Any]], body: str) -> str:
+    """把属性写成正文开头的 YAML frontmatter，与 parse_frontmatter 互为逆操作。
+
+    网页、EPUB 转换结果和只传正文的导入入口都靠它把出处属性随原件保存，
+    重索引时属性能从原件重新解析出来，不依赖数据库里的那一份。
+    字符串值压成单行，避免多行文本里出现 --- 破坏分隔符。
+    """
+    if not metadata:
+        return body
+    import yaml
+
+    plain = {}
+    for key, value in metadata.items():
+        value = _to_plain(value)
+        if isinstance(value, str):
+            value = " ".join(value.split())
+        if value is None or value == "" or value == []:
+            continue
+        plain[str(key)] = value
+    if not plain:
+        return body
+    dumped = yaml.safe_dump(plain, allow_unicode=True, sort_keys=False, width=10000)
+    return f"---\n{dumped}---\n\n{body.lstrip()}"
+
+
 def get_file_metadata(file_id: int) -> Dict[str, Any]:
     """读取文件属性，无属性或解析失败时返回空字典。"""
     file_info = _file_repo.find_by_id(file_id)

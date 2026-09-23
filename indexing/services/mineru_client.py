@@ -367,7 +367,11 @@ def _render_block(block: Dict[str, object]) -> str:
         return "\n".join(lines)
 
     if block_type == "table":
-        parts = [_caption(block, "table_caption"), _strip_html_wrapper(str(block.get("table_body") or ""))]
+        parts = [
+            _caption(block, "table_caption"),
+            _strip_html_wrapper(str(block.get("table_body") or "")),
+            _caption(block, "table_footnote"),
+        ]
         return "\n\n".join(part for part in parts if part)
 
     if block_type in ("image", "chart"):
@@ -381,6 +385,8 @@ def _render_block(block: Dict[str, object]) -> str:
             # PaddleOCR 路径产出的同样是 <img src="...">，形态保持一致。
             parts.append(f'<img src="{image_path}">')
         parts.append(_caption(block, f"{block_type}_caption"))
+        # 图注之外的脚注同样是正文：期刊末页的作者简介就挂在头像的 image_footnote 里
+        parts.append(_caption(block, f"{block_type}_footnote"))
         if block_type == "chart":
             # 图表内容是模型对图表的文字描述，对检索有价值
             parts.append(str(block.get("content") or "").strip())

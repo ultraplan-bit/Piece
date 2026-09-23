@@ -99,7 +99,7 @@ def test_registered_tools_and_input_schemas(workspace):
     async def check():
         async with _client(workspace) as client:
             tools = {tool.name: tool for tool in await client.list_tools()}
-        assert {"add_chunk", "check_task_status", "batch_add_chunks", "check_tasks_status"} <= tools.keys()
+        assert {"import_markdown", "add_chunk", "check_task_status", "batch_add_chunks", "check_tasks_status"} <= tools.keys()
         chunks_schema = json.dumps(tools["batch_add_chunks"].inputSchema)
         assert '"doc_title"' in chunks_schema and '"chunk_text"' in chunks_schema
         assert '"maxItems": 50' in chunks_schema
@@ -269,3 +269,32 @@ def test_worker_preserves_batch_order_without_blocking_other_files(workspace):
     assert [chunk["chunk_text"] for chunk in chunks] == ["first", "second", "third"]
     working = Path(a["file_path"]).read_text(encoding="utf-8")
     assert working.index("first") < working.index("second") < working.index("third")
+
+
+def test_import_markdown_accepts_whole_document_without_cli(workspace):
+    """MCP 独立完成整篇导入：原件、属性、集合和任务都由共享业务处理，不经过 CLI。"""
+    from indexing.services import collection_service
+
+    payload = {
+        "filename": "公众号文章",
+        "content": "# 标题\n\n正文",
+        "properties": {"source_url": "https://mp.weixin.qq.com/s/x", "title": "标题"},
+        "collections": ["网页收藏"],
+    }
+    result = _call(workspace, "import_markdown", payload).data
+    assert result["success"] and result["data"]["status"] == "accepted" and not result["data"]["duplicate"]
+    file_id = result["data"]["file_id"]
+    info = workspace.file_service.get_file_by_id(file_id)
+    assert info["filename"] == "公众号文章.md" and info["original_file_type"] == "md"
+    assert "source_url: https://mp.weixin.qq.com/s/x" in Path(info["original_file_path"]).read_text(encoding="utf-8")
+    assert any(c["name"] == "网页收藏" and c["file_count"] == 1 for c in collection_service.list_collections())
+    assert _task_count(workspace) == 1
+
+    duplicate = _call(workspace, "import_markdown", {**payload, "filename": "换个名字"}).data
+    assert duplicate["success"] and duplicate["data"]["duplicate"] and duplicate["data"]["file_id"] == file_id
+    assert _task_count(workspace) == 1
+
+    blank = _call(workspace, "import_markdown", {"filename": "空", "content": "   "}).data
+    assert not blank["success"] and "正文不能为空" in blank["message"]
+    assert _call(workspace, "import_markdown", {"filename": "缺正文"}).is_error
+    assert _task_count(workspace) == 1

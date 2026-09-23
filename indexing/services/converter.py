@@ -4,7 +4,7 @@
 职责:
 - 将各种格式文件转换为 Markdown
 - PDF 使用 PyMuPDF Native 流式处理（内存安全）
-- 支持多种文档格式（.md, .pdf, .docx, .pptx, .xlsx）
+- 支持多种文档格式（.md, .pdf, .docx, .pptx, .xlsx, .html, .epub）
 """
 
 import base64
@@ -255,6 +255,20 @@ def convert_pdf_to_markdown(
             output_file.close()
 
 
+def store_image(image_dir: Path, blob: bytes, extension: str) -> str:
+    """按内容哈希命名把一张图写进落盘目录，返回文件名；同一张图只写一次。
+
+    Office、网页和 EPUB 三条转换路径共用这一命名，插图目录里的文件形态与
+    OCR 解析产出一致，切片渲染和 MCP 插图返回不必区分来源。
+    """
+    filename = f"image-{hashlib.sha1(blob).hexdigest()[:12]}.{extension}"
+    path = image_dir / filename
+    if not path.exists():
+        image_dir.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(blob)
+    return filename
+
+
 def extract_embedded_images(markdown_text: str, image_dir: Path) -> str:
     """把 Markdown 中的 base64 内嵌图片落盘，引用改写为 <目录名>/<文件名>。
 
@@ -288,18 +302,12 @@ def extract_embedded_images(markdown_text: str, image_dir: Path) -> str:
             logger.warning("[图片提取] base64 解码失败，剥离该引用")
             return f"![{alt}]"
 
-        filename = (
-            f"image-{hashlib.sha1(blob).hexdigest()[:12]}."
-            f"{_IMAGE_EXTENSIONS.get(subtype, 'png')}"
-        )
-        if filename not in saved:
-            try:
-                image_dir.mkdir(parents=True, exist_ok=True)
-                (image_dir / filename).write_bytes(blob)
-            except OSError as exc:
-                logger.warning("[图片提取] 写入失败，剥离该引用: %s", exc)
-                return f"![{alt}]"
-            saved.add(filename)
+        try:
+            filename = store_image(image_dir, blob, _IMAGE_EXTENSIONS.get(subtype, "png"))
+        except OSError as exc:
+            logger.warning("[图片提取] 写入失败，剥离该引用: %s", exc)
+            return f"![{alt}]"
+        saved.add(filename)
 
         return f"![{alt}]({image_dir.name}/{filename})"
 
@@ -342,6 +350,21 @@ def convert_to_markdown(file_path: Path, image_dir: Optional[Path] = None) -> st
     elif suffix == ".pdf":
         # PDF 使用 PyMuPDF Native 流式处理
         return convert_pdf_to_markdown(file_path)
+    elif suffix in {".html", ".htm"}:
+        # 另存的网页：取主内容容器，页面元数据写成 frontmatter；
+        # 单文件网页（SingleFile 等）内嵌的 data URI 图片与 Office 文档同样落盘
+        from .html_convert import convert_html_file
+
+        markdown_text = convert_html_file(file_path, keep_data_uris=image_dir is not None)
+        if image_dir is None:
+            # 不落盘时 MarkItDown 只把 data URI 截成 "data:image/png;base64..."，整个引用剥掉
+            return _ANY_DATA_URI_IMG.sub(r"![\1]", markdown_text)
+        return extract_embedded_images(markdown_text, image_dir)
+    elif suffix == ".epub":
+        # 电子书按章节转换，插图直接从压缩包解压到落盘目录
+        from .epub_convert import convert_epub
+
+        return convert_epub(file_path, image_dir)
     else:
         # 其他格式使用 MarkItDown 转换。图片只能以 data URI 形式取出，
         # 转换后立即落盘，避免 base64 留在正文里

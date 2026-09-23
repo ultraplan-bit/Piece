@@ -385,6 +385,24 @@ def test_table_body_drops_html_wrapper():
     assert "html" not in rendered and "body" not in rendered
 
 
+def test_footnotes_of_images_and_tables_are_kept():
+    """期刊末页的作者简介挂在头像的 image_footnote 里，漏掉就整段消失。"""
+    image = mineru_client._render_block({
+        "type": "image",
+        "img_path": "images/a.jpg",
+        "image_caption": [],
+        "image_footnote": ["薛迪(2001—),男,硕士研究生。"],
+    })
+    table = mineru_client._render_block({
+        "type": "table",
+        "table_body": "<table><tr><td>1</td></tr></table>",
+        "table_footnote": ["注：数据来自实验"],
+    })
+
+    assert image == '<img src="images/a.jpg">\n薛迪(2001—),男,硕士研究生。'
+    assert table.endswith("\n\n注：数据来自实验")
+
+
 def test_parse_options_come_from_config(mineru, tmp_path):
     """模型版本、OCR 开关与语言必须真的随每次分批请求发出去。"""
     mineru.setattr(mineru_client, "get_ocr_config", lambda: OcrSettings(

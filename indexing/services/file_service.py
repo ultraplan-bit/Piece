@@ -27,6 +27,11 @@ _chunk_repo = ChunkRepository()
 # converter.MAX_PDF_PAGES，500MB 大致对应 300dpi 彩色扫描的数百页。
 # 解析后端另有更严的限制时以 get_max_file_size() 为准。
 MAX_FILE_SIZE = 500 * 1024 * 1024
+# 落盘文件名主干的上限。Windows 未开长路径支持时完整路径不能超过 260 字符，
+# 而工作文件的插图位于 working/.generations/task-N-xxxxxxxx/<主干>/<图片名>，
+# 图片名可达 68 字符（MinerU 的 64 位哈希）；主干放开到 validate_filename 的
+# 200 字符会让插图读不到、也删不掉。
+MAX_STORED_STEM = 80
 
 
 def get_max_file_size() -> int:
@@ -99,17 +104,23 @@ def validate_filename(filename):
     return filename
 
 
+def _stored_name(stem, suffix, counter=0):
+    tail = f"_{counter}" if counter else ""
+    return f"{stem[:MAX_STORED_STEM - len(tail)].rstrip(' .')}{tail}{suffix}"
+
+
 def get_unique_filename(original_filename, check_in_working=True):
-    name = validate_filename(original_filename)
+    """落盘用的不重名文件名；主干超过 MAX_STORED_STEM 时截断。"""
+    path = Path(validate_filename(original_filename))
     ensure_files_dir()
     directory = get_working_dir() if check_in_working else get_originals_dir()
     # 已发布的工作文件可能位于独立代目录，命名仍同时检查数据库。
     taken = {f["filename"].casefold() for f in get_files_list()} if check_in_working else set()
-    path = Path(name)
     counter = 0
+    name = _stored_name(path.stem, path.suffix)
     while (directory / name).exists() or name.casefold() in taken:
         counter += 1
-        name = f"{path.stem}_{counter}{path.suffix}"
+        name = _stored_name(path.stem, path.suffix, counter)
     return name
 
 
@@ -153,7 +164,8 @@ def import_file(source_path, filename=None, collection_ids=None, *, managed_orig
     created = []
     # 先快照再哈希，避免源文件在查重和复制之间变化。
     with tempfile.TemporaryDirectory(prefix=".import-", dir=get_files_dir()) as directory:
-        snapshot = Path(directory) / name
+        # 快照不用原名：临时目录更深，长文件名会先在这里超出路径上限
+        snapshot = Path(directory) / f"snapshot{Path(name).suffix}"
         # 源文件可能在快照开始后被替换，故这里按真实读到的字节再判一次上限
         limit = get_max_file_size()
         with source.open("rb") as reader, snapshot.open("xb") as writer:
@@ -201,6 +213,37 @@ def import_file(source_path, filename=None, collection_ids=None, *, managed_orig
             for path in created:
                 path.unlink(missing_ok=True)
             raise
+
+
+# 只传正文的导入入口的字符上限：整篇网页或几小时字幕远低于此，防止误把整本书塞进一次请求
+MAX_MARKDOWN_CHARS = 1_000_000
+
+
+def import_markdown(filename, content, collection_ids=None, metadata=None):
+    """把已取得的 Markdown 正文当作原件导入，与本地文件导入共用命名、查重、登记和入队规则。
+
+    供 MCP 这类只能传正文、不能传本机路径的入口使用：网页、公众号文章、视频字幕
+    等由 AI 客户端自行取得的内容都从这里进库。``metadata`` 与正文自带的 frontmatter
+    合并（显式属性优先）后写回原件开头，因此属性登记即可见，重索引也不会丢失。
+    """
+    if not isinstance(content, str) or not content.strip():
+        raise BusinessError("INVALID_INPUT", "正文不能为空")
+    if len(content) > MAX_MARKDOWN_CHARS:
+        raise BusinessError("INVALID_INPUT", f"正文不能超过 {MAX_MARKDOWN_CHARS} 个字符，更大的文档请作为文件导入")
+    name = validate_filename(filename)
+    if not name.lower().endswith(".md"):
+        name += ".md"
+    from .metadata_service import parse_frontmatter, render_frontmatter
+    embedded, body = parse_frontmatter(content)
+    merged = {**embedded, **(metadata or {})}
+    encode_metadata(merged)
+    if merged:
+        content = render_frontmatter(merged, body)
+    ensure_files_dir()
+    with tempfile.TemporaryDirectory(prefix=".content-", dir=get_files_dir()) as directory:
+        source = Path(directory) / "content.md"
+        source.write_text(content, encoding="utf-8")
+        return import_file(source, filename=name, collection_ids=collection_ids, metadata=merged or None)
 
 
 def check_file_hash_exists(file_hash):
@@ -276,6 +319,14 @@ def _unlink_quietly(path, label):
         logger.warning("%s 清理失败：%s", label, exc)
 
 
+def remove_tree(path, ignore_errors=False):
+    """删除目录树；Windows 上走扩展长度路径，超过 260 字符的残留文件也能删掉。"""
+    path = os.path.abspath(path)
+    if os.name == "nt" and not path.startswith("\\\\?\\"):
+        path = "\\\\?\\UNC\\" + path[2:] if path.startswith("\\\\") else "\\\\?\\" + path
+    shutil.rmtree(path, ignore_errors=ignore_errors)
+
+
 @serialized_mutation
 def delete_file(file_id):
     file_info = get_file_by_id(file_id)
@@ -288,7 +339,7 @@ def delete_file(file_id):
     _unlink_quietly(working, "工作文件")
     images = working.parent / working.stem
     if images.is_dir():
-        shutil.rmtree(managed_path(images), ignore_errors=True)
+        remove_tree(managed_path(images), ignore_errors=True)
     if original:
         _unlink_quietly(original, "原件副本")
     return True
@@ -401,7 +452,10 @@ def export_snapshot(file_id, format="markdown", include_resources=False):
 
 @serialized_mutation
 def recover_file_storage():
-    """启动时清理有任务记录且已结束的暂存/未引用工作代，不触碰未知目录。"""
+    """启动时清理有任务记录且已结束的暂存/未引用工作代，不触碰未知目录。
+
+    清理只是回收空间：单个目录删不掉时记录警告后继续，不阻止服务启动。
+    """
     with get_db_cursor() as cursor:
         cursor.execute("SELECT id, status FROM tasks WHERE task_type='file_index'")
         states = {row[0]: row[1] for row in cursor.fetchall()}
@@ -412,7 +466,7 @@ def recover_file_storage():
         if not root.is_dir() or root.is_symlink() or root.is_junction():
             continue
         for directory in root.iterdir():
-            match = re.fullmatch(r"task-(\d+)(?:-[0-9a-f]{32})?", directory.name)
+            match = re.fullmatch(r"task-(\d+)(?:-[0-9a-f]{8}|-[0-9a-f]{32})?", directory.name)
             if (not match or directory.is_symlink() or directory.is_junction() or not directory.is_dir()
                     or directory.resolve() in referenced):
                 continue
@@ -420,7 +474,10 @@ def recover_file_storage():
             if (states.get(int(match[1])) in task_service.TERMINAL_STATUSES
                     and marker.is_file() and not marker.is_symlink()
                     and marker.read_text(encoding="ascii").strip() == owner):
-                shutil.rmtree(directory)
+                try:
+                    remove_tree(directory)
+                except OSError as exc:
+                    logger.warning("残留工作代清理失败：%s", exc)
 
 
 def scan_untracked_files():

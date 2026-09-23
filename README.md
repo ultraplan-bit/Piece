@@ -67,8 +67,9 @@
 
 ### 3. 导入资料
 
-在「文件库」页面点击 **+ → 上传文件**，选择要导入的文件，等待处理完成，就能看到知识卡片。支持 **PDF、Word、PPT、Excel（`.xlsx`）、Markdown 和 TXT**。
+在「文件库」页面点击 **+ → 上传文件**，选择要导入的文件，等待处理完成，就能看到知识卡片。支持 **PDF、Word、PPT、Excel（`.xlsx`）、Markdown、TXT、HTML 和 EPUB**。
 
+- **网页和电子书**：网页在浏览器里「另存为」HTML 后导入，Piece 会只取正文区，并把标题、作者、来源地址记为文件属性；用 SingleFile 一类扩展保存的单文件网页还能保留图片。EPUB 电子书直接导入，按章节成卡，书名、作者等信息一并带入；带 DRM 的电子书无法导入。
 - **扫描件、复杂公式或表格**：在「设置 → PDF 解析」中配置 PaddleOCR 服务、MinerU 或自定义多模态模型，按页面提示填写地址、密钥并测试连接。普通文字版 PDF 可以先直接导入。
 - **Word / PPT**：建议安装 Microsoft Office 或 LibreOffice；`.doc`、`.ppt`、`.rtf`、`.odt`、`.odp` 等格式必须有可用的转换工具。
 - **已有的 Obsidian 笔记或 Zotero 文献**：同一菜单里的 **导入本机目录** 可整库导入 Obsidian vault（自动跳过 `.obsidian`、模板和纯链接的索引页）；**从 Zotero 导入** 会把带 PDF 的条目连同作者、年份、DOI 等属性一并导入，需要 Zotero 7 或更新版本正在运行，并在 Zotero 的「设置 → 高级」中勾选「允许本机其他应用程序与 Zotero 通信」。两者都是一次性复制，不会改动原库。
@@ -89,6 +90,8 @@ MCP 可以理解为 AI 访问知识库的连接方式。打开 Piece 的 **MCP �
 **方式二：Skill 导出**
 
 如果你的 AI 能运行本机命令行，也可以在 **Skill 导出** 页面导出并安装工作流：`piece-search` 用于查资料，`piece-index` 用于导入和整理资料。移动程序或更换数据目录后，请重新导出。
+
+AI 客户端自己取得的网页、公众号文章、视频字幕等内容也能直接存进知识库：MCP 用索引服务里的 `import_markdown` 工具，Skill 用 `piece file import` 导入写好的 Markdown。Piece 会保留原件、自动切片，并把标题和来源地址记为文件属性。
 
 连接完成后，在你的 **AI 客户端**中提问，例如：
 

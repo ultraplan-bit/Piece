@@ -25,8 +25,6 @@ DEFAULT_BASE_URL = "http://127.0.0.1:23119/api"
 USER_PREFIX = "/users/0"
 PAGE_SIZE = 100
 PDF_TYPE = "application/pdf"
-# 文件名上限 200 字符（validate_filename），标题过长时先截标题再拼后缀
-MAX_FILENAME = 200
 MAX_ABSTRACT = 500
 COLLECTION_MODES = ("path", "top", "none")
 _ENABLE_HINT = "请在 Zotero 的「设置 → 高级 → 允许本机其他应用程序与 Zotero 通信」中开启"
@@ -198,13 +196,14 @@ def build_filename(item: Dict[str, Any], suffix: str = ".pdf", *, disambiguator:
     title = _clean_name_part(str(data.get("title") or "")) or item["key"]
     parts = [p for p in (_clean_name_part(_author_label(data.get("creators") or [])), _year(item)) if p]
     prefix = " - ".join(parts)
-    tail = (f" - {disambiguator}" if disambiguator else "") + suffix
-    budget = MAX_FILENAME - len(tail) - (len(prefix) + 3 if prefix else 0)
+    tail = f" - {disambiguator}" if disambiguator else ""
+    # 落盘时主干超过 MAX_STORED_STEM 会被截断，这里先截标题，保住作者、年份和区分后缀
+    budget = file_service.MAX_STORED_STEM - len(tail) - (len(prefix) + 3 if prefix else 0)
     if budget < 8:
-        prefix, budget = "", MAX_FILENAME - len(tail)
+        prefix, budget = "", file_service.MAX_STORED_STEM - len(tail)
     title = title[:budget].rstrip(" .")
     name = f"{prefix} - {title}" if prefix else title
-    return name + tail
+    return name + tail + suffix
 
 
 def build_metadata(item: Dict[str, Any], collection_paths: List[str]) -> Dict[str, Any]:

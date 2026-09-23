@@ -646,8 +646,8 @@ async def _process_regular_file(
 def _clean_staging(task_id, file_id, staging, destination):
     current = file_service.get_file_by_id(file_id)
     if destination.exists() and (not current or Path(current["file_path"]).parent != destination):
-        shutil.rmtree(destination, ignore_errors=True)
-    shutil.rmtree(staging, ignore_errors=True)
+        file_service.remove_tree(destination, ignore_errors=True)
+    file_service.remove_tree(staging, ignore_errors=True)
     with get_db_cursor(write=True) as cursor:
         cursor.execute("DELETE FROM staged_chunks WHERE task_id = ?", (task_id,))
 
@@ -695,7 +695,8 @@ async def process_task(task_id: int, stop_event=None) -> None:
     file_extension = f".{file_info['original_file_type']}" if original_file_path else ".md"
     base_name = Path(file_info["filename"]).stem
     staging = file_service.get_files_dir() / ".staging" / f"task-{task_id}"
-    destination = file_service.get_working_dir() / ".generations" / f"task-{task_id}-{uuid.uuid4().hex}"
+    # 代目录名计入插图路径长度（见 file_service.MAX_STORED_STEM），8 位随机串足以区分同一任务的重跑
+    destination = file_service.get_working_dir() / ".generations" / f"task-{task_id}-{uuid.uuid4().hex[:8]}"
     working_file_path = staging / file_info["filename"]
     metadata = None
 
@@ -783,7 +784,7 @@ async def process_task(task_id: int, stop_event=None) -> None:
         await run_sync(_publish_file, task_id, file_id, destination / file_info["filename"], metadata)
         # 新一代已经发布；旧代不再被数据库引用，尽力清理即可。
         if old_working.parent.parent.name == ".generations":
-            await run_sync(shutil.rmtree, old_working.parent, True)
+            await run_sync(file_service.remove_tree, old_working.parent, True)
         else:
             await run_sync(file_service._unlink_quietly, old_working, "旧工作文件")
         _log_memory("task_end", task_id=task_id, file_id=file_id)

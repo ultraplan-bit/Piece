@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import os
 import shutil
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from zipfile import ZipFile
@@ -65,6 +67,50 @@ def test_recovery_removes_only_owned_unreferenced_generations(knowledge_base):
         (directory / "content.md").write_text("keep unless owned", encoding="utf-8")
     files.recover_file_storage()
     assert current.is_file() and foreign.is_dir() and not abandoned.exists()
+
+
+def test_recovery_removes_paths_beyond_max_path_and_never_blocks_startup(knowledge_base, monkeypatch):
+    source = knowledge_base.path / "document.md"
+    source.write_text("# 标题\n\n正文", encoding="utf-8")
+    accepted = files.import_file(source)
+    knowledge_base.drain()
+    root = files.get_working_dir() / ".generations"
+    stuck, deep = (root / f"task-{accepted['task_id']}-{suffix}" for suffix in ("0" * 8, "f" * 32))
+    for directory in (stuck, deep):
+        directory.mkdir()
+        (directory / ".piece-generation").write_text(files.storage_owner(), encoding="ascii")
+    # 旧版本的代目录里可能留下超过 260 字符的插图，普通路径既看不到也删不掉
+    image = deep / ("长" * 100) / f"{'e' * 120}.jpg"
+    prefix = "\\\\?\\" if os.name == "nt" else ""
+    os.makedirs(prefix + str(image.parent))
+    with open(prefix + str(image), "wb") as output:
+        output.write(b"image")
+    real_remove = files.remove_tree
+    def flaky(path, ignore_errors=False):
+        if path == stuck:
+            raise PermissionError("文件被占用")
+        real_remove(path, ignore_errors)
+    monkeypatch.setattr(files, "remove_tree", flaky)
+    files.recover_file_storage()
+    assert stuck.is_dir() and not deep.exists()
+
+
+def test_stored_names_are_capped_for_windows_path_limit(knowledge_base):
+    title = "作者 - 2024 - " + "很长的标题" * 30
+    source = knowledge_base.path / "source.md"
+    source.write_text("# 标题\n\n正文", encoding="utf-8")
+    first = files.import_file(source, filename=f"{title}.md")
+    source.write_text("# 标题\n\n另一份正文", encoding="utf-8")
+    second = files.import_file(source, filename=f"{title}.md")
+    for accepted in (first, second):
+        stem = Path(accepted["filename"]).stem
+        assert len(stem) <= files.MAX_STORED_STEM and title.startswith(stem.removesuffix("_1"))
+        record = files.get_file_by_id(accepted["file_id"])
+        assert len(Path(record["original_file_path"]).stem) <= files.MAX_STORED_STEM
+    assert second["filename"].endswith("_1.md")
+    knowledge_base.drain()
+    generation = Path(files.get_file_by_id(first["file_id"])["file_path"]).parent.name
+    assert len(generation.rsplit("-", 1)[1]) == 8
 
 
 def test_reindex_does_not_collide_with_downloaded_task_directory(knowledge_base):

@@ -1,19 +1,65 @@
 """
 文件管理工具 (Phase 1 - 核心 CRUD)
 
-提供文件的创建和删除功能。
+提供文件的创建、整篇导入和删除功能。
 """
 
 import logging
-from typing import Dict, Any
+from typing import Any, Dict, List, Optional
 
+from indexing.services.collection_service import resolve_collection_ids
 from indexing.services.file_service import (
+    MAX_MARKDOWN_CHARS,
     create_empty_file as _create_empty_file,
     delete_file as _delete_file,
     get_file_by_id as _get_file_by_id,
+    import_markdown as _import_markdown,
 )
 
 logger = logging.getLogger(__name__)
+
+# MCP 入参校验与业务层同一上限，超限请求在建 schema 阶段就被拒绝
+MAX_IMPORT_CHARS = MAX_MARKDOWN_CHARS
+
+
+def import_markdown(
+    filename: str,
+    content: str,
+    properties: Optional[Dict[str, Any]] = None,
+    collections: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """MCP 只做输入输出转换：切片、查重、属性合并和入队都由共享业务完成。
+
+    集合按名称定位，不存在时自动创建，与 set_file_collections 的行为一致。
+    """
+    try:
+        collection_ids = resolve_collection_ids(collections, create=True) if collections else None
+        result = _import_markdown(filename, content, collection_ids, properties)
+    except ValueError as exc:
+        logger.error("[MCP] 导入 Markdown 失败: %s", exc)
+        return {"success": False, "message": str(exc), "data": None}
+    except Exception as exc:
+        logger.error("[MCP] 导入 Markdown 异常: %s", exc, exc_info=True)
+        return {"success": False, "message": f"导入失败: {exc}", "data": None}
+
+    duplicate = bool(result.get("duplicate"))
+    logger.info("[MCP] 导入 Markdown: file_id=%s, duplicate=%s", result["file_id"], duplicate)
+    return {
+        "success": True,
+        "message": (
+            "相同内容已存在，返回已有文件，未创建新任务"
+            if duplicate
+            else "已受理，尚未完成索引；请用 check_task_status 查询 task_id"
+        ),
+        "data": {
+            "file_id": result["file_id"],
+            "filename": result["filename"],
+            "task_id": result.get("task_id"),
+            "task_ids": result.get("task_ids", []),
+            "duplicate": duplicate,
+            "status": result.get("status"),
+        },
+    }
 
 
 def create_empty_file(filename: str) -> Dict[str, Any]:

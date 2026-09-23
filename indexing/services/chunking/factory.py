@@ -32,6 +32,11 @@ class ChunkerFactory:
         ".rtf": HeadingChunker,
         ".odt": HeadingChunker,
         ".txt": HeadingChunker,
+        # 另存的网页和 EPUB 电子书先转成 Markdown，再按标题切分；
+        # EPUB 每章转成一个 ## 段，正好按章成卡
+        ".html": HeadingChunker,
+        ".htm": HeadingChunker,
+        ".epub": HeadingChunker,
     }
 
     @classmethod

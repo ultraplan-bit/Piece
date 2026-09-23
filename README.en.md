@@ -67,8 +67,9 @@ Other compatible services are also supported. External services may charge fees;
 
 ### 3. Import your documents
 
-On the **Files** page, click **+ → Upload file** and pick the documents to import, then wait for processing to finish. Your knowledge cards will appear. Supported formats include **PDF, Word, PowerPoint, Excel (`.xlsx`), Markdown, and TXT**.
+On the **Files** page, click **+ → Upload file** and pick the documents to import, then wait for processing to finish. Your knowledge cards will appear. Supported formats include **PDF, Word, PowerPoint, Excel (`.xlsx`), Markdown, TXT, HTML, and EPUB**.
 
+- **Web pages and e-books**: Save a web page as HTML from your browser and import it. Piece keeps only the main content and records the title, author, and source URL as file properties; pages saved with a SingleFile-style extension keep their images too. EPUB e-books import directly, one card per chapter, with the book title and authors attached. DRM-protected e-books cannot be imported.
 - **Scans, complex formulas, or tables**: Configure a PaddleOCR service, MinerU, or a custom multimodal model under **Settings → PDF Parsing Settings**. Follow the prompts to enter the service address and key, then test the connection. PDFs with a usable text layer can be imported without this setup.
 - **Word / PowerPoint**: Installing Microsoft Office or LibreOffice is recommended. Formats such as `.doc`, `.ppt`, `.rtf`, `.odt`, and `.odp` require a working conversion tool.
 - **Existing Obsidian notes or Zotero papers**: In the same menu, **Import local folder** brings in a whole Obsidian vault (skipping `.obsidian`, templates, and link-only index pages), and **Import from Zotero** imports every item that has a PDF together with its authors, year, DOI, and other properties. Zotero 7 or newer must be running with "Allow other applications on this computer to communicate with Zotero" enabled under Settings → Advanced. Both are one-time copies and never modify the source library.
@@ -89,6 +90,8 @@ Do not share the access keys in your configuration. After changing keys or ports
 **Option 2: Skill Export**
 
 If your AI can run local commands, you can also export and install workflows from **Skill Export**. Use `piece-search` to find information and `piece-index` to import and organize documents. Export them again after moving the application or changing the data directory.
+
+Content your AI client fetches by itself, such as web pages, WeChat articles, or video transcripts, can go straight into the knowledge base: MCP uses the `import_markdown` tool of the indexing service, and the skill runs `piece file import` on a Markdown file. Piece keeps the original, splits it into cards automatically, and records the title and source URL as file properties.
 
 Once connected, ask a question in your **AI client**, for example:
 

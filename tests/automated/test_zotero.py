@@ -5,7 +5,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from indexing.services import zotero_service as zotero
+from indexing.services import file_service, zotero_service as zotero
 from indexing.services.errors import BusinessError
 
 
@@ -95,7 +95,10 @@ def test_file_url_to_path_round_trip(tmp_path):
 def test_build_filename_and_metadata():
     item = _item("K1", title="A" * 300, creators=[{"creatorType": "author", "lastName": "Smith"}, {"creatorType": "author", "lastName": "Wu"}])
     name = zotero.build_filename(item)
-    assert name.startswith("Smith 等 - 2024 - AAAA") and name.endswith(".pdf") and len(name) <= 200
+    assert name.startswith("Smith 等 - 2024 - AAAA") and name.endswith(".pdf")
+    assert len(name) - len(".pdf") <= file_service.MAX_STORED_STEM
+    tagged = zotero.build_filename(item, disambiguator="K1")
+    assert tagged.endswith(" - K1.pdf") and len(tagged) == len(name)
     bare = zotero.build_filename(_item("K2", title="", date=""))
     assert bare == "K2.pdf"
     metadata = zotero.build_metadata(_item("K3", title="T", creators=[{"creatorType": "author", "lastName": "高", "firstName": "言"}],

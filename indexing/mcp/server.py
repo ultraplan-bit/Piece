@@ -13,7 +13,7 @@ from pydantic import Field, Json
 from indexing.utils import run_sync
 
 from indexing.mcp.auth import apply_bearer_auth
-from indexing.mcp.tools.file_tools import create_empty_file, delete_file
+from indexing.mcp.tools.file_tools import MAX_IMPORT_CHARS, create_empty_file, delete_file, import_markdown as _import_markdown
 from indexing.mcp.tools.chunk_tools import (
     ChunkInput,
     MAX_BATCH_CHUNKS,
@@ -43,6 +43,8 @@ TaskIds = Annotated[
     List[Annotated[int, Field(gt=0, strict=True)]],
     Field(min_length=1, max_length=MAX_TASKS_PER_QUERY),
 ]
+ImportContent = Annotated[str, Field(min_length=1, max_length=MAX_IMPORT_CHARS)]
+CollectionNames = Annotated[List[Annotated[str, Field(min_length=1, max_length=200)]], Field(max_length=100)]
 
 
 # 创建 FastMCP 实例
@@ -53,13 +55,16 @@ mcp = FastMCP(
     instructions="""
 Piece 索引 MCP 服务 - 用户个人知识库文件和切片管理工具
 
+整篇文档（网页、公众号文章、视频字幕、导图大纲等由客户端自行取得的内容）优先用 import_markdown 一次导入：
+Piece 会保存原件、按标题自动切片并保留 properties 中的出处（如 title、source_url）。
+只有需要手工控制每张卡片时才用 create_file + add_chunk / batch_add_chunks。
 注意：add_chunk / batch_add_chunks 需要文件 ID，如果文件不存在请先使用 create_file 创建。
 多张卡片优先用 batch_add_chunks，一项一个 task_id；受理成功不等于索引完成，勿重复提交已受理项。
 用 check_tasks_status 一次查询多个任务，后续仅查询 unfinished_task_ids，并遵守 poll_after_ms 间隔。
 任务完成后直接从状态结果取得 chunk_id，不需要另行检索。
 
 工具分类：
-- 文件管理：create_file, remove_file, query_files, query_file_info
+- 文件管理：import_markdown, create_file, remove_file, query_files, query_file_info
 - 切片管理：add_chunk, batch_add_chunks, modify_chunk_content, remove_chunk, batch_remove_chunks, query_chunk_info
 - 集合管理：query_collections, create_collection_tool, set_file_collections
 - 任务管理：check_task_status, check_tasks_status
@@ -74,6 +79,46 @@ apply_bearer_auth(mcp, "index")
 # FastMCP 2.x 不会自动把同步工具移到线程池。显式卸载 I/O，且取消时等待
 # 同步操作结束，避免 MCP lifespan 已退出、写线程却还在使用数据库。
 # ==================== 文件管理工具 ====================
+
+
+@mcp.tool(annotations={"destructiveHint": False})
+async def import_markdown(
+    filename: str,
+    content: ImportContent,
+    properties: Union[dict, Json[dict], None] = None,
+    collections: Union[CollectionNames, Json[CollectionNames], None] = None,
+) -> dict:
+    """
+    导入一篇已取得正文的 Markdown 文档，由 Piece 保存原件、自动切片并生成向量。
+
+    适用于网页、公众号文章、视频字幕、思维导图大纲等由客户端自己的工具取得的内容；
+    本工具不联网抓取，正文必须由调用方提供。
+    与 create_file + batch_add_chunks 的区别：这里按标题自动切片并保留原件，可重新索引；
+    只有需要手工控制每张卡片时才用后者。
+
+    Args:
+        filename: 文件名，不含目录，自动补 .md 后缀，重名时自动加序号
+        content: Markdown 正文，可自带 YAML frontmatter；显式 properties 优先
+        properties: 文件属性 JSON 对象，建议至少给 title 和 source_url，便于检索结果标明出处；
+            会并入原件开头的 frontmatter，重新索引也不会丢失
+        collections: 集合名列表，不存在的集合自动创建
+
+    Returns:
+        - success: 是否受理
+        - data.file_id / data.filename: 新建或已有的文件
+        - data.task_id / data.task_ids: 索引任务，受理成功不等于索引完成，用 check_task_status 查询终态
+        - data.duplicate: 相同正文已存在时为 true，返回已有 file_id 且不创建新任务
+
+    Example:
+        >>> import_markdown(
+        ...     filename="某公众号文章",
+        ...     content="# 标题\\n\\n正文……",
+        ...     properties={"title": "标题", "source_url": "https://mp.weixin.qq.com/s/xxx", "author": "作者"},
+        ...     collections=["网页收藏"],
+        ... )
+    """
+    logger.info("[MCP Tool] import_markdown: filename=%s, chars=%s", filename, len(content))
+    return await run_sync(_import_markdown, filename, content, properties, collections)
 
 
 @mcp.tool()

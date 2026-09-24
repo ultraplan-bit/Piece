@@ -6,12 +6,18 @@
 
 </div>
 
+<a href="assets/一图看懂%20Piece.png"><img src="assets/一图看懂%20Piece.png" alt="Piece at a glance: turning your documents into a local knowledge base AI can cite" width="100%"></a>
+
 ## What Piece can do
 
 - **Find information**: Let AI find relevant passages and cite sources instead of searching through files by hand.
 - **Edit knowledge cards**: Your documents are organized into knowledge cards with editable titles and text.
 - **Check the originals**: Compare cards with PDF pages or pages converted from Word and PowerPoint to spot parsing errors.
 - **Organize notes**: Group files into collections, and let AI help you create notes and add cards.
+
+Before and after Piece, the same tasks look like this:
+
+<a href="assets/为什么选%20Piece.png"><img src="assets/为什么选%20Piece.png" alt="Before versus with Piece: hunting through files, answers with no source, unreadable scans, redoing setup per AI client, and documents sent to the cloud, paired with search by meaning, cited answers that link back to the original page, parsing services, MCP and skills for every AI client, and files and database kept on your machine" width="100%"></a>
 
 ## Screenshots
 
@@ -46,6 +52,10 @@ The screenshots show the Chinese interface. Click any image to view it at full s
 [![PowerPoint formulas alongside the original page](assets/ppt原页对比图.jpg)](assets/ppt原页对比图.jpg)
 
 </details>
+
+## The life of a document in Piece
+
+<a href="assets/资料的一生.png"><img src="assets/资料的一生.png" alt="Six steps a document goes through in Piece: import, parse, split into cards, organize, retrieve, and cite" width="100%"></a>
 
 ## Getting started
 
@@ -107,6 +117,8 @@ Piece provides the source material; conversations and answers still take place i
 - **Need to parse a document again?** You can reindex it, but **reindexing from the original file overwrites manual edits**. Export or back up your work first.
 
 ## FAQ
+
+<a href="assets/安心用.png"><img src="assets/安心用.png" alt="Where your documents live: originals, knowledge cards, and the database stay on your computer, and content is only sent to the embedding model, OCR or MinerU parsing services, or WebDAV sync when you choose to" width="100%"></a>
 
 **Are my files uploaded?**
 

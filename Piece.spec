@@ -118,6 +118,7 @@ hiddenimports = [
     'pythoncom',
     'pywintypes',
     'win32com.client',
+    'win32com.shell',
     # MCP/FastAPI 相关
     'fastmcp',
     # fastmcp 2.14 lifespan → docket → fakeredis/lupa 隐式依赖

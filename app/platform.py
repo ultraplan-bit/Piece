@@ -8,6 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 
@@ -234,11 +235,70 @@ def _systemctl(action: str, unit: str) -> None:
         raise RuntimeError(f"systemctl --user {action} 失败：{detail}")
 
 
+class _WindowsShortcut:
+    """IShellLinkW 快捷方式，属性名沿用 WScript.Shell 的快捷方式对象。
+
+    WScript.Shell 按系统 ANSI 代码页转换字符串，英文系统上中文路径会变成 ?；
+    IShellLinkW 全程 Unicode。路径已存在时先载入，与 CreateShortcut 行为一致。
+    """
+
+    def __init__(self, path: str):
+        import pythoncom
+        from win32com.shell import shell
+
+        self._path = path
+        self._shell = shell
+        self._link = pythoncom.CoCreateInstance(
+            shell.CLSID_ShellLink, None, pythoncom.CLSCTX_INPROC_SERVER, shell.IID_IShellLink,
+        )
+        self._file = self._link.QueryInterface(pythoncom.IID_IPersistFile)
+        if os.path.exists(path):
+            self._file.Load(path)
+
+    @property
+    def TargetPath(self) -> str:
+        return self._link.GetPath(self._shell.SLGP_RAWPATH)[0]
+
+    @TargetPath.setter
+    def TargetPath(self, value: str) -> None:
+        self._link.SetPath(value)
+
+    @property
+    def Arguments(self) -> str:
+        return self._link.GetArguments()
+
+    @Arguments.setter
+    def Arguments(self, value: str) -> None:
+        self._link.SetArguments(value)
+
+    @property
+    def WorkingDirectory(self) -> str:
+        return self._link.GetWorkingDirectory()
+
+    @WorkingDirectory.setter
+    def WorkingDirectory(self, value: str) -> None:
+        self._link.SetWorkingDirectory(value)
+
+    @property
+    def Description(self) -> str:
+        return self._link.GetDescription()
+
+    @Description.setter
+    def Description(self, value: str) -> None:
+        self._link.SetDescription(value)
+
+    def Save(self) -> None:
+        self._file.Save(self._path, 0)
+
+
 def _windows_shell():
     # 仅 CLI 主线程调用；不在导入平台模块时加载 COM。
-    from win32com.client import Dispatch
+    from win32com.shell import shell, shellcon
 
-    return Dispatch("WScript.Shell")
+    return SimpleNamespace(
+        SpecialFolders=lambda name: shell.SHGetFolderPath(0, {"Startup": shellcon.CSIDL_STARTUP}[name], 0, 0),
+        CreateShortcut=_WindowsShortcut,
+    )
 
 
 def configure_autostart(action: str, *, port: int = 8689) -> Path:
@@ -282,7 +342,7 @@ def configure_autostart(action: str, *, port: int = 8689) -> Path:
         return path
 
     command, working_dir = _autostart_command(port)
-    # ponytail: WSH 执行时展开 %VAR%；支持含 % 路径需改用不经 Shell 展开的自启入口。
+    # ponytail: 快捷方式启动时展开 %VAR%；支持含 % 路径需改用不经 Shell 展开的自启入口。
     if shell is not None and any("%" in value for value in (*command, str(working_dir))):
         raise ValueError("Windows 登录自启的程序和数据目录不能含 %（快捷方式会展开环境变量），请使用不含 % 的路径。")
     content = None

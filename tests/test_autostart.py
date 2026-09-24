@@ -195,7 +195,8 @@ def test_windows_real_shortcut_round_trip_in_temporary_directory(monkeypatch, tm
     monkeypatch.setattr(platform, "_windows_shell", lambda: SimpleNamespace(
         SpecialFolders=lambda _: str(tmp_path / "Startup"), CreateShortcut=shell.CreateShortcut,
     ))
-    data = tmp_path / "知识库 $HOME & notes"
+    # emoji 不在任何 ANSI 代码页中：中文系统上也能发现按代码页转换造成的 ? 替换。
+    data = tmp_path / "知识库 📚 $HOME & notes"
     monkeypatch.setenv("PIECE_DATA_DIR", str(data))
     for port in (9765, 9766):
         path = platform.configure_autostart("install", port=port)
@@ -223,7 +224,7 @@ def test_windows_real_shortcut_round_trip_in_temporary_directory(monkeypatch, tm
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows 原生快捷方式验证")
-@pytest.mark.parametrize("directory", ["程序 $price & more", "程序 %TEMP% $price & more"])
+@pytest.mark.parametrize("directory", ["程序 📚 $price & more", "程序 %TEMP% $price & more"])
 def test_windows_shortcut_preserves_literal_executable_path(monkeypatch, tmp_path, directory):
     shell = platform._windows_shell()
     monkeypatch.setattr(platform, "_windows_shell", lambda: SimpleNamespace(
@@ -255,7 +256,7 @@ def test_windows_shell_passes_arguments_literally(monkeypatch, tmp_path):
         SpecialFolders=lambda _: str(tmp_path / "Startup"), CreateShortcut=shell.CreateShortcut,
     ))
     result = tmp_path / "args.json"
-    arguments = ["知识库 $HOME & notes", 'quote"backslash\\']
+    arguments = ["知识库 📚 $HOME & notes", 'quote"backslash\\']
     # 只启动写回 argv 即退出的探针，不执行 Piece，也不注册真正的启动目录。
     probe = (
         "import json, pathlib, sys; p = pathlib.Path(sys.argv[1]); t = p.with_suffix('.tmp'); "

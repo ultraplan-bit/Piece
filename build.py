@@ -136,13 +136,9 @@ def create_zip():
         sys.exit(1)
 
     # 获取版本号（安装元数据，与 CLI/API 同一来源）
-    version = "0.1.0"
-    try:
-        from app.skills import get_version
+    from app.skills import get_version
 
-        version = get_version()
-    except Exception:
-        pass
+    version = get_version()
 
     # 生成 ZIP 文件名（带日期）
     date_str = datetime.now().strftime("%Y%m%d")

@@ -22,7 +22,6 @@ from pathlib import Path
 
 # 导出头部中的命令占位符；渲染时替换为当前实例的调用前缀
 CLI_PLACEHOLDER = "{{PIECE_CLI}}"
-_FALLBACK_VERSION = "0.1.0"
 
 # 与 indexing.services.metadata_service 相同的 frontmatter 形态：
 # 文件开头由 --- 包裹的块。这里独立维护一份，避免跨包依赖属性服务的语义。
@@ -32,11 +31,14 @@ _FRONTMATTER_PATTERN = re.compile(
 
 
 def get_version() -> str:
-    """导出头部使用的版本号；发行版元数据缺失（如 PyInstaller 制品）时退回内置常量。"""
+    """pyproject.toml 中的版本号，经安装元数据读取（PyInstaller 制品由 spec 一并打包）。
+
+    未安装的源码目录没有元数据，返回 unknown，不冒充某个具体版本。
+    """
     try:
         return _distribution_version("piece")
     except PackageNotFoundError:
-        return _FALLBACK_VERSION
+        return "unknown"
 
 
 def _quoted(path: str | Path) -> str:

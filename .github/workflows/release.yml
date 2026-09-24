@@ -3,8 +3,8 @@ name: Build and Release
 on:
   push:
     tags:
-      - 'v*.*.*'  # 当推送版本标签时触发（如 v0.1.0）
-  workflow_dispatch:  # 允许手动触发
+      - 'v*.*.*'  # 推送版本标签时构建并发布（如 v0.1.1）
+  workflow_dispatch:  # 手动触发只构建并上传 artifact，不发布 Release
 
 permissions:
   contents: write  # 允许创建 Release 和上传文件
@@ -12,6 +12,9 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout 代码
@@ -21,62 +24,80 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: '3.12'
+          enable-cache: true
+
+      # 版本号唯一来源是 pyproject.toml；标签与它不一致时直接失败，
+      # 避免发出 exe 和 ZIP 文件名仍是旧版本号的包
+      - name: 校验版本号
+        id: version
+        run: |
+          VERSION=$(uv version --short --frozen)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
+            echo "::error::标签 $GITHUB_REF_NAME 与 pyproject.toml 的版本 $VERSION 不一致，请先用 uv version 改版本号并提交"
+            exit 1
+          fi
+
+      # 每个版本的更新内容写在 .github/release-notes/v<版本>.md，随代码一起提交
+      - name: 生成 Release 正文
+        if: github.ref_type == 'tag'
+        run: |
+          NOTES=".github/release-notes/$GITHUB_REF_NAME.md"
+          if [[ ! -s "$NOTES" ]]; then
+            echo "::error::缺少 $NOTES，请先写好本版本的 Release Note"
+            exit 1
+          fi
+          VERSION="${{ steps.version.outputs.version }}"
+          {
+            cat "$NOTES"
+            echo
+            echo "## 安装"
+            echo
+            echo "1. 下载 \`Piece_v${VERSION}_*.zip\`，解压到任意目录"
+            echo "2. 双击 \`Piece.exe\` 启动；终端与 AI 命令行使用 \`piece-cli.exe\`"
+            echo "3. MCP 服务默认地址：检索 http://localhost:8686/mcp，索引 http://localhost:8687/mcp（端口可在「设置」中修改）"
+          } > release-body.md
 
       - name: 安装依赖
         run: uv sync --frozen --extra desktop
 
-      - name: 运行打包脚本
-        run: |
-          uv run python build.py
+      # test_install 在临时 venv 里重新下载安装整套依赖，验证的是 pip 安装路径而非打包产物，发布流程中跳过
+      - name: 运行测试
+        run: uv run --no-sync pytest -q --ignore=tests/automated/test_install.py
 
-      - name: 获取版本号
-        id: get_version
-        shell: bash
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/v}
-          else
-            VERSION="0.1.0"
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION"
+      - name: 运行打包脚本
+        run: uv run --no-sync python build.py
 
       - name: 查找 ZIP 文件
         id: find_zip
-        shell: bash
         run: |
-          ZIP_FILE=$(ls dist/Piece_v*.zip | head -n 1)
-          echo "zip_file=$ZIP_FILE" >> $GITHUB_OUTPUT
+          ZIP_FILE=$(ls dist/Piece_v${{ steps.version.outputs.version }}_*.zip | head -n 1)
+          if [[ -z "$ZIP_FILE" ]]; then
+            echo "::error::找不到 dist/Piece_v${{ steps.version.outputs.version }}_*.zip"
+            exit 1
+          fi
+          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
           echo "Found: $ZIP_FILE"
 
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Piece-Windows-${{ steps.version.outputs.version }}
+          path: ${{ steps.find_zip.outputs.zip_file }}
+          retention-days: 30
+
+      # generateReleaseNotes 会在正文后追加与上一个标签的对比链接
       - name: 创建 Release
+        if: github.ref_type == 'tag'
         uses: ncipollo/release-action@v1
         with:
           allowUpdates: true
           draft: false
           makeLatest: true
           tag: ${{ github.ref_name }}
-          artifacts: "${{ steps.find_zip.outputs.zip_file }}"
-          body: |
-            ## Piece v${{ steps.get_version.outputs.version }}
-
-            ### 安装说明
-            1. 下载 `Piece_v${{ steps.get_version.outputs.version }}_*.zip` 文件
-            2. 解压到任意目录
-            3. 双击 `Piece.exe` 启动应用；终端与 AI 命令行使用 `piece-cli.exe`
-
-            ### MCP 服务配置
-            - 检索服务（只读）: http://localhost:8686/mcp
-            - 索引服务（读写）: http://localhost:8687/mcp
-            - 端口可在应用「设置」中修改
-
-            ### 更新内容
-            详见下方自动生成的 Release Notes
+          name: Piece ${{ github.ref_name }}
+          bodyFile: release-body.md
+          generateReleaseNotes: true
+          artifacts: ${{ steps.find_zip.outputs.zip_file }}
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 上传构建产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: Piece-Windows-${{ steps.get_version.outputs.version }}
-          path: ${{ steps.find_zip.outputs.zip_file }}
-          retention-days: 30

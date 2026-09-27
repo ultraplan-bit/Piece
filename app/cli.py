@@ -226,6 +226,16 @@ def _build_parser() -> CliParser:
                              help="跳过几乎只有链接的 Markdown 索引笔记（Obsidian 的 MOC / 目录页）")
     _add_wait_options(file_import)
 
+    import_markdown = file_commands.add_parser(
+        "import-markdown", help="把已取得的 Markdown 正文整篇导入（网页、文章、字幕等），自动切片并保留原件")
+    _add_runtime_options(import_markdown)
+    import_markdown.add_argument("filename", help="文件名，自动补 .md 后缀，重名时自动加序号")
+    import_markdown.add_argument("--input", required=True, help="正文 UTF-8 文件路径，或 - 读 stdin；可自带 YAML frontmatter")
+    import_markdown.add_argument("--collection", dest="collections", action="append",
+                                 help="已存在的完整集合名，可重复")
+    import_markdown.add_argument("--properties", help="文件属性：JSON 对象文件路径，或 - 读 stdin；与 frontmatter 合并且优先")
+    _add_wait_options(import_markdown)
+
     file_reindex = file_commands.add_parser("reindex", help="重新索引文件")
     _add_runtime_options(file_reindex)
     file_reindex.add_argument("file_id", type=_positive)
@@ -908,6 +918,15 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             }))
         if operation == "import":
             return _file_import(client, args)
+        if operation == "import-markdown":
+            if args.input == "-" and args.properties == "-":
+                raise ClientError("--input 和 --properties 不能同时读 stdin", code="INVALID_ARGUMENT")
+            properties = _object_input(args.properties) if args.properties else None
+            # 同一正文按哈希查重，响应丢失时重发只会返回已有文件，无需请求键
+            return _with_wait(client, client.post("/api/v1/file/import-markdown", {
+                "filename": args.filename, "content": _read_text(args.input),
+                "collections": _optional_names(args.collections), "properties": properties,
+            }), args)
         if operation == "reindex":
             if args.dry_run:
                 return _simple(client.post("/api/v1/file/reindex", {

@@ -62,6 +62,24 @@ def test_api_write_read_mcp_shared_result(api, knowledge_base):
     assert api.post("/api/v1/file/delete", json={"file_ids": [file_id]}).json()["error"]["code"] == "CONFIRMATION_REQUIRED"
 
 
+def test_import_markdown_content_without_local_path(api, knowledge_base):
+    read = {"Authorization": "Bearer read-test-key"}
+    write = {"Authorization": "Bearer write-test-key"}
+    payload = {"filename": "网页文章", "content": "# 标题\n\n正文段落", "properties": {"source_url": "https://example.com/a"}}
+    assert api.post("/api/v1/file/import-markdown", json=payload, headers=read).status_code == 403
+    missing = api.post("/api/v1/file/import-markdown", json={**payload, "collections": ["不存在"]}, headers=write).json()
+    assert not missing["success"] and api.post("/api/v1/file/list", json={}).json()["data"]["total"] == 0
+    accepted = api.post("/api/v1/file/import-markdown", json=payload, headers=write).json()
+    assert accepted["success"] and accepted["data"]["filename"] == "网页文章.md"
+    knowledge_base.drain()
+    task = api.post("/api/v1/task/get", json={"task_id": accepted["data"]["task_id"]}).json()["data"]
+    assert task["status"] == "completed"
+    info = api.post("/api/v1/file/get", json={"file_id": accepted["data"]["file_id"]}).json()["data"]
+    assert info["properties"]["source_url"] == "https://example.com/a"
+    again = api.post("/api/v1/file/import-markdown", json={**payload, "filename": "换个名字"}).json()
+    assert again["data"]["duplicate"] and again["data"]["file_id"] == accepted["data"]["file_id"]
+
+
 @pytest.mark.parametrize("payload", [{"file_id": True}, {"file_id": -1}, {"file_id": "1"}, {"file_id": 1, "surprise": 2}])
 def test_strict_arguments(api, payload):
     result = api.post("/api/v1/file/get", json=payload)

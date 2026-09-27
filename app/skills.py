@@ -4,12 +4,12 @@
 职责:
 - 定位内置 skills 目录（源码树与 PyInstaller 制品两种形态）
 - 读取 Skill 清单与内容
-- 推导当前实例的 CLI 调用前缀，把占位符渲染成可用的 SKILL.md
+- 推导当前实例的 CLI 调用前缀，在导出头部注入前缀说明
 - 导出 Skill 到用户指定目录（<目录>/<skill 名>/SKILL.md）
 
 skills/ 下每个子目录是一个 Skill（含 SKILL.md），
 frontmatter 的 name/description 用作界面展示，目录名即 Skill ID。
-仓库内的 SKILL.md 使用 ``{{PIECE_CLI}}`` 占位符，不是可直接复制使用的文件，
+仓库内的 SKILL.md 以 ``<PIECE>`` 代指 CLI 前缀，不是可直接复制使用的文件，
 分发物是 GUI/CLI 导出的渲染结果。
 """
 
@@ -20,8 +20,9 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _distribution_version
 from pathlib import Path
 
-# 导出头部中的命令占位符；渲染时替换为当前实例的调用前缀
-CLI_PLACEHOLDER = "{{PIECE_CLI}}"
+# 正文命令里代指调用前缀的写法。绝对路径前缀每次约 30~40 token，只在头部写一次；
+# 选尖括号是因为照抄执行时 bash、cmd、PowerShell 都会立即报错，不会误连 PATH 上的其他 piece
+CLI_ALIAS = "<PIECE>"
 
 # 与 indexing.services.metadata_service 相同的 frontmatter 形态：
 # 文件开头由 --- 包裹的块。这里独立维护一份，避免跨包依赖属性服务的语义。
@@ -165,9 +166,10 @@ def read_skill(skill_id: str) -> str | None:
 
 def _export_header(prefix: str, version: str) -> str:
     lines = [
-        f"> 由 Piece {version} 于 {date.today().isoformat()} 导出。下文命令前缀",
-        f"> {prefix}",
-        "> 对应本机安装；重装、移动目录、更换端口或数据目录后请重新导出。",
+        f"> 由 Piece {version} 于 {date.today().isoformat()} 导出，对应本机安装；"
+        "重装、移动目录、更换端口或数据目录后请重新导出。",
+        f"> 下文命令中的 `{CLI_ALIAS}` 不能直接执行，运行时须整体替换为：",
+        f"> `{prefix}`",
     ]
     # PowerShell 中以引号开头的命令是语法错误，只能提醒，不能替 agent 执行
     if prefix.startswith('"'):
@@ -176,7 +178,7 @@ def _export_header(prefix: str, version: str) -> str:
 
 
 def render_skill(skill_id: str, prefix: str, *, version: str) -> str | None:
-    """渲染导出用 SKILL.md：占位符替换为前缀，frontmatter 后注入前缀说明。
+    """渲染导出用 SKILL.md：frontmatter 后注入前缀说明，正文保留 ``<PIECE>`` 代称。
 
     返回 UTF-8、LF 的文本；Skill 不存在或 ID 非法时返回 None。
     """
@@ -187,8 +189,7 @@ def render_skill(skill_id: str, prefix: str, *, version: str) -> str | None:
     match = _FRONTMATTER_PATTERN.match(content)
     head = content[: match.end()] if match else ""
     body = content[match.end():] if match else content
-    rendered = f"{head}{_export_header(prefix, version)}\n\n{body}"
-    return rendered.replace(CLI_PLACEHOLDER, prefix)
+    return f"{head}{_export_header(prefix, version)}\n\n{body}"
 
 
 def export_skills(
@@ -201,7 +202,7 @@ def export_skills(
 ) -> dict:
     """把 Skill 以 <目标目录>/<skill_id>/SKILL.md 形式导出。
 
-    写入的是渲染结果（占位符已替换、头部已注入，UTF-8、LF），不是仓库原文；
+    写入的是渲染结果（头部已注入前缀，UTF-8、LF），不是仓库原文；
     目标目录不存在时创建；已存在的 Skill 默认拒绝覆盖，由调用方确认。
 
     Returns:

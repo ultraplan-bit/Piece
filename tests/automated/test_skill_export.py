@@ -1,6 +1,6 @@
 """Skill 资源定位与导出合同。
 
-覆盖 app/skills.py：清单解析、读取边界、CLI 前缀推导、渲染注入、
+覆盖 app/skills.py：清单解析、读取边界、CLI 前缀推导、头部注入、
 目录形式导出（目标目录自动创建、默认不覆盖、显式覆盖、缺失与非法 ID）。
 """
 
@@ -33,13 +33,13 @@ def skills_root(tmp_path: Path, monkeypatch) -> Path:
     (root / "piece-index").mkdir(parents=True)
     (root / "piece-index" / "SKILL.md").write_text(
         "---\nname: piece-index\ndescription: 建库与维护\n---\n\n"
-        "运行 `{{PIECE_CLI}} status --json` 确认目标。\n",
+        "运行 `<PIECE> status --json` 确认目标。\n",
         encoding="utf-8",
     )
     (root / "piece-search").mkdir(parents=True)
     (root / "piece-search" / "SKILL.md").write_text(
         "---\nname: piece-search\ndescription: 检索工作流\n---\n\n"
-        "先 `{{PIECE_CLI}} --version`，再 `{{PIECE_CLI}} search --help`。\n",
+        "先 `<PIECE> --version`，再 `<PIECE> search --help`。\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(skill_resources, "skills_dir", lambda: root)
@@ -187,13 +187,21 @@ def test_render_skill_injects_prefix_and_header(skills_root: Path):
     rendered = render_skill("piece-index", PREFIX, version="0.1.0")
 
     assert rendered is not None
-    assert "{{PIECE_CLI}}" not in rendered  # 不得残留占位符
     assert rendered.startswith("---")  # frontmatter 原样保留
-    assert f"> {PREFIX}" in rendered  # 头部嵌入前缀，含数据目录与端口
+    assert f"> `{PREFIX}`" in rendered  # 头部嵌入前缀，含数据目录与端口
+    assert rendered.count(PREFIX) == 1  # 绝对路径只在头部出现一次
     assert "0.1.0" in rendered
-    assert f"`{PREFIX} status --json`" in rendered  # 正文命令已替换
+    assert "`<PIECE> status --json`" in rendered  # 正文保留代称
     assert "PowerShell" in rendered  # 引号前缀生成 PowerShell 提示
     assert "\r" not in rendered  # LF 输出
+
+
+def test_builtin_skills_use_cli_alias():
+    """内置 Skill 的命令统一写代称，不残留旧占位符。"""
+    for skill_md in skills_dir().glob("*/SKILL.md"):
+        content = skill_md.read_text(encoding="utf-8")
+        assert "<PIECE>" in content, skill_md
+        assert "{{" not in content, skill_md
 
 
 def test_render_skill_bare_prefix_omits_powershell_hint(skills_root: Path):
@@ -207,7 +215,7 @@ def test_render_skill_normalizes_crlf(tmp_path: Path, monkeypatch):
     root = tmp_path / "skills"
     (root / "crlf").mkdir(parents=True)
     (root / "crlf" / "SKILL.md").write_bytes(
-        b"---\r\nname: crlf\r\n---\r\n\r\n`{{PIECE_CLI}} status --json`\r\n"
+        b"---\r\nname: crlf\r\n---\r\n\r\n`<PIECE> status --json`\r\n"
     )
     monkeypatch.setattr(skill_resources, "skills_dir", lambda: root)
 
@@ -215,7 +223,7 @@ def test_render_skill_normalizes_crlf(tmp_path: Path, monkeypatch):
 
     assert rendered is not None
     assert "\r" not in rendered
-    assert f"`{PREFIX} status --json`" in rendered
+    assert "`<PIECE> status --json`" in rendered
 
 
 def test_render_skill_rejects_invalid_ids(skills_root: Path):
@@ -243,7 +251,6 @@ def test_export_creates_target_and_writes_rendered(skills_root: Path, tmp_path: 
     raw = (target / "piece-index" / "SKILL.md").read_bytes()
     assert raw.decode("utf-8") == expected
     assert b"\r" not in raw
-    assert b"{{PIECE_CLI}}" not in raw
 
 
 def test_export_refuses_overwrite_until_confirmed(skills_root: Path, tmp_path: Path):

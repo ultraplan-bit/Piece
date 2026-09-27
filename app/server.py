@@ -141,6 +141,8 @@ def run_application(application: Any, runtime: Runtime) -> None:
     import uvicorn
 
     from app.asgi_server import DrainingServer
+    from app.window import close_window
+    from indexing.utils import run_sync
 
     class CoreServer(DrainingServer):
         def handle_exit(self, sig, frame):
@@ -151,6 +153,9 @@ def run_application(application: Any, runtime: Runtime) -> None:
 
         async def shutdown(self, sockets=None):
             runtime.begin_shutdown()
+            # 窗口只是前端，不等请求、Worker 和同步排空（可能很久）就先回收；
+            # 排空期间经托盘或 API 新开的窗口由 main 收尾时回收。
+            await run_sync(close_window)
             await super().shutdown(sockets=sockets)
 
     server = CoreServer(uvicorn.Config(
@@ -223,9 +228,8 @@ def main(*, port: int | None = None, open_ui: bool = True, with_tray: bool = Tru
                     from app import tray
                     tray.stop()
             finally:
-                if with_gui:
-                    from app.window import close_window
-                    close_window()
+                from app.window import close_window
+                close_window()
 
 
 __all__ = ["Runtime", "build_application", "check_optional_dependencies", "main", "run_application", "start_mcp_servers"]

@@ -101,7 +101,7 @@ Do not share the access keys in your configuration. After changing keys or ports
 
 If your AI can run local commands, you can also export and install workflows from **Skill Export**. Use `piece-search` to find information and `piece-index` to import and organize documents. Export them again after moving the application or changing the data directory.
 
-Content your AI client fetches by itself, such as web pages, WeChat articles, or video transcripts, can go straight into the knowledge base: MCP uses the `import_markdown` tool of the indexing service, and the skill runs `piece file import` on a Markdown file. Piece keeps the original, splits it into cards automatically, and records the title and source URL as file properties.
+Content your AI client fetches by itself, such as web pages, WeChat articles, or video transcripts, can go straight into the knowledge base: MCP uses the `import_markdown` tool of the indexing service, and the skill runs `piece file import-markdown` with the content from stdin or a file. Piece keeps the original, splits it into cards automatically, and records the title and source URL as file properties.
 
 Once connected, ask a question in your **AI client**, for example:
 

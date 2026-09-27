@@ -281,6 +281,9 @@ def create_api(runtime):
     def import_file(path, collections=None, properties=None):
         return files.import_file(path, collection_ids=collection_ids(collections), metadata=properties)
 
+    def import_markdown(filename, content, collections=None, properties=None):
+        return files.import_markdown(filename, content, collection_ids(collections), properties)
+
     def create_file(filename, collections=None):
         return files.create_empty_file(filename, collection_ids(collections))
 
@@ -345,6 +348,8 @@ def create_api(runtime):
     register("file/create", "write", _model("FileCreate", filename=(str, ...), collections=(Names | None, None)), create_file)
     # 本机路径读取是管理权限，索引凭据不能借导入读取任意本机文件。
     register("file/import", "admin", _model("FileImport", path=(str, ...), collections=(Names | None, None), properties=(dict[str, Any] | None, None)), import_file)
+    # 只传正文不读本机路径，与 MCP import_markdown 同为写权限；上限由业务层按字符数校验
+    register("file/import-markdown", "write", _model("FileImportMarkdown", filename=(str, ...), content=(str, ...), collections=(Names | None, None), properties=(dict[str, Any] | None, None)), import_markdown)
     register("file/reindex", "write", _model("Reindex", file_id=(Id, ...), source=(Literal["original", "working"] | None, None), confirmed=(bool, False), request_key=(Key, None), dry_run=(bool, False)), reindex)
     register("file/delete", "write", _model("DeleteFiles", file_ids=(Ids, ...), **confirm), maintenance.delete_files)
     register("file/properties", "write", _model("Properties", file_id=(Id, ...), properties=(dict[str, Any], ...)), lambda file_id, properties: {"file_id": file_id, "updated": metadata_service.save_file_metadata(file_id, properties)})

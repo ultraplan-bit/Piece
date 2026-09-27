@@ -116,9 +116,8 @@ def test_slim_install_lists_and_exports_skills(tmp_path, slim_venv):
     assert exported.code == 0, exported.stdout + exported.stderr
     content = (out_dir / "piece-search" / "SKILL.md").read_text(encoding="utf-8")
     console = slim_venv / ("Scripts/piece.exe" if os.name == "nt" else "bin/piece")
-    assert f'"{console.as_posix()}"' in content
+    assert content.count(f'"{console.as_posix()}"') == 1
     assert "--data-dir" in content and "--port 8689" in content
-    assert "{{PIECE_CLI}}" not in content
 
 
 def test_slim_install_serves_core_without_gui_mcp(tmp_path_factory, slim_venv):

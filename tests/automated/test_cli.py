@@ -309,6 +309,29 @@ def test_cli_utf8_stdin_without_environment_override(endpoint):
     assert json.loads(result.stdout)["data"]["received"] == "中文正文 🧩"
 
 
+def test_import_markdown_reads_stdin_and_waits(endpoint):
+    endpoint.routes["/api/v1/file/import-markdown"] = lambda *a: make_envelope(True, "已受理", {"file_id": 3, "task_ids": [8]})
+    endpoint.routes["/api/v1/task/query"] = lambda *a: complete([8])
+    properties = endpoint.config / "props.json"
+    properties.write_text(json.dumps({"source_url": "https://example.com/a"}), encoding="utf-8")
+    env = {**os.environ, "PYTHONIOENCODING": "ascii", "PYTHONUTF8": "0"}
+    result = subprocess.run([sys.executable, "-m", "app.cli", "file", "import-markdown", "网页文章", "--input", "-",
+        "--properties", str(properties), "--collection", "网页收藏", "--wait",
+        "--data-dir", str(endpoint.config), "--port", str(endpoint.port), "--json"],
+        input="# 标题\n\n正文 🧩".encode("utf-8"), capture_output=True, env=env, timeout=10)
+    assert result.returncode == 0, result.stderr.decode("utf-8")
+    assert json.loads(result.stdout)["data"]["task_ids"] == [8]
+    call = next(c for c in endpoint.calls if c["path"] == "/api/v1/file/import-markdown")
+    assert call["payload"] == {"filename": "网页文章", "content": "# 标题\n\n正文 🧩", "collections": ["网页收藏"],
+                               "properties": {"source_url": "https://example.com/a"}}
+
+
+def test_import_markdown_rejects_two_stdin_inputs(endpoint, capsys):
+    code, result, _ = invoke(endpoint, capsys, "file", "import-markdown", "文章", "--input", "-", "--properties", "-")
+    assert code == 2 and result["error"]["code"] == "INVALID_ARGUMENT"
+    assert not [c for c in endpoint.calls if c["path"] == "/api/v1/file/import-markdown"]
+
+
 def test_unsupported_sync_dry_run_is_rejected(endpoint, capsys):
     code, result, _ = invoke(endpoint, capsys, "sync", "run", "--dry-run")
     assert code == 2 and result["error"]["code"] == "INVALID_ARGUMENT"
@@ -410,7 +433,7 @@ def test_skill_commands_stay_local(endpoint, capsys, tmp_path):
     result = json.loads(capsys.readouterr().out)
     assert code == 0 and result["data"]["warnings"] == []
 
-    # 导出全部（不传 ID）：注入数据目录与端口，占位符已渲染
+    # 导出全部（不传 ID）：头部注入数据目录与端口，绝对路径只写一次
     code = cli.main(["skill", "export", "--dir", str(out_dir),
                      "--data-dir", str(missing_dir), "--port", "8691", "--json"])
     result = json.loads(capsys.readouterr().out)
@@ -421,8 +444,7 @@ def test_skill_commands_stay_local(endpoint, capsys, tmp_path):
     ]
     assert not missing_dir.exists()  # 数据目录仍未创建
     content = (out_dir / "piece-search" / "SKILL.md").read_text(encoding="utf-8")
-    assert "{{PIECE_CLI}}" not in content
-    assert f'--data-dir "{missing_dir.resolve().as_posix()}"' in content
+    assert content.count(f'--data-dir "{missing_dir.resolve().as_posix()}"') == 1
     assert "--port 8691" in content
 
     # 全程未请求服务端口（端口 1 上没有任何监听）

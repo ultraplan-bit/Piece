@@ -101,7 +101,7 @@ MCP 可以理解为 AI 访问知识库的连接方式。打开 Piece 的 **MCP �
 
 如果你的 AI 能运行本机命令行，也可以在 **Skill 导出** 页面导出并安装工作流：`piece-search` 用于查资料，`piece-index` 用于导入和整理资料。移动程序或更换数据目录后，请重新导出。
 
-AI 客户端自己取得的网页、公众号文章、视频字幕等内容也能直接存进知识库：MCP 用索引服务里的 `import_markdown` 工具，Skill 用 `piece file import` 导入写好的 Markdown。Piece 会保留原件、自动切片，并把标题和来源地址记为文件属性。
+AI 客户端自己取得的网页、公众号文章、视频字幕等内容也能直接存进知识库：MCP 用索引服务里的 `import_markdown` 工具，Skill 用 `piece file import-markdown` 从 stdin 或文件传入正文。Piece 会保留原件、自动切片，并把标题和来源地址记为文件属性。
 
 连接完成后，在你的 **AI 客户端**中提问，例如：
 

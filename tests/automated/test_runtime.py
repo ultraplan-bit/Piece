@@ -160,6 +160,22 @@ def test_repeated_signals_do_not_skip_lifespan(resources, monkeypatch):
         AppStatus.should_exit = False
 
 
+def test_shutdown_closes_window_before_draining(resources, monkeypatch):
+    import uvicorn
+    from app import window
+    from app.server import run_application
+    events = []
+    monkeypatch.setattr(window, "close_window", lambda: events.append("window-closed"))
+    def run(server):
+        server.servers = []
+        server.lifespan = SimpleNamespace(shutdown=AsyncMock(side_effect=lambda: events.append("lifespan-stop")))
+        asyncio.run(server.shutdown())
+        server.started = True
+    monkeypatch.setattr(uvicorn.Server, "run", run)
+    run_application(None, resources.runtime)
+    assert events == ["window-closed", "lifespan-stop"]
+
+
 def test_mcp_manager_reports_shutdown_failure(monkeypatch):
     from app.mcp_servers import MCPServerManager
     manager = MCPServerManager()

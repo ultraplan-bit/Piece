@@ -1,6 +1,6 @@
 """Piece 轻量命令行入口。
 
-CLI 本身只依赖 Python 标准库。除 ``serve``、``open`` 和 ``autostart`` 等用户
+CLI 本身只依赖 Python 标准库。除 ``serve``、``start``、``open`` 和 ``autostart`` 等用户
 明确要求的动作外，不会启动服务、打开数据库或创建数据目录；API 命令只通过
 ``app.client`` 访问已经运行的本地 HTTP 服务。
 """
@@ -84,7 +84,7 @@ def _exit_code(result: dict[str, Any]) -> int:
     if result.get("success"):
         return 0
     code = (result.get("error") or {}).get("code")
-    if code == "WAIT_TIMEOUT":
+    if code in {"WAIT_TIMEOUT", "START_TIMEOUT"}:
         return 4
     if code in {"SERVICE_UNAVAILABLE", "NOT_READY"}:
         return 3
@@ -171,6 +171,13 @@ def _build_parser() -> CliParser:
     serve.add_argument("--no-mcp", action="store_true", help="不启动 MCP")
     serve.add_argument("--no-tray", action="store_true", help="不启动托盘")
 
+    start = commands.add_parser("start", help="后台启动服务并等待就绪（默认无 GUI、MCP 和托盘）")
+    _add_runtime_options(start)
+    start.add_argument("--gui", action=argparse.BooleanOptionalAction, default=None, help="启用管理界面")
+    start.add_argument("--mcp", action=argparse.BooleanOptionalAction, default=False, help="启用 MCP 服务")
+    start.add_argument("--open", action="store_true", help="启用并打开管理界面")
+    start.add_argument("--timeout", type=_positive, default=60, help="等待就绪的总超时秒数（默认 60）")
+
     open_ui = commands.add_parser("open", help="打开已运行服务的管理界面，不启动第二个服务")
     _add_runtime_options(open_ui)
 
@@ -184,6 +191,9 @@ def _build_parser() -> CliParser:
 
     status = commands.add_parser("status", help="查询服务状态")
     _add_runtime_options(status)
+
+    stats = commands.add_parser("stats", help="查看入库文件数、已索引文件数、切片数及原件大小统计")
+    _add_runtime_options(stats)
 
     stop = commands.add_parser("stop", help="安全停止目标知识库的服务（等待在途工作收尾）")
     _add_runtime_options(stop)
@@ -200,7 +210,13 @@ def _build_parser() -> CliParser:
     file_list.add_argument("--limit", type=_positive, default=20)
     file_list.add_argument("--offset", type=_nonnegative, default=0)
     file_list.add_argument("--status")
+    file_list.add_argument("--name", help="按文件名包含的文字筛选（不是通配符）")
     file_list.add_argument("--collection", dest="collections", action="append")
+
+    file_scan = file_commands.add_parser("scan", help="扫描原件目录，登记未入库文件并创建索引任务")
+    _add_runtime_options(file_scan)
+    file_scan.add_argument("--dry-run", action="store_true", help="只列出待登记文件，不创建索引任务")
+    _add_wait_options(file_scan)
 
     file_get = file_commands.add_parser("get", help="获取文件详情")
     _add_runtime_options(file_get)
@@ -399,6 +415,7 @@ def _build_parser() -> CliParser:
     config_init = config_commands.add_parser("init", help="离线初始化配置")
     _add_runtime_options(config_init)
     config_init.add_argument("--offline", action="store_true", help=argparse.SUPPRESS)
+    config_init.add_argument("--interactive", action="store_true", help="交互配置嵌入模型，确认后保存（不自动联网）")
 
     config_show = config_commands.add_parser("show", help="显示配置")
     _add_runtime_options(config_show)
@@ -872,6 +889,18 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         return _doctor(args)
     if command == "serve":
         raise AssertionError("serve is handled separately")
+    if command == "start":
+        if args.open and args.gui is False:
+            raise ClientError("--open 不能与 --no-gui 同时使用", code="INVALID_ARGUMENT")
+        info = _load_config_info(args)
+        if info.missing:
+            if _is_listening(args.port):
+                raise ClientError("目标配置不存在且端口已被占用，未启动服务；请核对 --data-dir 和 --port",
+                                  code="PORT_IN_USE")
+            _offline_config_init(args)
+        from app.background import start_service
+        return _simple(start_service(_client_for(args), timeout=args.timeout,
+                                     with_gui=bool(args.gui), with_mcp=args.mcp, open_ui=args.open))
     if command == "open":
         client = _client_for(args)
         result = client.post("/api/v1/window/open", {})
@@ -903,13 +932,25 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
     client = _client_for(args)
 
+    if command == "stats":
+        return _simple(client.post("/api/v1/storage/stats", {}))
+
     if command == "file":
         operation = args.file_command
         if operation == "list":
-            return _simple(client.post("/api/v1/file/list", {
-                "limit": args.limit, "offset": args.offset, "status": args.status,
-                "collections": _optional_names(args.collections),
-            }))
+            payload = {"limit": args.limit, "offset": args.offset, "status": args.status,
+                       "collections": _optional_names(args.collections)}
+            if args.name is not None:
+                if not args.name.strip():
+                    raise ClientError("--name 不能为空", code="INVALID_ARGUMENT")
+                payload["name"] = args.name
+            return _simple(client.post("/api/v1/file/list", payload))
+        if operation == "scan":
+            if args.dry_run and args.wait:
+                raise ClientError("--dry-run 不能与 --wait 同时使用", code="INVALID_ARGUMENT")
+            return _with_wait(client, _submit(client, "/api/v1/file/scan", {
+                "dry_run": args.dry_run,
+            }), args)
         if operation == "get":
             return _simple(client.post("/api/v1/file/get", {"file_id": args.file_id}))
         if operation == "create":
@@ -1111,8 +1152,12 @@ def _simple(result: dict[str, Any]) -> tuple[dict[str, Any], int]:
 
 def _offline_config_init(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     try:
-        from indexing.services.config_service import initialize_config
-        value = initialize_config()
+        if getattr(args, "interactive", False):
+            from app.setup_wizard import initialize_interactively
+            value = initialize_interactively()
+        else:
+            from indexing.services.config_service import initialize_config
+            value = initialize_config()
     except ImportError as exc:
         raise ClientError(f"配置服务不可用：{exc}", code="MISSING_DEPENDENCY") from exc
     if not isinstance(value, dict):

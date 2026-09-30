@@ -92,6 +92,51 @@ def complete(ids):
         "all_done": True, "all_succeeded": True, "not_found": [], "poll_after_ms": 0})
 
 
+def test_file_name_and_stats_commands(endpoint, capsys):
+    code, result, _ = invoke(endpoint, capsys, "file", "list", "--name", "100%_中文", "--collection", "论文")
+    assert code == 0 and result["success"]
+    assert endpoint.calls[-1]["payload"]["name"] == "100%_中文"
+    assert endpoint.calls[-1]["payload"]["collections"] == ["论文"]
+    code, result, _ = invoke(endpoint, capsys, "stats")
+    assert code == 0 and endpoint.calls[-1]["path"] == "/api/v1/storage/stats"
+
+
+def test_scan_wait_preserves_partial_failure(endpoint, capsys):
+    endpoint.routes["/api/v1/file/scan"] = lambda *a: failure("PARTIAL_FAILURE", {"task_ids": [7], "failed_count": 1})
+    endpoint.routes["/api/v1/task/query"] = lambda *a: complete([7])
+    code, result, _ = invoke(endpoint, capsys, "file", "scan", "--wait")
+    assert code == 1 and result["error"]["code"] == "PARTIAL_FAILURE"
+    assert result["data"]["task_ids"] == [7]
+    assert endpoint.calls[-1]["path"] == "/api/v1/task/query"
+
+
+def test_scan_preview_and_invalid_arguments(endpoint, capsys):
+    code, _, _ = invoke(endpoint, capsys, "file", "scan", "--dry-run")
+    assert code == 0 and endpoint.calls[-1]["payload"] == {"dry_run": True}
+    endpoint.calls.clear()
+    for args in (("file", "scan", "--dry-run", "--wait"), ("file", "list", "--name", "  "),
+                 ("start", "--open", "--no-gui")):
+        code, result, _ = invoke(endpoint, capsys, *args)
+        assert code == 2 and result["error"]["code"] == "INVALID_ARGUMENT"
+    assert endpoint.calls == []
+
+
+def test_start_dispatch_and_defaults(endpoint, capsys, monkeypatch):
+    from app import background
+    calls = []
+    def start(client, **kwargs):
+        calls.append((client, kwargs))
+        return make_envelope(True, "ready", {"pid": 123})
+    monkeypatch.setattr(background, "start_service", start)
+    code, result, _ = invoke(endpoint, capsys, "start")
+    assert code == 0 and result["data"]["pid"] == 123
+    assert calls[-1][0].config_dir == endpoint.config
+    assert calls[-1][1] == {"timeout": 60, "with_gui": False, "with_mcp": False, "open_ui": False}
+    code, _, _ = invoke(endpoint, capsys, "start", "--gui", "--mcp", "--timeout", "12")
+    assert code == 0 and calls[-1][1]["with_gui"] and calls[-1][1]["with_mcp"]
+    assert calls[-1][1]["timeout"] == 12
+
+
 @pytest.mark.parametrize("error,expected", [("TARGET_MISMATCH", 1), ("PROTOCOL_ERROR", 1),
     ("NOT_PIECE", 1), ("VERSION_MISMATCH", 1), ("FORBIDDEN", 1), ("CONNECTION_FAILED", 1),
     ("SERVICE_UNAVAILABLE", 3), ("NOT_READY", 3), ("WAIT_TIMEOUT", 4), ("INVALID_INPUT", 2)])

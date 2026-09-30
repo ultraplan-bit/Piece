@@ -275,11 +275,14 @@ def get_note_files():
     return _file_repo.find_notes()
 
 
-def get_files_list_paginated(limit=20, offset=0, status=None, collection_ids=None):
+def get_files_list_paginated(limit=20, offset=0, status=None, collection_ids=None, name=None):
     conditions, params = [], []
     if status:
         conditions.append("status = ?")
         params.append(status)
+    if name is not None:
+        conditions.append("filename LIKE ? ESCAPE '!'")
+        params.append("%" + name.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%")
     if collection_ids is not None:
         conditions.append(f"id IN (SELECT file_id FROM file_collections WHERE collection_id IN ({','.join('?' for _ in collection_ids)}))" if collection_ids else "0")
         params.extend(collection_ids)

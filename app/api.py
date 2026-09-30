@@ -271,9 +271,17 @@ def create_api(runtime):
             return envelope(data)
         app.add_api_route(f"/api/v1/{operation}", endpoint, methods=["POST"], name=operation)
 
-    def list_files(limit=20, offset=0, status=None, collections=None):
+    def list_files(limit=20, offset=0, status=None, collections=None, name=None):
         scope = None if collections is None else collection_ids(collections)
-        return files.get_files_list_paginated(limit, offset, status, scope)
+        return files.get_files_list_paginated(limit, offset, status, scope, name=name)
+
+    def scan_files(dry_run=False):
+        if dry_run:
+            return {"candidates": files.scan_untracked_files(), "dry_run": True}
+        result = files.register_untracked_files()
+        return {**result, "created_count": len(result["created"]),
+                "skipped_count": len(result["skipped"]), "failed_count": len(result["failed"]),
+                "task_ids": [item["task_id"] for item in result["created"]]}
 
     def collection_ids(names):
         return collections.resolve_collection_ids(names)
@@ -343,7 +351,9 @@ def create_api(runtime):
     chunk_id_model = _model("ChunkId", chunk_id=(Id, ...))
     task_id_model = _model("TaskId", task_id=(Id, ...))
     confirm = {"dry_run": (bool, False), "confirmed": (bool, False)}
-    register("file/list", "read", _model("FileList", **pagination, status=(Literal["pending", "indexed", "error", "empty"] | None, None), collections=(Names | None, None)), list_files)
+    register("file/list", "read", _model("FileList", **pagination, status=(Literal["pending", "indexed", "error", "empty"] | None, None), collections=(Names | None, None), name=(Annotated[str, Field(min_length=1, max_length=200)] | None, None)), list_files)
+    register("file/scan", "admin", _model("FileScan", dry_run=(bool, False)), scan_files)
+    register("storage/stats", "read", empty, files.get_storage_stats)
     register("file/get", "read", file_id_model, maintenance.file_info)
     register("file/create", "write", _model("FileCreate", filename=(str, ...), collections=(Names | None, None)), create_file)
     # 本机路径读取是管理权限，索引凭据不能借导入读取任意本机文件。

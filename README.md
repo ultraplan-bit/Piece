@@ -154,6 +154,26 @@ uv run --extra desktop piece serve --open
 
 macOS / Linux 可通过源码运行，使用浏览器界面，实机兼容性仍在完善。命令行帮助可运行 `uv run --extra desktop piece --help`；Windows 便携版在终端中使用 `piece-cli.exe`。业务命令需要 Piece 服务已启动。
 
+**仅用命令行管理知识库**（下面的 `piece` 在源码环境中换成 `uv run --no-sync piece`，便携版换成 `piece-cli.exe`）：
+
+```bash
+piece config init --interactive   # 在终端中配置嵌入模型，隐藏输入密钥，确认后才保存
+piece start                       # 后台启动核心服务，确认就绪后返回
+piece config test embedding       # 显式访问配置的模型服务，检查连接与维度
+piece file import "资料.md" --wait
+piece file list --name "资料"     # 文件名包含匹配，不是正文搜索或通配符
+piece stats                       # 入库文件数、已索引文件数、切片数和原件大小总计
+piece status
+piece stop                        # 请求停止；服务会在退出前收尾在途工作
+```
+
+- `config init` 不带 `--interactive` 时仍是非交互初始化；脚本可接着用 `config update --offline --input 配置补丁.json`。向导不自动联网，不改已有管理/MCP 密钥；服务运行时拒绝离线保存，已有索引也不能直接切换嵌入模型、地址或维度。
+- `start` 默认不启用 GUI、MCP 或托盘。需要时用 `start --gui --mcp`，或 `start --open --mcp` 启用并打开界面（需已有相应可选依赖）。`serve` 保留原有前台运行方式。
+- 后台启动默认最多等待 60 秒，可用 `--timeout` 调整；日志位置会随结果返回，位于配置目录的 `logs/background-端口.log`。超时或 Ctrl+C 只停止等待，不强杀后台进程；请继续查看日志并用 `status` / `stop` 管理。重复 `start` 会复用相同目标的服务，不自动重启或更改其入口配置。
+- 使用自定义知识库时，所有命令都保持相同的 `--data-dir` 和 `--port`；`--data-dir` 指配置目录，实际文件存储位置仍由配置的 `data_path` 决定。
+- 文件已放入当前知识库的 `files/originals/` 时，可先 `piece file scan --dry-run` 预览，再 `piece file scan --wait` 登记并索引尚未入库的文件。扫描只检查该目录顶层的受支持原件，不覆盖已有文件或重新索引已登记文件；任意外部目录仍用 `file import --recursive`。部分扫描失败会保留已受理的任务 ID，并以失败退出码报告。
+- `stats` 的大小是已登记文件的 `file_size` 总和，不是包含数据库、插图与日志的完整磁盘占用。
+
 </details>
 
 ---

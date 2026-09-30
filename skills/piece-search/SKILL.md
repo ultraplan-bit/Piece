@@ -10,7 +10,7 @@ description: 使用 Piece CLI 从用户已有知识库发现文件和集合、�
 ## 执行顺序
 
 1. 执行 `<PIECE> --version` 和 `<PIECE> status --json`。沿用用户指定的 `--data-dir`、`--port`，确认返回的目标知识库。服务未启动时提示用户先显式运行 `<PIECE> serve`，**不得自行启动、后台拉起服务或安装依赖**。只有用户明确要求启动时才执行启动命令。退出码 3 表示服务不可用，1 表示目标不符、版本不兼容或权限问题，不能靠换数据目录或端口“碰”出一个能连上的服务。
-2. 用 `<PIECE> collection list --json`、`<PIECE> file list --json` 发现范围。用户指定范围时，先核对名称与文件 ID；无匹配就明确报告，不能悄悄改成全库搜索。
+2. 用 `<PIECE> collection list --json`、`<PIECE> file list --json` 发现范围；已知文件名片段时可用 `<PIECE> file list --name "片段" --json` 筛选（普通文字包含匹配，不是正文搜索）。用户指定范围时，先核对名称与文件 ID；无匹配就明确报告，不能悄悄改成全库搜索。
 3. 用 `<PIECE> search "问题" --collection "已确认的集合" --json` 获取候选。只把候选当线索，不能仅凭标题或分数作答。需要文件限定时查 `<PIECE> search --help`，使用已确认的稳定文件 ID。
 4. 按候选 `chunk_id` 执行 `<PIECE> chunk get ID --json`，只取回答所需的少量正文；确有图表或版面证据需求时，再查 `<PIECE> chunk images --help` / `<PIECE> file --help` 获取插图或原页。不要一次拉取整个知识库。
 5. 根据实际取回的正文回答，引用 **文件名、标题、chunk_id 和可用的原页页码**。没有 `page_number` 时不臆造页码；需要引用原图时先实际获取图像。

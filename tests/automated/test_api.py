@@ -80,6 +80,62 @@ def test_import_markdown_content_without_local_path(api, knowledge_base):
     assert again["data"]["duplicate"] and again["data"]["file_id"] == accepted["data"]["file_id"]
 
 
+def test_file_name_filter_is_literal_and_combines_with_pagination(api):
+    names = ["Alpha100%_报告.md", "Alpha100XY报告.md", "其他资料.md"]
+    ids = [api.post("/api/v1/file/create", json={"filename": name}).json()["data"]["file_id"] for name in names]
+    first = api.post("/api/v1/file/list", json={"name": "alpha", "limit": 1}).json()["data"]
+    second = api.post("/api/v1/file/list", json={"name": "alpha", "limit": 1, "offset": 1}).json()["data"]
+    assert first["total"] == second["total"] == 2
+    assert [first["files"][0]["id"], second["files"][0]["id"]] == [ids[1], ids[0]]
+    for literal in ("%", "_", "100%_"):
+        result = api.post("/api/v1/file/list", json={"name": literal}).json()["data"]
+        assert result["total"] == 1 and result["files"][0]["id"] == ids[0]
+    assert api.post("/api/v1/file/list", json={"name": "' OR 1=1 --"}).json()["data"]["total"] == 0
+    assert api.post("/api/v1/file/list", json={"name": "alpha", "status": "indexed"}).json()["data"]["total"] == 0
+    api.post("/api/v1/collection/create", json={"name": "范围"})
+    api.post("/api/v1/collection/set", json={"file_ids": [ids[0]], "collection_names": ["范围"]})
+    scoped = api.post("/api/v1/file/list", json={"name": "报告", "collections": ["范围"]}).json()["data"]
+    assert scoped["total"] == 1 and scoped["files"][0]["id"] == ids[0]
+    assert api.post("/api/v1/file/list", json={"name": ""}).json()["error"]["code"] == "INVALID_INPUT"
+
+
+def test_scan_preview_registration_and_storage_stats(api, knowledge_base):
+    from indexing.services import file_service, task_service
+    original = file_service.ensure_files_dir() / "originals" / "待扫描.md"
+    original.write_text("# 标题\n\n扫描入库的正文", encoding="utf-8")
+    preview = api.post("/api/v1/file/scan", json={"dry_run": True}).json()
+    assert preview["success"] and preview["data"]["candidates"][0]["original_filename"] == original.name
+    assert file_service.get_files_list() == [] and task_service.get_active_tasks() == []
+    assert api.post("/api/v1/file/scan", json={}, headers={"Authorization": "Bearer write-test-key"}).status_code == 403
+    accepted = api.post("/api/v1/file/scan", json={}).json()
+    assert accepted["success"] and accepted["data"]["created_count"] == 1
+    assert len(accepted["data"]["task_ids"]) == 1
+    again = api.post("/api/v1/file/scan", json={}).json()
+    assert again["success"] and again["data"]["task_ids"] == []
+    knowledge_base.drain()
+    stats = api.post("/api/v1/storage/stats", json={}, headers={"Authorization": "Bearer read-test-key"}).json()
+    assert stats["success"] and stats["data"]["total_files"] == stats["data"]["indexed_files"] == 1
+    assert stats["data"]["total_chunks"] > 0 and stats["data"]["total_size"] == original.stat().st_size
+    assert original.is_file()
+
+
+def test_scan_partial_failure_preserves_accepted_task_ids(api, knowledge_base, monkeypatch):
+    from indexing.services import file_service
+    originals = file_service.ensure_files_dir() / "originals"
+    (originals / "正常.md").write_text("正常内容", encoding="utf-8")
+    (originals / "失败.md").write_text("无法导入", encoding="utf-8")
+    real_import = file_service.import_file
+    def import_file(path, **kwargs):
+        if path.endswith("失败.md"):
+            raise ValueError("模拟导入失败")
+        return real_import(path, **kwargs)
+    monkeypatch.setattr(file_service, "import_file", import_file)
+    result = api.post("/api/v1/file/scan", json={}).json()
+    assert not result["success"] and result["error"]["code"] == "PARTIAL_FAILURE"
+    assert result["data"]["failed_count"] == result["data"]["created_count"] == 1
+    assert len(result["data"]["task_ids"]) == 1
+
+
 @pytest.mark.parametrize("payload", [{"file_id": True}, {"file_id": -1}, {"file_id": "1"}, {"file_id": 1, "surprise": 2}])
 def test_strict_arguments(api, payload):
     result = api.post("/api/v1/file/get", json=payload)

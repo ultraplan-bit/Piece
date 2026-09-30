@@ -1,5 +1,6 @@
 """统一配置更新：原子保存、脱敏、生效分类及显式离线互斥。"""
 
+import hashlib
 import json
 import sqlite3
 from contextlib import ExitStack
@@ -90,12 +91,37 @@ def get_saved_settings():
     return _read_config()
 
 
-def initialize_config():
+def config_revision():
+    """交互确认期间不持有文件锁；保存时用原文件摘要检测并发改动。"""
+    try:
+        return hashlib.sha256(_get_config_file_path().read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        raise BusinessError("INVALID_CONFIG", "配置无法读取，原文件未修改") from None
+
+
+def initialize_config(patch=None, *, expected_revision=None):
     with database_lock(_get_config_file_path()):
-        target = _read_config() if _get_config_file_path().exists() else AppSettings()
-        with database_lock(target.get_db_path()):
-            # 补写管理凭据也必须等两个资源锁都取得后进行。
-            settings = load_settings()
+        if expected_revision is not None and config_revision() != expected_revision:
+            raise BusinessError("CONFIG_CHANGED", "配置在交互期间已被修改，请重新运行初始化，未覆盖现有配置")
+        exists = _get_config_file_path().exists()
+        target = _read_config() if exists else AppSettings()
+        with ExitStack() as locks:
+            locks.enter_context(database_lock(target.get_db_path()))
+            if patch is None:
+                # 补写管理凭据也必须等两个资源锁都取得后进行。
+                settings = load_settings()
+            else:
+                settings = _validate(_merge(target.model_dump(), patch))
+                if settings.get_db_path().resolve() != target.get_db_path().resolve():
+                    locks.enter_context(database_lock(settings.get_db_path()))
+                _check_model_change(target, settings)
+                if not exists:
+                    settings.mcp.api_key = settings_module.generate_api_key()
+                    settings.mcp.index_api_key = settings_module.generate_api_key()
+                if not save_settings(settings):
+                    raise BusinessError("CONFIG_SAVE_FAILED", "配置保存失败，原配置未修改")
             return {"config": redact(settings.model_dump()), "config_path": str(_get_config_file_path())}
 
 
@@ -108,6 +134,14 @@ def _has_indexed_data(path):
         return "chunks" in tables and connection.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is not None
     finally:
         connection.close()
+
+
+def _check_model_change(current, updated):
+    changed = any(getattr(current.embedding, key) != getattr(updated.embedding, key) for key in _MODEL_FIELDS)
+    if changed and _has_indexed_data(current.get_db_path()):
+        raise BusinessError("REINDEX_REQUIRED", "已有向量不能直接切换模型/地址/维度。请保留当前配置，或明确选择空知识库后配置新模型；不会自动适配旧向量。",
+                            data={"requires_reindex": ["embedding"]})
+    return changed
 
 
 @serialized_mutation
@@ -129,10 +163,7 @@ def update_config(patch, offline=False):
                 and all(current.mcp.get_api_key(service) == updated.mcp.get_api_key(service) for service in ("retrieval", "index"))):
             restart.remove("mcp")
         reindex = [key for key in changed if key in {"embedding", "ocr", "office"}]
-        model_changed = any(getattr(current.embedding, key) != getattr(updated.embedding, key) for key in _MODEL_FIELDS)
-        if model_changed and _has_indexed_data(current.get_db_path()):
-            raise BusinessError("REINDEX_REQUIRED", "已有向量不能直接切换模型/地址/维度。请保留当前配置，或明确选择空知识库后配置新模型；不会自动适配旧向量。",
-                                data={"requires_reindex": ["embedding"]})
+        model_changed = _check_model_change(current, updated)
         if not offline and model_changed:
             from .task_service import get_active_tasks
             if get_active_tasks():

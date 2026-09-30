@@ -9,7 +9,7 @@ description: 使用 Piece CLI 导入原始文档、创建笔记、批量新增�
 
 ## 执行顺序
 
-1. 执行 `<PIECE> --version`、`<PIECE> status --json`，确认用户指定的知识库、端口、文件与集合。服务未启动时只提示先启动 `<PIECE> serve`；**没有用户明确要求，不得自行启动后台服务**。不要擅自修改密钥、模型、数据目录或注册自启。
+1. 执行 `<PIECE> --version`、`<PIECE> status --json`，确认用户指定的知识库、端口、文件与集合。服务未启动时只提示先启动 `<PIECE> serve`，或用 `<PIECE> start` 显式后台启动核心服务；**没有用户明确要求，不得自行启动后台服务**。不要擅自修改密钥、模型、数据目录或注册自启。
 2. 区分四条路径：
    - **导入原始文档**：`<PIECE> file import "资料.pdf" --collection "已存在集合" --wait --timeout 300 --json`。支持 PDF、Word、PPT、Excel、Markdown、TXT、HTML 和 EPUB。先发现或按用户意图创建集合。目录导入先查看 `--recursive` 的帮助，保留 skipped/excluded/duplicate/failed 报告，不把跳过项说成成功。导入 Obsidian vault 时加 `--recursive --skip-link-notes`，隐藏目录（`.obsidian`、`.trash`）默认跳过，模板或附件目录用 `--exclude templates --exclude attachments` 排除。
    - **导入外部取得的内容**（网页、公众号文章、视频字幕、导图大纲等）：先用你自己的工具取得正文，再 `<PIECE> file import-markdown "文章标题" --input - --properties props.json --wait --json` 从 stdin 传入正文（也可 `--input 文章.md`）。`props.json` 是 JSON 对象，至少记录 `title`、`source_url`，可加 `author`、`published_at`；也可以直接写在正文开头的 YAML frontmatter 里，两者合并时 `--properties` 优先。Piece 会保留原件、自动切片并把属性写入文件；不要为此手工切片。正文按内容查重，结果不确定时重跑同一命令只会返回已有文件。单次正文不超过 2 MiB（JSON 编码后），更大的文档写成文件后用 `file import`。网页也可以直接导入浏览器另存的 `.html`（会自动取正文区并读取标题、作者、来源地址），电子书直接导入 `.epub`。
@@ -19,6 +19,12 @@ description: 使用 Piece CLI 导入原始文档、创建笔记、批量新增�
 4. 使用 CLI 的 `--wait` 或 `<PIECE> task wait ID... --timeout 300 --json` 获取终态，不另写轮询脚本。只有 `all_succeeded` 或所有任务 `completed` 才可报告成功；`all_done` 也可能包含失败或取消。
 5. 根据终态 `result.file_id/chunk_id/chunk_ids` 读回文件、卡片与集合，验证标题、正文、数量和归类，不再按相似标题猜新增结果。
 6. 对删除、重新索引、覆盖导出或云同步先查看影响，再取得用户确认。可先执行 `<PIECE> file delete ID --dry-run --json` 或卡片删除预览；不能为了通过校验擅自加 `--yes`。
+
+## 扫描与统计
+
+- 用 `<PIECE> file list --name "文件名片段" --json` 定位文件，可结合集合和状态过滤；这是文件名包含匹配，`%`、`_` 也是普通字符，不是正文检索。
+- 用户要登记已放进知识库 `files/originals/` 的原件时，先 `<PIECE> file scan --dry-run --json` 确认范围，再 `<PIECE> file scan --wait --json`。扫描不接收外部目录、不重索引已登记文件；保留 `created/skipped/failed` 和 `task_ids`，部分失败不能报告整体成功。
+- `<PIECE> stats --json` 返回入库文件数、已索引文件数、切片数及登记的原件大小总和；不能把 `total_size` 当成包含数据库、插图、日志的完整磁盘占用。
 
 ## 失败处理
 

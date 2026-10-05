@@ -40,10 +40,11 @@ def _has_chunks(file_ids):
         return cursor.fetchone() is not None
 
 
-async def _resolve(query, filenames=None, collections=None, file_ids=None, limit=20):
+async def _resolve(query, filenames=None, collections=None, file_ids=None, limit=20, include_descendants=True):
     if not isinstance(query, str) or not query.strip() or len(query) > 10000:
         raise BusinessError("INVALID_INPUT", "查询必须为 1–10000 字符的非空文本")
     state = {"query": query, "filenames": filenames, "collections": collections,
+             "include_descendants": include_descendants,
              "file_ids": file_ids, "limit": limit, "error": None}
     scope = await run_sync(preprocess_node, state)
     if scope.get("error"):
@@ -60,8 +61,8 @@ async def _resolve(query, filenames=None, collections=None, file_ids=None, limit
     return result
 
 
-async def resolve_database_keywords(query, filenames=None, collections=None):
-    result = await _resolve(query, filenames, collections)
+async def resolve_database_keywords(query, filenames=None, collections=None, include_descendants=True):
+    result = await _resolve(query, filenames, collections, include_descendants=include_descendants)
     return {"keywords": result.get("final_keywords", []), "confidence_scores": result.get("confidence_scores", {}),
             "stats": result.get("stats", {}), "debug_stats": result.get("debug_stats", {})}
 
@@ -93,9 +94,9 @@ def _candidates(result, limit):
     return candidates
 
 
-async def search(query, file_ids=None, collections=None, limit=20, diagnostics=False):
+async def search(query, file_ids=None, collections=None, limit=20, diagnostics=False, include_descendants=True):
     started = perf_counter()
-    result = await _resolve(query, collections=collections, file_ids=file_ids, limit=limit)
+    result = await _resolve(query, collections=collections, file_ids=file_ids, limit=limit, include_descendants=include_descendants)
     data = {"candidates": await run_sync(_candidates, result, limit), "stats": result["stats"],
             "file_ids_filter": result.get("file_ids")}
     if diagnostics:

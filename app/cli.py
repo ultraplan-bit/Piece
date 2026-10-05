@@ -13,10 +13,12 @@ import importlib.util
 import json
 import multiprocessing
 import os
+import shlex
 import shutil
 import socket
 import sqlite3
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -211,7 +213,11 @@ def _build_parser() -> CliParser:
     file_list.add_argument("--offset", type=_nonnegative, default=0)
     file_list.add_argument("--status")
     file_list.add_argument("--name", help="按文件名包含的文字筛选（不是通配符）")
-    file_list.add_argument("--collection", dest="collections", action="append")
+    file_list.add_argument("--collection", dest="collections", action="append", help="完整集合名，可重复；默认包含后代")
+    file_list.add_argument("--direct-only", action="store_true", help="集合范围只读直接归属，不包含后代")
+    file_list.add_argument("--uncategorized", action="store_true", help="只列出没有任何直接集合关联的文件")
+    file_list.add_argument("--sort-by", choices=("created_at", "updated_at", "filename", "id"), default="created_at")
+    file_list.add_argument("--ascending", action="store_true", help="升序排列（默认降序）")
 
     file_scan = file_commands.add_parser("scan", help="扫描原件目录，登记未入库文件并创建索引任务")
     _add_runtime_options(file_scan)
@@ -299,6 +305,19 @@ def _build_parser() -> CliParser:
     _add_runtime_options(chunk_get)
     chunk_get.add_argument("chunk_id", type=_positive)
 
+    chunk_extract = chunk_commands.add_parser(
+        "extract", help="从卡片正文切出精确引文，直接产出可提交的知识证据",
+        description="定位可宽松，返回的 quote 始终是正文精确子串，仍受知识证据逐字校验约束。")
+    _add_runtime_options(chunk_extract)
+    chunk_extract.add_argument("chunk_id", type=_positive)
+    locate = chunk_extract.add_mutually_exclusive_group(required=True)
+    locate.add_argument("--lines", help="行号或范围，如 12 或 12-14（1 基）")
+    locate.add_argument("--grep", help="按行匹配定位；默认子串匹配")
+    chunk_extract.add_argument("--regex", action="store_true", help="--grep 按正则表达式匹配")
+    chunk_extract.add_argument("--context", type=_nonnegative, default=0, help="--grep 时前后各取的行数")
+    chunk_extract.add_argument("--max-matches", type=_positive, default=20, help="--grep 最多返回的匹配数（最大 50）")
+    chunk_extract.add_argument("--out", type=Path, help="将唯一且未截断的匹配保存为证据 JSON；不覆盖已有文件")
+
     chunk_add = chunk_commands.add_parser("add", help="新增切片")
     _add_runtime_options(chunk_add)
     chunk_add.add_argument("file_id", type=_positive)
@@ -341,7 +360,8 @@ def _build_parser() -> CliParser:
     chunk_image.add_argument("--output", type=Path, required=True)
     chunk_image.add_argument("--yes", action="store_true", help="允许覆盖输出文件")
 
-    collection_parser = commands.add_parser("collection", help="集合操作")
+    collection_parser = commands.add_parser("collection", help="层级集合操作（逻辑分类，不移动原件）",
+                                            description="集合是逻辑分类：读取父范围默认包含后代，归类只写所选集合，不自动加入祖先。名称中的 / 是普通字符，不是层级路径。")
     collection_commands = collection_parser.add_subparsers(dest="collection_command", required=True)
 
     collection_list = collection_commands.add_parser("list", help="分页列出集合")
@@ -349,22 +369,33 @@ def _build_parser() -> CliParser:
     collection_list.add_argument("--limit", type=_positive, default=20)
     collection_list.add_argument("--offset", type=_nonnegative, default=0)
 
-    collection_create = collection_commands.add_parser("create", help="创建集合")
+    collection_tree = collection_commands.add_parser("tree", help="读取集合树及直接/子树文件计数，不附带文件正文")
+    _add_runtime_options(collection_tree)
+
+    collection_create = collection_commands.add_parser("create", help="创建根集合或子集合")
     _add_runtime_options(collection_create)
     collection_create.add_argument("name")
     collection_create.add_argument("--description")
+    collection_create.add_argument("--parent-id", type=_positive, help="父集合 ID；省略则创建根集合")
+
+    collection_move = collection_commands.add_parser("move", help="移动集合，不改动文件直接归属和原件")
+    _add_runtime_options(collection_move)
+    collection_move.add_argument("collection_id", type=_positive)
+    parent = collection_move.add_mutually_exclusive_group(required=True)
+    parent.add_argument("--parent-id", type=_positive, help="目标父集合 ID")
+    parent.add_argument("--root", action="store_true", help="移到根层")
 
     collection_rename = collection_commands.add_parser("rename", help="重命名集合")
     _add_runtime_options(collection_rename)
     collection_rename.add_argument("collection_id", type=_positive)
     collection_rename.add_argument("name")
 
-    collection_delete = collection_commands.add_parser("delete", help="删除集合")
+    collection_delete = collection_commands.add_parser("delete", help="删除叶子集合，仅解除直接归类、不删除文件；有子集合时拒绝")
     _add_runtime_options(collection_delete)
     collection_delete.add_argument("collection_id", type=_positive)
     _add_confirmation_options(collection_delete)
 
-    collection_set = collection_commands.add_parser("set", help="覆盖文件集合归类")
+    collection_set = collection_commands.add_parser("set", help="覆盖文件的直接集合归属，不自动加入祖先或后代")
     _add_runtime_options(collection_set)
     collection_set.add_argument("file_ids", nargs="+", type=_positive)
     collection_set.add_argument("--collection", dest="collection_names", action="append")
@@ -406,9 +437,92 @@ def _build_parser() -> CliParser:
     _add_runtime_options(search)
     search.add_argument("query")
     search.add_argument("--file-id", dest="file_ids", action="append", type=_positive)
-    search.add_argument("--collection", dest="collections", action="append")
+    search.add_argument("--collection", dest="collections", action="append", help="按集合名范围检索，默认包含后代")
+    search.add_argument("--direct-only", action="store_true", help="集合范围仅检索直接归属文件")
     search.add_argument("--limit", type=_positive, default=20)
     search.add_argument("--diagnostics", action="store_true")
+
+    wiki = commands.add_parser("wiki", help="知识页、关系与证据（不调用模型）")
+    wiki_commands = wiki.add_subparsers(dest="wiki_command", required=True)
+    for name, help_text in (("list", "分页列出知识对象"), ("search", "按名称、别名及正文搜索知识"),
+                            ("get", "读取对象/关系/证据/页面链接详情"), ("graph", "读取有界局部图"),
+                            ("references", "按库 UUID 和来源文件反查证据"), ("lint", "只读结构检查，不自动修复"),
+                            ("history", "读取对象/关系修订历史"), ("request", "按请求键读取原提交结果"),
+                            ("apply", "同步原子提交；没有 --wait 或 task_id"),
+                            ("delete", "默认预览；正式删除需预览 token、请求键和确认")):
+        sub = wiki_commands.add_parser(name, help=help_text, description=help_text)
+        _add_runtime_options(sub)
+        if name in {"list", "search", "get", "references", "lint", "history"}:
+            sub.add_argument("--limit", type=_positive, default=50, help="分页大小，最大 100")
+            sub.add_argument("--offset", type=_nonnegative, default=0)
+        if name in {"list", "search"}:
+            sub.add_argument("--kind", help="concept/entity/topic/synthesis/source_summary")
+            sub.add_argument("--status", help="active/disputed/outdated")
+        if name == "search":
+            sub.add_argument("query")
+        if name in {"get", "history", "delete"}:
+            sub.add_argument("kind", choices=("object", "relation") if name == "history" else ("object", "relation", "evidence", "link"))
+            sub.add_argument("id", help="知识记录 UUID，不是文件/卡片整数 ID")
+        if name == "graph":
+            sub.add_argument("root_id", help="根知识对象 UUID")
+            sub.add_argument("--depth", type=int, choices=(1, 2), default=1)
+            sub.add_argument("--edge-type", dest="edge_types", choices=("link", "relation"), action="append")
+            sub.add_argument("--predicate", dest="predicates", action="append", help="谓词过滤，可重复")
+            sub.add_argument("--status", dest="statuses", action="append", help="关系状态过滤，可重复")
+            sub.add_argument("--max-nodes", type=_positive, default=100, help="节点预算，最大 100")
+            sub.add_argument("--max-edges", type=_positive, default=300, help="边预算，最大 300")
+        if name == "references":
+            sub.add_argument("source_library_id", help="来源库 UUID（wiki list 返回 library_id）")
+            sub.add_argument("source_file_id", type=_positive)
+        if name == "lint":
+            sub.add_argument("--object-id", dest="object_ids", action="append", help="限定对象 UUID，可重复")
+        if name == "request":
+            source = sub.add_mutually_exclusive_group(required=True)
+            source.add_argument("request_key", nargs="?", help="请求键；也可用 --input 从请求文件读取")
+            source.add_argument("--input", help="从原请求文件读取请求键，只查询，不提交")
+        if name in {"apply", "request"}:
+            sub.add_argument("--read-back", action="store_true", help="读回最多 20 条受影响记录；失败仍保留已提交状态")
+        if name == "apply":
+            sub.add_argument("--input", required=True, help="批次 JSON UTF-8 文件，或 - 读 stdin；最大 512 KiB")
+            sub.add_argument("--request-id", help="正式提交必填（或在 JSON 中提供 request_key）；原样重试保持此键")
+            sub.add_argument("--dry-run", action="store_true", help="只校验，不写入、不保留请求键")
+        if name == "delete":
+            sub.add_argument("--expected-revision", type=_positive, help="对象/关系必填，证据/链接不接受")
+            sub.add_argument("--impact-token", help="原预览返回的 token；范围变化需重新预览")
+            sub.add_argument("--request-id", help="正式删除必填；超时后用 wiki request 查询")
+            _add_confirmation_options(sub)
+
+    for kind, label in (("object", "知识对象"), ("relation", "语义关系")):
+        group = wiki_commands.add_parser(kind, help=f"按意图写入{label}，证据在同一事务中保存")
+        actions = group.add_subparsers(dest="wiki_action", required=True)
+        for action in ("add", "update"):
+            sub = actions.add_parser(action, help=f"{'新增' if action == 'add' else '增量修改'}{label}并读回")
+            _add_runtime_options(sub)
+            adding = action == "add"
+            if not adding:
+                sub.add_argument("id", help="已有记录 UUID；不按标题匹配")
+                sub.add_argument("--expected-revision", type=_positive, required=True)
+            if kind == "object":
+                sub.add_argument("--kind", choices=("concept", "entity", "topic", "synthesis", "source_summary"), required=adding)
+                sub.add_argument("--title", required=adding)
+                sub.add_argument("--summary")
+                sub.add_argument("--body-file", help="正文 UTF-8 文件，或 - 读 stdin")
+                sub.add_argument("--alias", dest="aliases", action="append", help="别名，可重复；更新时替换别名列表")
+            else:
+                sub.add_argument("--source", required=adding, help="来源对象 UUID")
+                sub.add_argument("--predicate", required=adding,
+                                 choices=("is_a", "part_of", "depends_on", "applies_to", "supports", "contradicts", "related_to"))
+                sub.add_argument("--target", required=adding, help="目标对象 UUID")
+                sub.add_argument("--description", required=adding)
+                sub.add_argument("--basis", required=adding, choices=("explicit", "synthesis", "inference", "user_statement"))
+                sub.add_argument("--qualifier")
+            sub.add_argument("--status", choices=("active", "disputed", "outdated"))
+            sub.add_argument("--evidence-file", action="append", default=[], help="chunk extract --out 保存的证据 JSON，可重复")
+            sub.add_argument("--stance", choices=("supports", "contradicts", "context"), default="supports")
+            sub.add_argument("--request-file", type=Path, required=True,
+                             help="保存本次请求及自动生成的键；同文件仅允许原样重试，不覆盖异内容")
+            sub.add_argument("--reason", help="修改原因；省略时记录 CLI 操作名称")
+            sub.add_argument("--dry-run", action="store_true", help="保存请求文件并预检，不写入知识库")
 
     config_parser = commands.add_parser("config", help="配置操作")
     config_commands = config_parser.add_subparsers(dest="config_command", required=True)
@@ -595,6 +709,92 @@ def _object_input(path_value: str) -> dict[str, Any]:
     return value
 
 
+def _write_new_json(path: Path, value: Any) -> Path:
+    """完整写入后发布；证据和请求文件都不覆盖已有内容。"""
+    path = path.expanduser().resolve()
+    text = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
+    temporary = None
+    try:
+        descriptor, name = tempfile.mkstemp(prefix=".piece-", suffix=".tmp", dir=path.parent)
+        temporary = Path(name)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
+            output.write(text)
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(temporary, path)
+    except FileExistsError as exc:
+        raise ClientError(f"文件已存在，未覆盖：{path}", code="ALREADY_EXISTS") from exc
+    except OSError as exc:
+        raise ClientError(f"保存 JSON 文件失败：{path}: {exc}", code="FILE_ERROR") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return path
+
+
+def _wiki_input(client: PieceClient, value: dict[str, Any]) -> dict[str, Any]:
+    if "request" not in value and "target_id" not in value:
+        return value
+    if set(value) != {"target_id", "request"} or not isinstance(value["request"], dict):
+        raise ClientError("请求文件必须包含 target_id 和 request 对象", code="INVALID_JSON")
+    if value["target_id"] != client.expected_target_id:
+        raise ClientError("请求文件属于另一目标实例，未提交", code="TARGET_MISMATCH")
+    payload = dict(value["request"])
+    if not payload.get("request_key") or "dry_run" in payload:
+        raise ClientError("保存的请求须有 request_key；预检请使用 --dry-run，不修改文件", code="INVALID_JSON")
+    return payload
+
+
+def _wiki_intent(args: argparse.Namespace) -> dict[str, Any]:
+    if args.evidence_file.count("-") + (getattr(args, "body_file", None) == "-") > 1:
+        raise ClientError("stdin 只能供一个输入使用；其余正文或证据请保存为 UTF-8 文件", code="INVALID_ARGUMENT")
+    kind, adding = args.wiki_command, args.wiki_action == "add"
+    fields = (("kind", "title", "summary", "aliases", "status") if kind == "object" else
+              ("source", "predicate", "target", "description", "qualifier", "basis", "status"))
+    values = {key: getattr(args, key) for key in fields if getattr(args, key) is not None}
+    if kind == "object" and args.body_file is not None:
+        values["body"] = _read_text(args.body_file)
+    if not adding and not values:
+        raise ClientError("update 至少需要一个待修改字段；只添加证据请用 wiki apply", code="INVALID_ARGUMENT")
+    for field in ("source", "target"):
+        if field in values:
+            values[field] = {"id": values[field]}
+    if adding:
+        owner = {"ref": "item"}
+        values.update(owner)
+    else:
+        owner = {"id": args.id}
+        values.update(owner, expected_revision=args.expected_revision)
+    evidence = []
+    required = {"source_kind", "source_library_id", "source_file_id", "source_chunk_id", "expected_content_hash", "quote"}
+    for filename in args.evidence_file:
+        item = _object_input(filename)
+        if set(item) != required or item.get("source_kind") != "piece" or not item.get("expected_content_hash"):
+            raise ClientError(f"不是 chunk extract --out 生成的完整证据文件：{filename}", code="INVALID_ARGUMENT")
+        evidence.append({**item, kind: owner, "stance": args.stance})
+    return {"reason": args.reason if args.reason is not None else f"CLI {kind} {args.wiki_action}",
+            "objects" if kind == "object" else "relations": [values], "evidence": evidence}
+
+
+def _wiki_save_request(client: PieceClient, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    path = path.expanduser().resolve()
+    candidate = {**payload, "request_key": str(uuid.uuid4())}
+    try:
+        _write_new_json(path, {"target_id": client.expected_target_id, "request": candidate})
+        return candidate
+    except ClientError as exc:
+        if exc.code != "ALREADY_EXISTS":
+            raise
+    saved = _object_input(str(path))
+    if "request" not in saved:
+        raise ClientError("已存在的文件不是绑定目标的请求文件，未覆盖", code="INVALID_JSON")
+    previous = _wiki_input(client, saved)
+    if {key: value for key, value in previous.items() if key != "request_key"} != payload:
+        raise ClientError("请求文件已保存不同内容，未覆盖；新操作请使用新文件，原请求仅允许原样重试",
+                          code="REQUEST_CONFLICT", data={"request_file": str(path)})
+    return previous
+
+
 def _request_key(args: argparse.Namespace) -> str:
     value = getattr(args, "request_id", None)
     return value or str(uuid.uuid4())
@@ -714,8 +914,12 @@ def _submit(client: PieceClient, path: str, payload: dict[str, Any]) -> dict[str
     """新增响应丢失时保留请求键和对象 ID；绝不猜测未受理或自动重发。"""
     reference = {key: payload[key] for key in ("file_id", "chunk_id", "task_id", "request_key") if key in payload}
     if payload.get("request_key"):
-        reference["recovery"] = {"command": "piece task list --request-id", "request_id": payload["request_key"],
-                                 "same_target_required": True, "do_not_resubmit": True}
+        knowledge = path.startswith("/api/v1/knowledge/")
+        reference["recovery"] = {"command": "piece wiki request" if knowledge else "piece task list --request-id",
+                                 "request_id": payload["request_key"], "same_target_required": True,
+                                 "do_not_resubmit": not knowledge}
+        if knowledge:
+            reference["recovery"]["retry_identical_only"] = True
     try:
         result = client.post(path, payload)
     except (ClientError, KeyboardInterrupt) as exc:
@@ -883,6 +1087,148 @@ def _download_images(client: PieceClient, args: argparse.Namespace, result: dict
     return combined
 
 
+def _wiki_next(args: argparse.Namespace, words: list[str], hint: str) -> dict[str, Any]:
+    from app.skills import cli_argv
+    argv = [*cli_argv(_get_data_dir(args), args.port), *words, "--json"]
+    return {"next_argv": argv, "next_command": shlex.join(argv), "next_command_shell": "bash",
+            "recovery_hint": hint + "；只恢复一次，仍失败就停止并报告。"}
+
+
+def _wiki_recovery(args: argparse.Namespace, result: dict[str, Any], payload=None) -> dict[str, Any]:
+    if result.get("success"):
+        return result
+    data = dict(result.get("data") or {})
+    code = (result.get("error") or {}).get("code")
+    payload = payload or {}
+    words, hint = None, ""
+    if code == "VERSION_CONFLICT":
+        kind = {"objects": "object", "relations": "relation"}.get(data.get("section", ""))
+        if kind and isinstance(data.get("id"), str):
+            words = ["wiki", "get", kind, data["id"]]
+            hint = "读回当前版本并比较；不要仅替换 expected_revision 后覆盖"
+    elif code in {"QUOTE_MISMATCH", "SOURCE_CHANGED", "INVALID_SOURCE"}:
+        index = data.get("index")
+        evidence = payload.get("evidence", [])
+        if (data.get("section") == "evidence" and isinstance(evidence, list)
+                and type(index) is int and 0 <= index < len(evidence)):
+            item = evidence[index]
+            chunk_id = item.get("source_chunk_id") if isinstance(item, dict) else None
+            if type(chunk_id) is int and chunk_id > 0:
+                words = ["chunk", "get", str(chunk_id)]
+                hint = "重新读取来源，再用 chunk extract 选择引文；不要手改 quote 或哈希来绕过校验"
+    key = data.get("request_key") or payload.get("request_key") or getattr(args, "request_key", None)
+    if words is None and isinstance(key, str) and key and (data.get("outcome_unknown") or code == "REQUEST_CONFLICT"):
+        request_file = getattr(args, "request_file", None)
+        words = (["wiki", "request", "--input", str(request_file.expanduser().resolve()), "--read-back"]
+                 if request_file is not None else ["wiki", "request", key, "--read-back"])
+        hint = "先查询原请求；结果未知时不要换键重提，只能在核对后原样重试同一请求文件"
+    if words is not None:
+        data.update(_wiki_next(args, words, hint))
+    result["data"] = data
+    return result
+
+
+def _wiki_read_back(client: PieceClient, args: argparse.Namespace, result: dict[str, Any]) -> dict[str, Any]:
+    data = dict(result.get("data") or {})
+    if not result.get("success") or data.get("committed") is not True or data.get("dry_run") is True:
+        return result
+    targets = {}
+    issues = []
+    for section, kind in (("objects", "object"), ("relations", "relation"), ("evidence", "evidence"), ("links", "link")):
+        entries = data.get(section, [])
+        if not isinstance(entries, list):
+            issues.append({"code": "PROTOCOL_ERROR", "message": "提交回执的记录列表无效"})
+            break
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+                issues.append({"code": "PROTOCOL_ERROR", "message": "提交回执缺少记录 ID"})
+                break
+            key = kind, entry["id"]
+            if key in targets and "submitted_fields" in entry:
+                entry = {**entry, "submitted_fields": sorted(set(entry["submitted_fields"])
+                         | set(targets[key].get("submitted_fields", [])))}
+            targets[key] = entry
+    if (not targets and data.get("kind") in {"object", "relation", "evidence", "link"}
+            and isinstance(data.get("id"), str) and data.get("impact_token")):
+        targets[data["kind"], data["id"]] = {"deleted": True}
+    # ponytail: 大批次只自动读回前 20 条，剩余记录通过 wiki get 按需读取。
+    limit = 20
+    items = list(targets.items())
+    receipt = {"complete": False, "records": [], "total": len(items), "limit": limit,
+               "truncated": len(items) > limit, "semantic_review_required": True, "issues": issues}
+    next_record = None
+    for (kind, record_id), submitted in items[:limit]:
+        try:
+            response = client.post("/api/v1/knowledge/get", {"kind": kind, "id": record_id})
+        except (ClientError, KeyboardInterrupt) as exc:
+            issues.append({"kind": kind, "id": record_id,
+                           "code": exc.code if isinstance(exc, ClientError) else "INTERRUPTED",
+                           "message": str(exc) or "读回已中断"})
+            next_record = next_record or (kind, record_id)
+            break
+        if submitted.get("deleted"):
+            if not response.get("success") and (response.get("error") or {}).get("code") == "NOT_FOUND":
+                receipt["records"].append({"kind": kind, "id": record_id, "deleted": True})
+                continue
+            if response.get("success"):
+                issues.append({"kind": kind, "id": record_id, "code": "RECORD_REAPPEARED",
+                               "message": "原删除已提交，但当前记录存在，需核查恢复或并发变化"})
+                next_record = next_record or (kind, record_id)
+                break
+        current = response.get("data") or {}
+        record = current.get("record") if isinstance(current, dict) else None
+        if not response.get("success") or not isinstance(record, dict) or record.get("id") != record_id:
+            issues.append({"kind": kind, "id": record_id, "code": (response.get("error") or {}).get("code", "PROTOCOL_ERROR"),
+                           "message": response.get("message", "读回记录无效")})
+            next_record = next_record or (kind, record_id)
+            break
+        if data.get("library_id") and current.get("library_id") != data["library_id"]:
+            issues.append({"kind": kind, "id": record_id, "code": "TARGET_MISMATCH", "message": "读回时库身份已变化"})
+            next_record = next_record or (kind, record_id)
+            break
+        item = {"kind": kind, "record": record}
+        if "submitted_fields" in submitted:
+            item["submitted_fields"] = submitted["submitted_fields"]
+        if kind in {"object", "relation"}:
+            item.update(submitted_revision=submitted.get("revision"),
+                        revision_matches=type(submitted.get("revision")) is int and record.get("revision") == submitted["revision"],
+                        has_evidence=current.get("has_evidence"),
+                        evidence_total=(current.get("evidence") or {}).get("total"))
+            if not item["revision_matches"]:
+                issues.append({"kind": kind, "id": record_id, "code": "REVISION_CHANGED",
+                               "message": "当前版本不同于本次提交回执，需比较后再操作"})
+                next_record = next_record or (kind, record_id)
+        elif (kind == "evidence" and record.get("source_kind") == "piece"
+              and record.get("source_library_id") == data.get("library_id")
+              and record.get("location_status") != "current"):
+            issues.append({"kind": kind, "id": record_id, "code": "SOURCE_CHANGED",
+                           "message": "提交后来源已变化或缺失，不能视为当前有效证据"})
+            next_record = next_record or (kind, record_id)
+        receipt["records"].append(item)
+    receipt["complete"] = bool(items) and not issues and not receipt["truncated"]
+    data["read_back"] = receipt
+    if receipt["complete"]:
+        return {**result, "data": data}
+    if next_record is None and len(items) > limit:
+        next_record = items[limit][0]
+    data["recovery"] = {**data.get("recovery", {}), "do_not_resubmit": True}
+    if next_record is not None:
+        data.update(_wiki_next(args, ["wiki", "get", *next_record], "写入已提交，只补充读回和比较，不重新提交"))
+    return make_envelope(False, "写入已提交，但读回不完整或状态已变化；不要重新写入", data,
+                         {"code": "READ_BACK_INCOMPLETE", "message": "提交已成功，需继续只读核查"})
+
+
+def _wiki_submit(client: PieceClient, args: argparse.Namespace, payload: dict[str, Any], *, read_back=False) -> dict[str, Any]:
+    try:
+        result = _submit(client, "/api/v1/knowledge/apply", payload)
+    except ClientError as exc:
+        recovery = _wiki_recovery(args, make_envelope(False, exc.message, exc.data, {"code": exc.code}), payload)
+        exc.data = recovery["data"]
+        raise
+    result = _wiki_recovery(args, result, payload)
+    return _wiki_read_back(client, args, result) if read_back else result
+
+
 def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     command = args.command
     if command == "doctor":
@@ -912,6 +1258,7 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         client = _client_for(args)
         result = client.get("/api/v1/status")
         if result.get("success") and isinstance(result.get("data"), dict):
+            result["data"]["cli_version"] = VERSION
             components = result["data"].get("components") or {}
             degraded = [name for name, item in components.items()
                         if isinstance(item, dict) and item.get("status") in {"degraded", "failed"}]
@@ -939,7 +1286,9 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         operation = args.file_command
         if operation == "list":
             payload = {"limit": args.limit, "offset": args.offset, "status": args.status,
-                       "collections": _optional_names(args.collections)}
+                       "collections": _optional_names(args.collections),
+                       "include_descendants": not args.direct_only, "uncategorized": args.uncategorized,
+                       "sort_by": args.sort_by, "descending": not args.ascending}
             if args.name is not None:
                 if not args.name.strip():
                     raise ClientError("--name 不能为空", code="INVALID_ARGUMENT")
@@ -980,7 +1329,7 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             })
             return _with_wait(client, result, args)
         if operation == "delete":
-            confirmed = _confirm(args, "删除文件")
+            confirmed = _confirm(args, "删除文件（知识对象与引用快照保留，来源将标记缺失）")
             return _simple(client.post("/api/v1/file/delete", {
                 "file_ids": args.file_ids, "dry_run": bool(args.dry_run), "confirmed": confirmed,
             }))
@@ -1011,6 +1360,24 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             }))
         if operation == "get":
             return _simple(client.post("/api/v1/chunk/get", {"chunk_id": args.chunk_id}))
+        if operation == "extract":
+            payload: dict[str, Any] = {"chunk_id": args.chunk_id, "max_matches": args.max_matches}
+            if args.lines is not None:
+                payload["lines"] = args.lines
+            else:
+                payload.update({"grep": args.grep, "regex": bool(args.regex), "context": args.context})
+            result = client.post("/api/v1/chunk/extract", payload)
+            if args.out is not None and result.get("success"):
+                data = dict(result.get("data") or {})
+                matches = data.get("matches") or []
+                if len(matches) != 1 or data.get("truncated"):
+                    data.update(_wiki_next(args, ["chunk", "get", str(args.chunk_id)],
+                                           "先选择单段行号，再用 chunk extract --lines N-M --out 新文件保存；不自动取首条"))
+                    return _simple(make_envelope(False, "导出证据需要唯一且未截断的匹配，未写文件", data,
+                                                 {"code": "EVIDENCE_SELECTION_REQUIRED", "message": "请先选择唯一引文范围"}))
+                saved = _write_new_json(args.out, matches[0]["evidence"])
+                result["data"] = {**data, "evidence_file": str(saved)}
+            return _simple(result)
         if operation == "add":
             text = _read_text(args.input)
             payload = {
@@ -1062,11 +1429,19 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             return _simple(client.post("/api/v1/collection/list", {
                 "limit": args.limit, "offset": args.offset,
             }))
+        if operation == "tree":
+            return _simple(client.post("/api/v1/collection/tree", {}))
         if operation == "create":
             payload = {"name": args.name}
+            if args.parent_id is not None:
+                payload["parent_id"] = args.parent_id
             if args.description is not None:
                 payload["description"] = args.description
             return _simple(client.post("/api/v1/collection/create", payload))
+        if operation == "move":
+            return _simple(client.post("/api/v1/collection/move", {
+                "collection_id": args.collection_id, "parent_id": None if args.root else args.parent_id,
+            }))
         if operation == "rename":
             return _simple(client.post("/api/v1/collection/rename", {
                 "collection_id": args.collection_id, "name": args.name,
@@ -1102,10 +1477,72 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             initial = make_envelope(True, "开始等待任务", {"task_ids": list(dict.fromkeys(args.task_ids))})
             return _with_wait(client, initial, args)
 
+    if command == "wiki":
+        operation = args.wiki_command
+        path = f"/api/v1/knowledge/{operation}"
+        if operation in {"object", "relation"}:
+            payload = _wiki_save_request(client, args.request_file, _wiki_intent(args))
+            if args.dry_run:
+                payload["dry_run"] = True
+            try:
+                result = _wiki_submit(client, args, payload, read_back=True)
+            except ClientError as exc:
+                exc.data = {**(exc.data or {}), "request_file": str(args.request_file.expanduser().resolve())}
+                raise
+            result["data"] = {**(result.get("data") or {}), "request_file": str(args.request_file.expanduser().resolve())}
+            return _simple(result)
+        if operation == "apply":
+            payload = _wiki_input(client, _object_input(args.input))
+            if args.request_id is not None:
+                if "request_key" in payload and payload["request_key"] != args.request_id:
+                    raise ClientError("--request-id 与输入 request_key 不一致", code="INVALID_ARGUMENT")
+                payload["request_key"] = args.request_id
+            if args.dry_run:
+                payload["dry_run"] = True
+            if payload.get("dry_run") is not True and not payload.get("request_key"):
+                raise ClientError("正式提交必须提供 --request-id 或 request_key", code="INVALID_ARGUMENT")
+            return _simple(_wiki_submit(client, args, payload, read_back=args.read_back))
+        if operation == "delete":
+            payload = {"kind": args.kind, "id": args.id}
+            if args.expected_revision is not None:
+                payload["expected_revision"] = args.expected_revision
+            if args.dry_run or not args.impact_token:
+                if args.yes and not args.dry_run:
+                    raise ClientError("请先预览，再携带 --impact-token 和 --request-id 确认删除", code="INVALID_ARGUMENT")
+                return _simple(client.post(path, {**payload, "dry_run": True}))
+            if not args.request_id:
+                raise ClientError("正式删除必须提供 --request-id", code="INVALID_ARGUMENT")
+            return _simple(_submit(client, path, {
+                **payload, "dry_run": False, "impact_token": args.impact_token,
+                "request_key": args.request_id, "confirmed": _confirm(args, "删除知识记录（不删除来源文件）"),
+            }))
+        if operation == "request" and args.input is not None:
+            saved = _wiki_input(client, _object_input(args.input))
+            args.request_key = saved.get("request_key")
+            if not isinstance(args.request_key, str) or not args.request_key.strip():
+                raise ClientError("请求文件缺少有效 request_key", code="INVALID_ARGUMENT")
+        fields = {
+            "list": ("kind", "status", "limit", "offset"),
+            "search": ("query", "kind", "status", "limit", "offset"),
+            "get": ("kind", "id", "limit", "offset"),
+            "graph": ("root_id", "depth", "edge_types", "predicates", "statuses", "max_nodes", "max_edges"),
+            "references": ("source_library_id", "source_file_id", "limit", "offset"),
+            "lint": ("object_ids", "limit", "offset"),
+            "history": ("kind", "id", "limit", "offset"),
+            "request": ("request_key",),
+        }[operation]
+        result = client.post(path, {key: getattr(args, key) for key in fields if getattr(args, key) is not None})
+        if operation == "request" and args.read_back:
+            if result.get("success"):
+                result["data"] = {"request_key": args.request_key, **(result.get("data") or {})}
+            result = _wiki_read_back(client, args, result)
+        return _simple(_wiki_recovery(args, result))
+
     if command == "search":
         return _simple(client.post("/api/v1/search", {
             "query": args.query, "file_ids": args.file_ids,
             "collections": _optional_names(args.collections),
+            "include_descendants": not args.direct_only,
             "limit": args.limit, "diagnostics": bool(args.diagnostics),
         }))
 

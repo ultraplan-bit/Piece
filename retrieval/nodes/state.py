@@ -18,6 +18,7 @@ class State(TypedDict):
     limit: int  # 每次查询的候选上限
     filenames: Optional[List[str]]  # 限定检索的文件名列表（可选，模糊匹配）
     collections: Optional[List[str]]  # 限定检索的集合名列表（可选，模糊匹配）
+    include_descendants: bool  # 集合读取默认包含后代，归类写入不展开
 
     # 预处理
     cleaned_query: Optional[str]  # 清洗后的查询文本

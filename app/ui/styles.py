@@ -17,6 +17,14 @@ PINK_PRIMARY = "#e5628e"
 # 主题 CSS 样式
 THEME_CSS = '''
 <style>
+    .knowledge-list-item { border-bottom: 1px solid var(--border-color); }
+    .knowledge-evidence { border-left: 3px solid var(--border-color); border-radius: 4px; }
+    .knowledge-prose { font-size: 15px; line-height: 1.85; overflow-wrap: anywhere; }
+    .knowledge-prose table { display: block; max-width: 100%; overflow-x: auto; }
+    .knowledge-prose pre { max-width: 100%; overflow-x: auto; }
+    @media (max-width: 760px) {
+        .knowledge-prose { font-size: 14px; }
+    }
     :root {
         /* 字体栈：桌面端离线运行，不加载 Web 字体，
            按平台依次回退到各自的系统 UI 字体（含中文字形） */
@@ -77,6 +85,46 @@ THEME_CSS = '''
         --border-selected: #f2a3ba;
         --text-accent: #e5628e;
     }
+
+    .workspace-splitter > .q-splitter__panel {
+        overflow: hidden;
+        min-width: 0;
+    }
+    .workspace-splitter > .q-splitter__before > .nicegui-column {
+        width: 100%;
+    }
+    .workspace-splitter > .q-splitter__separator {
+        background: var(--border-color);
+    }
+    .workspace-splitter > .q-splitter__separator:hover {
+        background: var(--text-accent);
+    }
+    .library-heading {
+        height: 49px;
+        flex-shrink: 0;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .library-footer { border-top: 1px solid var(--border-color); }
+    .collection-tree .q-tree__node-header {
+        border-radius: 6px;
+        padding: 5px 4px;
+    }
+    .collection-tree .q-tree__node-header.q-tree__node--selected {
+        background: var(--bg-selected);
+    }
+    .collection-tree .q-tree__node-header:focus-visible,
+    [role="button"]:focus-visible {
+        outline: 2px solid var(--text-accent);
+        outline-offset: -2px;
+    }
+    .collection-tree .q-tree__node-header-content {
+        color: var(--text-primary);
+        min-width: 0;
+        overflow-wrap: anywhere;
+        font-size: 0.8125rem;
+    }
+    .breadcrumb-label { max-width: 100%; }
+    .breadcrumb-label .q-btn__content { overflow-wrap: anywhere; }
 
     /* 选中边框样式 */
     .theme-border-selected {

@@ -108,16 +108,17 @@ def test_slim_install_lists_and_exports_skills(tmp_path, slim_venv):
     listing = _piece(slim_venv, "skill", "list", "--json")
     assert listing.code == 0, listing.stdout + listing.stderr
     assert [s["id"] for s in json.loads(listing.stdout)["data"]["skills"]] == [
-        "piece-index", "piece-search",
+        "piece-index", "piece-search", "piece-wiki",
     ]
 
     out_dir = tmp_path / "skills"
     exported = _piece(slim_venv, "skill", "export", "--dir", str(out_dir), "--json")
     assert exported.code == 0, exported.stdout + exported.stderr
-    content = (out_dir / "piece-search" / "SKILL.md").read_text(encoding="utf-8")
-    console = slim_venv / ("Scripts/piece.exe" if os.name == "nt" else "bin/piece")
-    assert content.count(f'"{console.as_posix()}"') == 1
-    assert "--data-dir" in content and "--port 8689" in content
+    for skill in ("piece-search", "piece-wiki"):
+        content = (out_dir / skill / "SKILL.md").read_text(encoding="utf-8")
+        console = slim_venv / ("Scripts/piece.exe" if os.name == "nt" else "bin/piece")
+        assert content.count(f'"{console.as_posix()}"') == 1
+        assert "--data-dir" in content and "--port 8689" in content
 
 
 def test_slim_install_serves_core_without_gui_mcp(tmp_path_factory, slim_venv):
@@ -146,6 +147,19 @@ def test_slim_install_serves_core_without_gui_mcp(tmp_path_factory, slim_venv):
             pytest.fail("精简安装服务未就绪：" + (data_dir.parent / "slim-serve.log").read_text("utf-8", "replace"))
         assert status["ready"] is True
         assert status["with_gui"] is False and status["with_mcp"] is False
+        # 核心模式没有 GUI/MCP 或嵌入配置，也能同步保存和读取知识。
+        batch = data_dir / "knowledge.json"
+        batch.write_text(json.dumps({"reason": "精简安装验收", "objects": [
+            {"ref": "a", "kind": "concept", "title": "离线知识", "body": "不调用模型"}]}), encoding="utf-8")
+        applied = _piece(slim_venv, "wiki", "apply", "--input", str(batch), "--request-id", "slim-knowledge",
+                         "--data-dir", str(data_dir), "--port", str(port), "--json")
+        assert applied.code == 0, applied.stdout + applied.stderr
+        saved = json.loads(applied.stdout)["data"]
+        assert saved["committed"] and "task_id" not in saved
+        readback = _piece(slim_venv, "wiki", "get", "object", saved["refs"]["a"]["id"],
+                          "--data-dir", str(data_dir), "--port", str(port), "--json")
+        assert readback.code == 0, readback.stdout + readback.stderr
+        assert json.loads(readback.stdout)["data"]["record"]["body"] == "不调用模型"
         assert _piece(slim_venv, "stop", "--data-dir", str(data_dir), "--port", str(port), "--json").code == 0
         process.wait(timeout=60)
         assert process.returncode == 0, (data_dir.parent / "slim-serve.log").read_text("utf-8", "replace")

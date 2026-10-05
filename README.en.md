@@ -99,7 +99,34 @@ Do not share the access keys in your configuration. After changing keys or ports
 
 **Option 2: Skill Export**
 
-If your AI can run local commands, you can also export and install workflows from **Skill Export**. Use `piece-search` to find information and `piece-index` to import and organize documents. Export them again after moving the application or changing the data directory.
+If your AI can run local commands, you can also export and install workflows from **Skill Export**. Use `piece-search` to find information, `piece-index` to import and organize documents, and `piece-wiki` to save, update, and check knowledge pages and evidence-backed relationships on demand. Export them again after moving the application or changing the data directory.
+
+Use **Knowledge** to read, search, and manually maintain knowledge pages. Explore connections through the local graph or relation table, then follow evidence back to source cards and original pages. **Review** provides read-only structural checks. Knowledge pages are also available through the `piece wiki` CLI and the two existing MCP services.
+
+Uploading documents does not automatically create knowledge pages, and knowledge operations do not call models or embedding APIs. Deleting source files retains knowledge objects and quote snapshots, with their source locations marked missing. A quote matching the current source is not factual verification.
+
+Knowledge evidence requires verbatim quotes, and copying long text with formulas or tables by hand is error-prone. Agents can use `piece chunk extract` to slice an exact substring from a card's text by line range or match, yielding submit-ready evidence directly (available in the CLI and both MCP services: `extract_quote` on the indexing service and `extract-quote` on the retrieval service).
+
+Use `--out` to save the sliced quote straight to a submit-ready evidence file; when the match is not unique, narrow it with `--lines` first instead of guessing the first hit.
+
+Writes to knowledge pages go through intent commands that read back by default and drop a local request file:
+
+```bash
+piece chunk extract CHUNK_ID --lines 2-3 --out evidence.json
+piece wiki object add --kind concept --title "Incremental maintenance" \
+  --summary "Change only what clearly changed" \
+  --evidence-file evidence.json --request-file object-request.json
+```
+
+Use `wiki object update UUID --expected-revision N` for updates and `wiki relation add/update` for relationships. Use a new request file for each new operation; existing objects are identified by UUID, never by title.
+
+`--request-file` records the full body, evidence, and the generated request key for this operation; an existing path is reused only when both target and content match, and is never overwritten. `--dry-run` only pre-checks but still writes this file, so you can submit it as-is after confirming:
+
+```bash
+piece wiki apply --input object-request.json --read-back
+```
+
+Request files contain sensitive local data; deleting an online record does not delete them. `read_back` includes at most 20 affected records. `READ_BACK_INCOMPLETE` means the write was committed but read-back was incomplete or the state has changed: do not resubmit. Recoverable errors include `next_command` / `next_argv` for read-only checks on the same instance. If the submission outcome is unknown, first query `wiki request --input object-request.json --read-back`; there is no need to copy the request key.
 
 Content your AI client fetches by itself, such as web pages, WeChat articles, or video transcripts, can go straight into the knowledge base: MCP uses the `import_markdown` tool of the indexing service, and the skill runs `piece file import-markdown` with the content from stdin or a file. Piece keeps the original, splits it into cards automatically, and records the title and source URL as file properties.
 
@@ -112,7 +139,7 @@ Piece provides the source material; conversations and answers still take place i
 ## A few useful tips
 
 - **Search results not quite right?** Check the card text first, then make the title more specific. For example, “Authentication: Token refresh flow” is easier to recognize than “Chapter 3.”
-- **Too many documents?** Organize them into collections such as “Research,” “Work,” and “Study” to narrow your search.
+- **Too many documents?** Use hierarchical collections such as “Research → Retrieval.” A parent includes files in its descendants by default; turn off “Include subcollections” to show direct assignments only. A file can belong to multiple collections, and moving a collection does not move original files.
 - **Want to take your content elsewhere?** Markdown exports preserve card edits. Exporting with resources also bundles the illustrations.
 - **Need to parse a document again?** You can reindex it, but **reindexing from the original file overwrites manual edits**. Export or back up your work first.
 

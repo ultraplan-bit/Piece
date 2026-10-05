@@ -5,9 +5,9 @@
 - 定位内置 skills 目录（源码树与 PyInstaller 制品两种形态）
 - 读取 Skill 清单与内容
 - 推导当前实例的 CLI 调用前缀，在导出头部注入前缀说明
-- 导出 Skill 到用户指定目录（<目录>/<skill 名>/SKILL.md）
+- 导出 Skill 到用户指定目录（<目录>/<skill 名>/SKILL.md，附带 references/）
 
-skills/ 下每个子目录是一个 Skill（含 SKILL.md），
+skills/ 下每个子目录是一个 Skill（含 SKILL.md，可选 references/），
 frontmatter 的 name/description 用作界面展示，目录名即 Skill ID。
 仓库内的 SKILL.md 以 ``<PIECE>`` 代指 CLI 前缀，不是可直接复制使用的文件，
 分发物是 GUI/CLI 导出的渲染结果。
@@ -47,22 +47,19 @@ def _quoted(path: str | Path) -> str:
     return f'"{Path(path).expanduser().as_posix()}"'
 
 
-def cli_prefix(config_dir: str | Path, port: int) -> str:
-    """推导当前实例的 CLI 调用前缀，供导出 Skill 时注入。
+def _cli_executable() -> list[str]:
+    """当前实例 CLI 入口的 token 列表（可执行文件，必要时附 ``-m app.cli``）。
 
-    agent 的工作目录、PIECE_DATA_DIR 环境都可能与服务不同，因此
-    ``--data-dir``/``--port`` 即使等于默认值也显式附加，配合握手的
-    TARGET_MISMATCH 才能保证连对库。
+    路径统一正斜杠；不含 ``--data-dir``/``--port``，由调用方决定如何附加。
     """
-    suffix = f"--data-dir {_quoted(config_dir)} --port {port}"
     if getattr(sys, "frozen", False):
         # 任务 B 产出的控制台入口；不存在时退回 windowed 的自身
         console = Path(sys.executable).with_name(
             "piece-cli.exe" if sys.platform == "win32" else "piece-cli"
         )
         if console.is_file():
-            return f"{_quoted(console)} {suffix}"
-        return f"{_quoted(sys.executable)} {suffix}"
+            return [console.as_posix()]
+        return [Path(sys.executable).as_posix()]
 
     executable = Path(sys.executable)
     if executable.name.lower() == "pythonw.exe":
@@ -73,8 +70,33 @@ def cli_prefix(config_dir: str | Path, port: int) -> str:
     # uv tool 环境、仓库 .venv、普通 venv 的 Scripts/ 或 bin/ 都有控制台脚本
     console = executable.parent / ("piece.exe" if sys.platform == "win32" else "piece")
     if console.is_file():
-        return f"{_quoted(console)} {suffix}"
-    return f'{_quoted(executable)} -m app.cli {suffix}'
+        return [console.as_posix()]
+    return [executable.as_posix(), "-m", "app.cli"]
+
+
+def cli_argv(config_dir: str | Path, port: int) -> list[str]:
+    """当前实例 CLI 前缀的 argv 列表，供 ``shlex.join(cli_argv + 命令)`` 拼装。
+
+    agent 的工作目录、PIECE_DATA_DIR 环境都可能与服务不同，因此
+    ``--data-dir``/``--port`` 即使等于默认值也显式附加，配合握手的
+    TARGET_MISMATCH 才能保证连对库。返回原样 token，转义交给调用方。
+    """
+    return [
+        *_cli_executable(),
+        "--data-dir", Path(config_dir).expanduser().as_posix(),
+        "--port", str(port),
+    ]
+
+
+def cli_prefix(config_dir: str | Path, port: int) -> str:
+    """推导当前实例的 CLI 调用前缀字符串，供导出 Skill 时注入。
+
+    与 :func:`cli_argv` 共用入口选择逻辑；可执行文件与数据目录路径加双引号，
+    标志、模块名与端口不加，保持既有导出格式。
+    """
+    argv = _cli_executable()
+    head = " ".join([_quoted(argv[0]), *argv[1:]])
+    return f"{head} --data-dir {_quoted(config_dir)} --port {port}"
 
 
 def skills_dir() -> Path:
@@ -200,16 +222,18 @@ def export_skills(
     version: str,
     overwrite: bool = False,
 ) -> dict:
-    """把 Skill 以 <目标目录>/<skill_id>/SKILL.md 形式导出。
+    """把 Skill 以 <目标目录>/<skill_id>/SKILL.md 形式导出，附带 references/。
 
     写入的是渲染结果（头部已注入前缀，UTF-8、LF），不是仓库原文；
+    references/ 下的补充资源原样复制，与主文使用同一覆盖确认，避免新旧文档混用。
     目标目录不存在时创建；已存在的 Skill 默认拒绝覆盖，由调用方确认。
 
     Returns:
-        {"exported": [写入的路径], "exists": [已存在未覆盖的 ID], "missing": [不存在的 ID]}
+        {"exported": [写入的 SKILL.md 路径], "exists": [已存在未覆盖的 ID],
+         "missing": [不存在的 ID], "resources": [复制成功的 references 文件路径]}
     """
     target = Path(target_dir).expanduser()
-    result = {"exported": [], "exists": [], "missing": []}
+    result = {"exported": [], "exists": [], "missing": [], "resources": []}
     for skill_id in skill_ids:
         content = render_skill(skill_id, prefix, version=version)
         if content is None:
@@ -217,11 +241,24 @@ def export_skills(
             continue
 
         destination = target / skill_id / "SKILL.md"
-        if destination.exists() and not overwrite:
+        source = skills_dir() / skill_id
+        resources = [(path, destination.parent / path.relative_to(source))
+                     for path in sorted((source / "references").rglob("*"))
+                     if path.is_file() and not path.is_symlink()]
+        outputs = [destination, *(output for _, output in resources)]
+        if any(output.exists() for output in outputs) and not overwrite:
             result["exists"].append(skill_id)
             continue
+        if any(not output.resolve().is_relative_to(destination.parent.resolve()) for output in outputs):
+            raise ValueError("Skill 目标文件不能通过符号链接写入目录之外")
 
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(content, encoding="utf-8", newline="\n")
+        with destination.open("w" if overwrite else "x", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
         result["exported"].append(str(destination))
+        for path, output in resources:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with output.open("wb" if overwrite else "xb") as handle:
+                handle.write(path.read_bytes())
+            result["resources"].append(str(output))
     return result

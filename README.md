@@ -99,7 +99,34 @@ MCP 可以理解为 AI 访问知识库的连接方式。打开 Piece 的 **MCP �
 
 **方式二：Skill 导出**
 
-如果你的 AI 能运行本机命令行，也可以在 **Skill 导出** 页面导出并安装工作流：`piece-search` 用于查资料，`piece-index` 用于导入和整理资料。移动程序或更换数据目录后，请重新导出。
+如果你的 AI 能运行本机命令行，也可以在 **Skill 导出** 页面导出并安装工作流：`piece-search` 用于查资料，`piece-index` 用于导入和整理资料，`piece-wiki` 用于按需保存、更新和核查知识页及证据关系。移动程序或更换数据目录后，请重新导出。
+
+在 **知识库** 页面阅读、搜索和人工维护知识页，通过局部图谱或关系表格查看关联，再沿证据回到来源卡片和原页；**待核查** 提供只读结构检查。知识页也可通过 `piece wiki` CLI 或两个现有 MCP 服务读写。
+
+上传资料不会自动生成知识页，知识操作不会调用模型或嵌入接口。删除来源文件会保留知识对象和引用快照，并把来源标记为缺失；“引用与当前来源一致”不代表事实已验证。
+
+知识页的证据要求逐字引用原文，含公式、表格的长文本手抄极易出错。Agent 可用 `piece chunk extract` 从卡片正文按行号或匹配切出精确子串，直接得到可提交的证据（CLI、两个 MCP 服务均提供；MCP 中为索引服务的 `extract_quote` 与检索服务的 `extract-quote`）。
+
+用 `--out` 可把切出的引文直接落成可提交的证据文件；匹配不唯一时先用 `--lines` 收窄，不猜第一条。
+
+知识页的写入用意图命令，默认读回，并落一份本地请求文件：
+
+```bash
+piece chunk extract CHUNK_ID --lines 2-3 --out evidence.json
+piece wiki object add --kind concept --title "增量维护" \
+  --summary "只修改明确变化的内容" \
+  --evidence-file evidence.json --request-file object-request.json
+```
+
+更新用 `wiki object update UUID --expected-revision N`，关系用 `wiki relation add/update`；每次新操作使用新的请求文件，已有对象仅按 UUID 定位。
+
+`--request-file` 保存本次操作的完整正文、证据和自动生成的请求键；文件已存在时只有目标与内容都相同才允许复用，绝不覆盖。`--dry-run` 只预检但同样写这份文件，确认后可原样正式提交：
+
+```bash
+piece wiki apply --input object-request.json --read-back
+```
+
+请求文件是本地敏感材料，删除在线记录不会删除它。写入返回的 `read_back` 最多含 20 条受影响记录；`READ_BACK_INCOMPLETE` 表示数据已提交但读回不完整或状态已变，不要重提。可恢复的错误附带 `next_command` / `next_argv`，用于在同一实例上继续只读核查；提交结果未知时先用 `wiki request --input object-request.json --read-back` 查询，无需手抄请求键。
 
 AI 客户端自己取得的网页、公众号文章、视频字幕等内容也能直接存进知识库：MCP 用索引服务里的 `import_markdown` 工具，Skill 用 `piece file import-markdown` 从 stdin 或文件传入正文。Piece 会保留原件、自动切片，并把标题和来源地址记为文件属性。
 
@@ -112,7 +139,7 @@ Piece 负责提供资料，聊天和回答仍在你常用的 AI 客户端中进�
 ## 用顺手的几个小技巧
 
 - **搜得不理想**：先检查卡片正文，再把标题改具体，例如「接口鉴权：Token 刷新流程」，比「第三章」更容易辨认。
-- **资料太多**：用集合分成「论文」「工作」「学习」等范围，查找更方便。
+- **资料太多**：用层级集合组织成「论文 → 检索增强」等范围；父集合默认包含子集合中的文件，也可关闭「包含子集合」只看直接归类。一份文件可归入多个集合，移动集合不移动原件。
 - **想带走内容**：导出 Markdown 可保留卡片修改；带资源导出还会一起打包插图。
 - **想重新解析**：可以重新索引，但**从原件重新索引会覆盖手工修改**，请先导出或备份。
 

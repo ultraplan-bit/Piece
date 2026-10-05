@@ -74,6 +74,12 @@ _SORT_LABELS = {
 }
 
 
+def _file_icon(file: dict) -> str:
+    extension = (file.get("original_file_type") or file["filename"].rsplit(".", 1)[-1]).lower()
+    return {"pdf": "picture_as_pdf", "md": "article", "docx": "description",
+            "pptx": "slideshow", "xlsx": "table_chart", "epub": "menu_book"}.get(extension, "insert_drive_file")
+
+
 def _parent_path(heading_path: str) -> str:
     """取切片的上级标题路径（去掉末段，末段即切片自身的标题）。"""
     if not heading_path:
@@ -96,6 +102,8 @@ def _progress_text(task_progress: dict) -> str:
     解析阶段的 x/y 是页数，向量阶段是已入库页数（非 PDF 为切片数），
     具体含义由后端写入 current_page/total_pages 时决定。
     """
+    if task_progress.get("stage") == "cancelling":
+        return t("task.cancelling")
     percent = task_progress.get("progress", 0)
     stage = task_progress.get("stage") or "queued"
     if task_progress.get("status") == "pending":
@@ -124,7 +132,7 @@ def render_files_middle(
         file_handlers: 文件处理器实例
     """
     with ui.column().classes(
-        "w-64 h-full flex flex-col overflow-hidden theme-panel gap-0"
+        "w-full h-full flex flex-col overflow-hidden theme-panel gap-0"
     ).style("border-right: 1px solid var(--border-color)"):
         # 顶部标题栏
         with ui.row().classes(
@@ -199,22 +207,24 @@ def render_files_middle(
             ui_refs["toolbar_buttons"] = toolbar_buttons
             toolbar_buttons()
 
-        # 隐藏的上传组件（支持批量上传）
-        ui_refs["upload_input"] = ui.upload(
-            on_begin_upload=file_handlers.on_begin_upload,
-            on_upload=file_handlers.handle_upload,
-            on_multi_upload=file_handlers.on_multi_upload_complete,
-            on_rejected=file_handlers.on_upload_rejected,
-            auto_upload=True,
-            multiple=True,
-            max_files=MAX_UPLOAD_FILES,
-            # 上限随当前解析后端变化；这里取渲染时的值，服务端导入时还会按同一
-            # 规则复核（切换解析后端后未重进页面，以服务端校验为准）
-            max_file_size=get_max_file_size(),
-            max_total_size=MAX_TOTAL_UPLOAD_SIZE,
-        ).props(
-            f"accept={','.join(ChunkerFactory.get_supported_extensions())}"
-        ).classes("hidden")
+        @ui.refreshable
+        def upload_control():
+            ui_refs["upload_input"] = ui.upload(
+                on_multi_upload=file_handlers.handle_multi_upload,
+                on_rejected=file_handlers.on_upload_rejected,
+                auto_upload=True,
+                multiple=True,
+                max_files=MAX_UPLOAD_FILES,
+                max_file_size=get_max_file_size(),
+                max_total_size=MAX_TOTAL_UPLOAD_SIZE,
+            ).props(
+                f"accept={','.join(ChunkerFactory.get_supported_extensions())}"
+            ).classes("hidden").on(
+                "added", file_handlers.on_upload_added, js_handler="files => emit(files.length)"
+            ).on("failed", file_handlers.on_upload_failed, args=[])
+
+        ui_refs["upload_control"] = upload_control
+        upload_control()
 
 
         # 上传阶段提示条：浏览器→服务端的传输期间文件还没有数据库记录，
@@ -227,8 +237,11 @@ def render_files_middle(
             with ui.row().classes("w-full items-center gap-2 px-3 py-1.5"):
                 ui.spinner(size="xs").classes("theme-text-accent")
                 ui.label(t("files.uploading", count=count)).classes(
-                    "text-xs theme-text-muted"
+                    "text-xs theme-text-muted flex-1"
                 )
+                ui.button(icon="close", on_click=file_handlers.cancel_upload).props(
+                    f'flat dense round size=sm aria-label="{t("files.upload_cancel")}"'
+                ).tooltip(t("files.upload_cancel"))
 
         ui_refs["upload_banner"] = upload_banner
         upload_banner()
@@ -237,7 +250,7 @@ def render_files_middle(
         @ui.refreshable
         def list_toolbar():
             with ui.row().classes("w-full items-center gap-1 px-2 py-2 flex-nowrap"):
-                ui.input(placeholder=t("files.search")).props(
+                ui.input(value=state.get("search_keyword", ""), placeholder=t("files.search")).props(
                     "dense outlined rounded debounce=300"
                 ).classes("flex-1 min-w-0 text-sm theme-card theme-border-soft").on(
                     "update:model-value", file_handlers.on_search_change
@@ -258,36 +271,38 @@ def render_files_middle(
         ui_refs["list_toolbar"] = list_toolbar
         list_toolbar()
 
-        # 集合筛选：文件多、跨领域时先缩小范围；多选取并集，留空为全部
+        # 范围与路径按 ID 跟随集合移动；包含后代只影响读取，不改变直接归类。
         @ui.refreshable
         def collection_filter():
-            options = {
-                item["id"]: f"{item['name']} ({item['file_count']})"
-                for item in state.get("collections", [])
-            }
-
-            with ui.row().classes("w-full items-center gap-1 px-2 pb-2 flex-nowrap"):
-                ui.select(
-                    options,
-                    value=list(state.get("active_collection_ids") or []),
-                    multiple=True,
-                    label=t("collections.filter_label"),
-                    on_change=lambda e: file_handlers.on_collection_change(e.value),
-                ).props("dense outlined options-dense use-chips").classes(
-                    "flex-1 min-w-0 text-sm theme-card theme-border-soft"
-                )
-                ui.button(
-                    icon="settings",
-                    on_click=file_handlers.handle_manage_collections,
-                ).props("flat dense round size=sm").classes(
-                    "shrink-0 theme-text-muted"
-                ).tooltip(t("collections.manage"))
+            selected = next((item for item in state.get("collections", [])
+                             if item["id"] in state.get("active_collection_ids", [])), None)
+            with ui.column().classes("w-full px-3 pb-2 gap-1"):
+                with ui.row().classes("items-center gap-0 flex-wrap"):
+                    ui.button(t("files.all_files"), on_click=lambda: file_handlers.on_collection_change([])).props(
+                        "flat dense no-caps size=sm"
+                    ).classes("theme-text-muted")
+                    if state.get("uncategorized"):
+                        ui.icon("chevron_right", size="xs").classes("theme-text-muted")
+                        ui.label(t("collections.none")).classes("text-xs theme-text")
+                    elif selected:
+                        for part in selected["path"]:
+                            ui.icon("chevron_right", size="xs").classes("theme-text-muted")
+                            ui.button(part["name"], on_click=lambda cid=part["id"]: file_handlers.on_collection_change([cid])).props(
+                                "flat dense no-caps size=sm"
+                            ).classes("breadcrumb-label theme-text").tooltip(part["name"])
+                if selected:
+                    with ui.row().classes("w-full items-center justify-between gap-1"):
+                        ui.switch(t("collections.include_descendants"), value=state.get("include_descendants", True),
+                                  on_change=file_handlers.on_descendants_change).props("dense size=xs").classes("text-xs")
+                        ui.button(icon="more_horiz", on_click=file_handlers.handle_manage_collections).props(
+                            f'flat dense round size=sm aria-label="{t("collections.manage")}"'
+                        ).tooltip(t("collections.manage"))
 
         ui_refs["collection_filter"] = collection_filter
         collection_filter()
 
-        # 文件列表（scroll-flush + 自带 gap：间距对齐左栏导航的 gap-0.5）
-        with ui.scroll_area().classes("flex-1 scroll-flush"):
+        with ui.scroll_area(on_scroll=lambda e: state.update(file_scroll=e.vertical_position)).classes("flex-1 scroll-flush") as file_scroll:
+            ui_refs["file_scroll"] = file_scroll
             @ui.refreshable
             def file_list_container():
                 if not state["filtered_files"]:
@@ -317,7 +332,13 @@ def render_files_middle(
                         is_batch_selected = file_id in batch_selected_ids
 
                         # 通过索引直接获取进行中的任务
+                        latest_task = state.get("latest_file_tasks", {}).get(file_id)
                         task_progress = state.get("task_progress_by_file_id", {}).get(file_id)
+                        if latest_task and latest_task["status"] in ("pending", "processing") and (
+                            not task_progress or latest_task.get("stage") == "cancelling"
+                        ):
+                            # 受理/取消后立即可操作，不必等下一轮订阅。
+                            task_progress = {**latest_task, "task_id": latest_task["id"]}
 
                         container_classes = "w-full px-3 py-1.5 cursor-pointer transition-colors rounded-md "
                         if batch_mode and is_batch_selected:
@@ -337,10 +358,14 @@ def render_files_middle(
                         # 选中/悬停底色已足够区隔（与左栏导航一致）
                         with ui.element("div").classes(container_classes).style(
                             "padding: 6px 8px"
-                        ).on("click", click_handler):
+                        ).props('tabindex=0 role=button').on("click", click_handler).on("keydown.enter", click_handler):
                             # 右键菜单：归类/属性/删除，避免必须先选中文件才能操作
                             if not batch_mode:
                                 with ui.context_menu():
+                                    ui.menu_item(
+                                        t("files.locate"),
+                                        lambda fid=file_id: file_handlers.handle_locate_file(fid),
+                                    )
                                     ui.menu_item(
                                         t("collections.assign_title"),
                                         lambda fid=file_id: file_handlers.handle_edit_file_collections(fid),
@@ -363,7 +388,7 @@ def render_files_middle(
                                     ui.checkbox(
                                         value=is_batch_selected,
                                     ).props("dense size=xs disable").style("pointer-events: none")
-                                    ui.icon("description", size="xs").classes(
+                                    ui.icon(_file_icon(f), size="xs").classes(
                                         "theme-text-accent" if is_batch_selected else "theme-text-muted"
                                     ).style("pointer-events: none")
                                     ui.label(f["filename"]).classes(
@@ -377,7 +402,7 @@ def render_files_middle(
                                     with ui.element("div").classes(
                                         "grid items-center gap-2 w-full"
                                     ).style("grid-template-columns: auto 1fr auto"):
-                                        ui.icon("description", size="xs").classes(
+                                        ui.icon(_file_icon(f), size="xs").classes(
                                             "theme-text-accent" if is_selected else "theme-text-muted"
                                         )
                                         ui.label(f["filename"]).classes(
@@ -386,7 +411,17 @@ def render_files_middle(
                                         with ui.element("div").classes("justify-self-end"):
                                             status_badge(f["status"])
 
-                                    # 所属集合（跨领域归类，一个文件可属于多个集合）
+                                    properties = metadata_service.decode_metadata(f.get("metadata"))
+                                    author = properties.get("author") or properties.get("authors")
+                                    if isinstance(author, list):
+                                        author = ", ".join(str(value) for value in author)
+                                    summary = " · ".join(str(value) for value in (author, properties.get("year")) if value)
+                                    if summary:
+                                        ui.label(summary).classes("text-xs theme-text-secondary truncate w-full").tooltip(summary)
+                                    if f.get("created_at"):
+                                        ui.label(t("files.imported_at", date=f["created_at"][:16])).classes("text-xs theme-text-muted")
+
+                                    # 所属集合只显示直接归类。
                                     collection_labels(
                                         state.get("collections_by_file", {}).get(file_id, [])
                                     )
@@ -404,10 +439,44 @@ def render_files_middle(
                                             ).classes(
                                                 "text-xs theme-text-muted whitespace-nowrap"
                                             )
+                                            ui.button(icon="stop").props(
+                                                f'flat dense round size=xs aria-label="{t("task.cancel")}"'
+                                            ).on("click.stop", lambda _, tid=task_progress["task_id"]:
+                                                 file_handlers.handle_cancel_task(tid)).tooltip(
+                                                t("task.cancel")
+                                            ).set_enabled(task_progress.get("stage") != "cancelling")
+                                    elif latest_task and latest_task["status"] in ("failed", "cancelled"):
+                                        message = t("task.cancelled") if latest_task["status"] == "cancelled" else (
+                                            latest_task.get("error_message") or t("task.failed"))
+                                        with ui.row().classes("w-full items-center gap-1 flex-nowrap"):
+                                            ui.label(message).classes("text-xs text-red-400 truncate flex-1").tooltip(message)
+                                            ui.button(icon="refresh").props(
+                                                f'flat dense round size=xs aria-label="{t("task.retry")}"'
+                                            ).on("click.stop", lambda _, tid=latest_task["id"]:
+                                                 file_handlers.handle_retry_task(tid)).tooltip(t("task.retry"))
 
             # 保存引用以便外部刷新
             ui_refs["file_list_container"] = file_list_container
             file_list_container()
+        file_scroll.scroll_to(pixels=state.get("file_scroll", 0))
+
+        @ui.refreshable
+        def file_pagination():
+            page = state.get("file_page", 1)
+            size = state.get("file_page_size", 50)
+            total = state.get("file_total", 0)
+            pages = max(1, (total + size - 1) // size)
+            with ui.row().classes("w-full px-3 py-2 items-center justify-between gap-1 library-footer flex-nowrap"):
+                ui.label(t("files.pagination", page=page, pages=pages, total=total)).classes("text-xs theme-text-muted")
+                with ui.row().classes("items-center gap-0 flex-nowrap"):
+                    ui.button(icon="chevron_left", on_click=lambda: file_handlers.go_to_file_page(page - 1)).props(
+                        "flat dense round size=sm"
+                    ).props(f'aria-label="{t("files.previous_page")}"').tooltip(t("files.previous_page")).set_enabled(page > 1)
+                    ui.button(icon="chevron_right", on_click=lambda: file_handlers.go_to_file_page(page + 1)).props(
+                        "flat dense round size=sm"
+                    ).props(f'aria-label="{t("files.next_page")}"').tooltip(t("files.next_page")).set_enabled(page < pages)
+        ui_refs["file_pagination"] = file_pagination
+        file_pagination()
 
 
 def render_files_source(
@@ -486,10 +555,19 @@ def render_files_right(
         # 顶部信息区
         with ui.row().classes(
             "w-full px-5 items-center justify-between theme-sidebar"
-        ).style("border-bottom: 1px solid var(--border-color); height: 49px"):
-            with ui.row().classes("items-center gap-2"):
-                ui.icon("article", size="xs").classes("theme-text-accent")
+        ).style("border-bottom: 1px solid var(--border-color); min-height: 49px"):
+            with ui.row().classes("items-center gap-1"):
+                for key, icon, label in (
+                    ("toggle_navigation", "menu", "files.toggle_navigation"),
+                    ("toggle_results", "view_sidebar", "files.toggle_results"),
+                    ("toggle_reading", "chrome_reader_mode", "files.reading_mode"),
+                ):
+                    ui.button(icon=icon, on_click=ui_refs.get(key)).props(f'flat dense round size=sm aria-label="{t(label)}"').classes("theme-text-muted").tooltip(t(label))
                 ui.label(t("chunks.title")).classes("text-sm font-medium theme-text")
+                if state.get("knowledge_return") and ui_refs.get("return_knowledge"):
+                    ui.button(icon="arrow_back", on_click=ui_refs["return_knowledge"]).props(
+                        f'flat dense round size=sm aria-label="{t("knowledge.return_knowledge")}"'
+                    ).classes("theme-text-muted").tooltip(t("knowledge.return_knowledge"))
 
             @ui.refreshable
             def chunk_toolbar_buttons():
@@ -595,6 +673,9 @@ def render_files_right(
                 "w-full theme-panel"
             ).style("border-bottom: 1px solid var(--border-color)"):
                 with ui.column().classes("w-full gap-2 pb-2"):
+                    if ui_refs.get("knowledge_references"):
+                        ui.button(t("knowledge.references"), icon="format_quote",
+                                  on_click=lambda: ui_refs["knowledge_references"](file_id)).props("flat dense no-caps")
                     # 集合
                     with ui.row().classes("w-full items-center gap-2 flex-wrap"):
                         ui.icon("folder", size="xs").classes("theme-text-muted")
@@ -605,6 +686,9 @@ def render_files_right(
                             ui.label(t("collections.none")).classes(
                                 "text-xs theme-text-muted"
                             )
+                        ui.button(
+                            icon="my_location", on_click=lambda: file_handlers.handle_locate_file(file_id)
+                        ).props(f'flat dense round size=xs aria-label="{t("files.locate")}"').classes("theme-text-muted").tooltip(t("files.locate"))
                         ui.button(
                             icon="edit",
                             on_click=lambda: file_handlers.handle_edit_file_collections(file_id),
@@ -655,7 +739,7 @@ def render_files_right(
 
         # 切片内容区
         # chunk-scroll / chunk-anchor 供滚动联动的 js_handler 定位当前可见切片
-        chunk_scroll = ui.scroll_area().classes("flex-1 min-w-0 chunk-scroll")
+        chunk_scroll = ui.scroll_area(on_scroll=lambda e: state.update(chunk_scroll=e.vertical_position)).classes("flex-1 min-w-0 chunk-scroll")
         # 前端按阅读区和停留时间筛选，只把稳定的新目标交给服务端。
         chunk_scroll.on(
             "scroll",
@@ -823,3 +907,5 @@ def render_files_right(
 
             ui_refs["chunk_inspector"] = chunk_inspector
             chunk_inspector()
+        chunk_scroll.scroll_to(pixels=state.get("chunk_scroll", 0))
+        ui_refs["chunk_scroll"] = chunk_scroll

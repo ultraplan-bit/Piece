@@ -9,12 +9,13 @@
 """
 
 import asyncio
+import logging
 
 from nicegui import ui, events
 
 from indexing.services import file_service, task_service, zotero_service
 from indexing.utils import await_completion, run_sync
-from indexing.services import chunk_service, collection_service, metadata_service
+from indexing.services import chunk_service, collection_service, metadata_service, maintenance_service
 from app.i18n import t
 from app.import_scan import import_candidates
 from app.ui.components import (
@@ -32,6 +33,8 @@ from app.utils import (
     MAX_UPLOAD_FILES,
 )
 from indexing.services.file_service import get_max_file_size
+
+logger = logging.getLogger(__name__)
 
 # 上传已改为流式落盘到临时文件，可并行处理多个文件而不叠加内存峰值。
 _UPLOAD_CONCURRENCY = 3
@@ -68,11 +71,24 @@ class FileHandlers:
         # 集合状态：collections 为全部集合，collections_by_file 供列表渲染标签
         self.state["collections"] = []
         self.state["collections_by_file"] = {}
-        # 多选筛选，空列表表示"全部集合"
+        # 界面一次只持有当前文件页和正在阅读的文件。
         self.state["active_collection_ids"] = []
+        self.state["uncategorized"] = False
+        self.state["include_descendants"] = True
+        self.state["expanded_collection_ids"] = []
+        self.state["file_page"] = 1
+        self.state["file_page_size"] = 50
+        self.state["file_total"] = 0
+        self.state["file_scroll"] = 0
+        self.state["tree_scroll"] = 0
         self.state["sort_key"] = "created_at"
+        self._list_revision = 0
         # 上传并发控制
         self._upload_semaphore = asyncio.Semaphore(_UPLOAD_CONCURRENCY)
+        self._upload_cancelled = False
+        self._upload_received = False
+        self._upload_collection_ids = []
+        self.state["latest_file_tasks"] = {}
         # 切片处理器在本类之后构造，由 set_chunk_handlers 注入
         self.chunk_handlers = None
 
@@ -81,86 +97,140 @@ class FileHandlers:
         self.chunk_handlers = chunk_handlers
 
     async def load_files(self):
-        """加载文件列表（异步）"""
-        self.state["files_data"] = await run_sync(file_service.get_files_list)
+        """刷新组织结构和当前文件页，不把全库文件装入界面。"""
         await self.load_collections(refresh=False)
-        self.apply_filter()
-        # 文件增删会改变集合内的文件数，筛选下拉需要跟着更新
-        if self.ui_refs.get("collection_filter"):
-            self.ui_refs["collection_filter"].refresh()
+        await self.load_file_page()
         await self.load_stats()
 
     async def load_collections(self, refresh: bool = True):
-        """加载集合列表及文件归属关系"""
-        self.state["collections"] = await run_sync(
-            collection_service.list_collections
-        )
-        self.state["collections_by_file"] = await run_sync(
-            collection_service.get_collections_by_file
-        )
-
-        # 集合被删除后，原本选中的筛选项要回到"全部"
-        valid_ids = {item["id"] for item in self.state["collections"]}
-        self.state["active_collection_ids"] = [
-            cid for cid in self.state.get("active_collection_ids", []) if cid in valid_ids
-        ]
-
+        collections = await run_sync(collection_service.list_collections)
+        changed = collections != self.state["collections"]
+        self.state["collections"] = collections
+        valid_ids = {item["id"] for item in collections}
+        if any(cid not in valid_ids for cid in self.state["active_collection_ids"]):
+            self.state["active_collection_ids"] = []
+            self.state["uncategorized"] = False
+            self._reset_file_page()
+            ui.notify(t("collections.selection_deleted"), type="info")
+        expanded = {cid for cid in self.state["expanded_collection_ids"] if int(cid) in valid_ids}
+        if changed:
+            for item in collections:
+                if item["id"] in self.state["active_collection_ids"]:
+                    expanded.update(str(part["id"]) for part in item["path"][:-1])
+        self.state["expanded_collection_ids"] = sorted(expanded)
+        if changed and self.ui_refs.get("collection_tree"):
+            self.ui_refs["collection_tree"].refresh()
+        if self.ui_refs.get("collection_filter"):
+            self.ui_refs["collection_filter"].refresh()
         if refresh:
-            self.apply_filter()
-            if self.ui_refs.get("collection_filter"):
-                self.ui_refs["collection_filter"].refresh()
+            await self.load_file_page()
 
-    def apply_filter(self):
-        """应用集合、搜索过滤和排序"""
-        files = self.state["files_data"]
-
-        collection_ids = self.state.get("active_collection_ids") or []
-        if collection_ids:
-            # 集合名在库中唯一，按名匹配即可复用 collections_by_file 这张映射
-            names = {
-                item["name"]
-                for item in self.state["collections"]
-                if item["id"] in set(collection_ids)
-            }
-            by_file = self.state.get("collections_by_file", {})
-            # 多选取并集：命中任意一个集合即保留
-            files = [f for f in files if names & set(by_file.get(f["id"], []))]
-
-        keyword = self.state.get("search_keyword", "").strip().lower()
-        if keyword:
-            files = [f for f in files if keyword in f["filename"].lower()]
-
-        sort_key = self.state.get("sort_key", "created_at")
-        reverse = SORT_OPTIONS.get(sort_key, True)
-        files = sorted(
-            files, key=lambda f: (f.get(sort_key) or "").lower()
-            if sort_key == "filename" else (f.get(sort_key) or ""),
-            reverse=reverse,
+    async def load_file_page(self):
+        """与 API/MCP 共用分页和范围展开；迟到的查询不得覆盖新的筛选结果。"""
+        self._list_revision += 1
+        revision = self._list_revision
+        size = self.state["file_page_size"]
+        page = self.state["file_page"]
+        sort_key = self.state["sort_key"]
+        options = dict(
+            limit=size, offset=(page - 1) * size,
+            collection_ids=list(self.state["active_collection_ids"]) or None,
+            include_descendants=self.state["include_descendants"],
+            uncategorized=self.state["uncategorized"],
+            name=self.state.get("search_keyword") or None,
+            sort_by=sort_key, descending=SORT_OPTIONS[sort_key],
         )
+        result = await run_sync(file_service.get_files_list_paginated, **options)
+        if revision != self._list_revision:
+            return
+        last_page = max(1, (result["total"] + size - 1) // size)
+        if page > last_page:
+            self.state["file_page"] = last_page
+            await self.load_file_page()
+            return
 
-        self.state["filtered_files"] = files
+        files = list(result["files"])
+        selected_id = self.state.get("selected_file_id")
+        selected_file = None
+        if selected_id is not None and not any(f["id"] == selected_id for f in files):
+            selected_file = await run_sync(file_service.get_file_by_id, selected_id)
+            if selected_file:
+                files.append(selected_file)
+        by_file = await run_sync(collection_service.get_collections_by_file, [f["id"] for f in files])
+        latest_tasks = await run_sync(task_service.get_latest_file_tasks, [f["id"] for f in files])
+        if revision != self._list_revision:
+            return
+        if self.state.get("selected_file_id") != selected_id:
+            await self.load_file_page()
+            return
+        if selected_id is not None and not any(f["id"] == selected_id for f in files):
+            self.state["selected_file_id"] = None
+            self.state["chunks_data"] = []
+            self.state["source_page"] = None
+            for key in ("chunk_inspector", "source_column"):
+                if self.ui_refs.get(key):
+                    self.ui_refs[key].refresh()
+        # 阅读区身份独立于筛选/分页，切换范围不会卸掉正在核验的原页。
+        self.state["files_data"] = files
+        self.state["filtered_files"] = result["files"]
+        self.state["collections_by_file"] = by_file
+        self.state["latest_file_tasks"] = latest_tasks
+        self.state["file_total"] = result["total"]
+        for key in ("file_list_container", "file_pagination", "file_info_panel", "chunk_toolbar_buttons"):
+            if self.ui_refs.get(key):
+                self.ui_refs[key].refresh()
 
-        if self.ui_refs.get("file_list_container"):
-            self.ui_refs["file_list_container"].refresh()
+    def _reset_file_page(self):
+        self.state["file_page"] = 1
+        self.state["file_scroll"] = 0
+        if self.ui_refs.get("file_scroll"):
+            self.ui_refs["file_scroll"].scroll_to(pixels=0)
 
-    def on_search_change(self, e):
-        """搜索框内容变化时触发"""
+    async def on_search_change(self, e):
         self.state["search_keyword"] = e.args
-        self.apply_filter()
+        self._reset_file_page()
+        await self.load_file_page()
 
-    def on_sort_change(self, sort_key: str):
-        """切换排序方式"""
+    async def on_sort_change(self, sort_key: str):
         self.state["sort_key"] = sort_key
-        self.apply_filter()
+        self._reset_file_page()
+        await self.load_file_page()
         if self.ui_refs.get("list_toolbar"):
             self.ui_refs["list_toolbar"].refresh()
 
+    async def go_to_file_page(self, page: int):
+        self.state["file_page"] = max(1, page)
+        self.state["file_scroll"] = 0
+        if self.ui_refs.get("file_scroll"):
+            self.ui_refs["file_scroll"].scroll_to(pixels=0)
+        await self.load_file_page()
+
     # ==================== 集合 ====================
 
-    def on_collection_change(self, collection_ids):
-        """切换集合筛选（多选，空表示全部）"""
+    async def on_collection_change(self, collection_ids, *, uncategorized=False):
         self.state["active_collection_ids"] = list(collection_ids or [])
-        self.apply_filter()
+        self.state["uncategorized"] = uncategorized
+        self._reset_file_page()
+        tree = self.ui_refs.get("tree_element")
+        if tree:
+            tree.select("uncategorized" if uncategorized else
+                        str(collection_ids[0]) if collection_ids else "all")
+        if self.ui_refs.get("collection_filter"):
+            self.ui_refs["collection_filter"].refresh()
+        await self.load_file_page()
+
+    async def on_tree_select(self, e):
+        if e.value is None:
+            return
+        if e.value in ("all", "uncategorized"):
+            await self.on_collection_change([], uncategorized=e.value == "uncategorized")
+        else:
+            await self.on_collection_change([int(e.value)])
+
+    async def on_descendants_change(self, e):
+        self.state["include_descendants"] = e.value
+        self._reset_file_page()
+        await self.load_file_page()
 
     async def _assign_active_collections(self, file_id: int) -> None:
         """把新建/上传的文件直接归入当前筛选的集合。
@@ -191,14 +261,20 @@ class FileHandlers:
             collections=self.state["collections"],
             on_create=self._create_collection,
             on_rename=self._rename_collection,
+            on_move=self._move_collection,
             on_delete=self._delete_collection,
+            on_preview_delete=self._preview_delete_collection,
+            selected_id=next(iter(self.state["active_collection_ids"]), None),
         )
 
-    async def _create_collection(self, name: str) -> list:
-        """新建集合，返回刷新后的集合列表"""
-        result = await run_sync(collection_service.create_collection, name)
-        if not result["success"]:
-            ui.notify(result["message"], type="warning")
+    async def _create_collection(self, name: str, parent_id: int | None = None) -> list:
+        """新建集合，归类对话框按名新建时仍创建根集合。"""
+        try:
+            result = await run_sync(collection_service.create_collection, name, parent_id=parent_id)
+            if not result["success"]:
+                ui.notify(result["message"], type="warning")
+        except ValueError as exc:
+            ui.notify(str(exc), type="warning")
         await self.load_collections()
         return self.state["collections"]
 
@@ -212,11 +288,67 @@ class FileHandlers:
         await self.load_collections()
         return self.state["collections"]
 
-    async def _delete_collection(self, collection_id: int) -> list:
-        """删除集合（文件本身不受影响），返回刷新后的集合列表"""
-        await run_sync(collection_service.delete_collection, collection_id)
+    async def _move_collection(self, collection_id: int, parent_id: int | None) -> list:
+        try:
+            result = await run_sync(collection_service.move_collection, collection_id, parent_id)
+            if not result["success"]:
+                ui.notify(result["message"], type="warning")
+        except ValueError as exc:
+            ui.notify(str(exc), type="warning")
         await self.load_collections()
         return self.state["collections"]
+
+    async def _preview_delete_collection(self, collection_id: int):
+        try:
+            return await run_sync(maintenance_service.delete_collection, collection_id, dry_run=True)
+        except ValueError as exc:
+            ui.notify(str(exc), type="warning")
+            return None
+
+    async def _delete_collection(self, collection_id: int) -> list:
+        """确认后重新校验，不使用过期预览作为删除依据。"""
+        try:
+            await run_sync(maintenance_service.delete_collection, collection_id, confirmed=True)
+            ui.notify(t("collections.deleted"), type="positive")
+        except ValueError as exc:
+            ui.notify(str(exc), type="warning")
+        await self.load_collections()
+        return self.state["collections"]
+
+    async def handle_locate_file(self, file_id: int):
+        """一份文件可有多条直接归属，不能替用户猜一个文件夹。"""
+        from nicegui import context
+        from app.ui.components import collection_path_label
+
+        collections = await run_sync(collection_service.get_file_collections, file_id)
+        if not collections:
+            await self.on_collection_change([], uncategorized=True)
+            return
+
+        async def locate(collection_id):
+            item = next((c for c in self.state["collections"] if c["id"] == collection_id), None)
+            if item:
+                expanded = set(self.state["expanded_collection_ids"])
+                expanded.update(str(part["id"]) for part in item["path"][:-1])
+                self.state["expanded_collection_ids"] = sorted(expanded)
+                if self.ui_refs.get("collection_tree"):
+                    self.ui_refs["collection_tree"].refresh()
+            await self.on_collection_change([collection_id])
+
+        if len(collections) == 1:
+            await locate(collections[0]["id"])
+            return
+        by_id = {c["id"]: c for c in self.state["collections"]}
+        with ui.dialog() as dialog, ui.card().classes("w-[440px] max-w-full theme-card"):
+            ui.label(t("files.locate_title")).classes("text-base font-semibold theme-text")
+            for collection in collections:
+                async def choose(cid=collection["id"]):
+                    await locate(cid)
+                    dialog.close()
+                ui.button(collection_path_label(by_id.get(collection["id"], collection)), on_click=choose).props("flat no-caps").classes("w-full")
+            ui.button(t("confirm_dialog.btn_cancel"), on_click=dialog.close).props("flat")
+        dialog.move(context.client.content)
+        dialog.open()
 
     async def handle_edit_file_collections(self, file_id: int):
         """打开"归入集合"对话框"""
@@ -276,17 +408,19 @@ class FileHandlers:
 
     # ==================== 单个文件删除 ====================
 
-    def confirm_delete_file(self, file_id: int):
-        """确认删除单个文件"""
-        file_info = next(
-            (f for f in self.state["files_data"] if f["id"] == file_id), None
-        )
-        if not file_info:
+    async def confirm_delete_file(self, file_id: int):
+        """确认删除单个文件并展示知识引用保留范围。"""
+        from indexing.services.maintenance_service import delete_files
+        try:
+            impact = await run_sync(delete_files, [file_id], dry_run=True)
+        except ValueError as exc:
+            ui.notify(str(exc), type="negative")
             return
 
         confirm_dialog(
             title=t("files.delete_confirm_title"),
-            message=t("files.delete_confirm_msg", filename=file_info["filename"]),
+            message=t("files.delete_confirm_msg", filename=impact["filenames"][0]) + "\n\n" + t(
+                "files.knowledge_delete_warning", count=impact["knowledge_evidence_count"]),
             on_confirm=lambda: self._do_delete_file(file_id),
             confirm_text=t("confirm_dialog.btn_delete"),
             danger=True,
@@ -294,12 +428,13 @@ class FileHandlers:
 
     async def _do_delete_file(self, file_id: int):
         """执行删除单个文件"""
+        from indexing.services.maintenance_service import delete_files
         try:
-            success = await run_sync(file_service.delete_file, file_id)
+            result = await run_sync(delete_files, [file_id], confirmed=True)
         except ValueError as exc:
             ui.notify(str(exc), type="negative")
             return
-        if not success:
+        if file_id not in result["deleted_file_ids"]:
             ui.notify(t("files.delete_failed"), type="negative")
             return
 
@@ -406,6 +541,31 @@ class FileHandlers:
         ui.notify(t("files.reindex_started"), type="positive")
         await self.load_files()
 
+    async def handle_cancel_task(self, task_id: int):
+        try:
+            task = await run_sync(task_service.cancel_task, task_id)
+        except Exception as exc:
+            logger.error("取消任务失败 (%s)", type(exc).__name__)
+            ui.notify(t("task.action_failed"), type="negative")
+            return
+        key = "task.cancelling" if task["status"] in task_service.ACTIVE_STATUSES else (
+            "task.cancelled" if task["status"] == "cancelled" else "task.already_finished")
+        ui.notify(t(key), type="info")
+        await self.load_files()
+
+    async def handle_retry_task(self, task_id: int):
+        try:
+            await run_sync(task_service.retry_task, task_id)
+        except ValueError as exc:
+            ui.notify(str(exc), type="warning")
+            return
+        except Exception as exc:
+            logger.error("重试任务失败 (%s)", type(exc).__name__)
+            ui.notify(t("task.action_failed"), type="negative")
+            return
+        ui.notify(t("files.reindex_started"), type="positive")
+        await self.load_files()
+
     # ==================== 知识卡片 ====================
 
     async def handle_create_card(self):
@@ -457,21 +617,34 @@ class FileHandlers:
         indexed = stats["indexed_files"]
         size_str = format_size(stats["total_size"])
 
+        self.state["stats_text"] = t("stats.indexed", size=size_str, indexed=indexed, total=total)
         if self.ui_refs.get("stats_label"):
-            self.ui_refs["stats_label"].set_text(
-                t("stats.indexed", size=size_str, indexed=indexed, total=total)
-            )
+            self.ui_refs["stats_label"].set_text(self.state["stats_text"])
             self.ui_refs["stats_label"].update()
 
-    async def load_chunks(self, file_id: int):
-        """加载选中文件的切片（异步 + 后端分页）"""
+    async def load_chunks(self, file_id: int, *, chunk_id=None):
+        """加载选中文件的切片，可定位到指定卡片所在页。"""
         # 1. 立即更新选中状态，旧预览即使切走又切回也不能回写。
         if self.chunk_handlers:
             self.chunk_handlers.invalidate_source_requests()
         self.state["selected_file_id"] = file_id
+        # 新建文件或切换分页后，阅读对象可能不在当前结果页。
+        if not any(f["id"] == file_id for f in self.state["files_data"]):
+            file_info = await run_sync(file_service.get_file_by_id, file_id)
+            collections = await run_sync(collection_service.get_file_collections, file_id)
+            if self.state["selected_file_id"] != file_id:
+                return
+            if not file_info:
+                self.state["selected_file_id"] = None
+                return
+            self.state["files_data"] = list(self.state["filtered_files"]) + [file_info]
+            self.state["collections_by_file"][file_id] = [c["name"] for c in collections]
 
         # 2. 清空旧数据，显示加载状态
         self.state["chunks_data"] = []
+        self.state["chunk_scroll"] = 0
+        if self.ui_refs.get("chunk_scroll"):
+            self.ui_refs["chunk_scroll"].scroll_to(pixels=0)
         self.state["chunk_page"] = 1
         self.state["total_chunks"] = 0
         self.state["total_chunk_pages"] = 1
@@ -491,16 +664,20 @@ class FileHandlers:
         if self.ui_refs.get("source_column"):
             self.ui_refs["source_column"].refresh()
 
-        # 4. 异步加载第一页数据
+        # 4. 异步加载首页，或引用卡片所在页；不按标题重定位。
         result = await run_sync(
             file_service.get_chunks_paginated,
             file_id,
             page=1,
-            page_size=self.state["chunk_page_size"]
+            page_size=self.state["chunk_page_size"],
+            **({"chunk_id": chunk_id} if chunk_id is not None else {}),
         )
 
-        # 5. 更新状态
+        # 5. 更新状态，忽略上一个阅读对象迟到的查询。
+        if self.state["selected_file_id"] != file_id:
+            return
         if result:
+            self.state["chunk_page"] = result["page"]
             self.state["chunks_data"] = result["chunks"]
             self.state["total_chunks"] = result["total"]
             self.state["total_chunk_pages"] = result["total_pages"]
@@ -517,82 +694,119 @@ class FileHandlers:
         if self.chunk_handlers:
             await self.chunk_handlers.sync_source_page()
 
-    def open_file_picker(self):
-        """打开文件选择框。
-
-        QUploader 上传成功后会把文件留在内部列表里（只有 reset/removeUploadedFiles
-        能清），列表占满 max-files 后再选的文件会被静默拒绝。这里先清掉已完成的条目
-        再弹选择框；用 removeUploadedFiles 而非 reset，避免中断正在上传的文件。
-        """
-        upload_input = self.ui_refs.get("upload_input")
-        if not upload_input:
+    async def open_file_picker(self):
+        """一次接收一批；更换组件身份，取消后迟到的回调不能污染下一批。"""
+        if self.state.get("uploading_count"):
+            ui.notify(t("files.upload_busy"), type="warning")
             return
-        upload_input.run_method("removeUploadedFiles")
-        upload_input.run_method("pickFiles")
+        control = self.ui_refs.get("upload_control")
+        if control:
+            await control.refresh()
+        upload_input = self.ui_refs.get("upload_input")
+        if upload_input:
+            self._upload_cancelled = False
+            self._upload_received = False
+            self._upload_collection_ids = list(self.state.get("active_collection_ids") or [])
+            upload_input.run_method("pickFiles")
 
-    def on_begin_upload(self, _):
-        """浏览器开始向服务端传输文件时触发，用于显示上传阶段提示。"""
-        self.state["uploading_count"] = self.state.get("uploading_count", 0) + 1
-        self._refresh_upload_banner()
+    def _upload_stopped(self, sender):
+        return self._upload_cancelled or sender is not self.ui_refs.get("upload_input")
+
+    def on_upload_added(self, e):
+        if not self._upload_stopped(e.sender) and not self._upload_received:
+            self.state["uploading_count"] += e.args
+            self._refresh_upload_banner()
 
     def _refresh_upload_banner(self):
-        """刷新文件列表顶部的上传提示条。"""
         banner = self.ui_refs.get("upload_banner")
         if banner:
             banner.refresh()
 
-    async def handle_upload(self, e: events.UploadEventArguments):
-        """
-        处理单个文件上传（带并发控制）
-
-        使用信号量限制并发数，避免耗尽数据库连接池
-        """
-        # 获取信号量，限制并发数
-        async with self._upload_semaphore:
-            try:
-                await self._process_single_upload(e)
-            finally:
-                # 传输阶段已结束（无论入库成功与否），撤下上传提示
-                self.state["uploading_count"] = max(
-                    0, self.state.get("uploading_count", 0) - 1
-                )
-                self._refresh_upload_banner()
-
-    async def on_multi_upload_complete(self, _):
-        """
-        所有文件上传完成后的回调
-
-        清理已完成的上传条目，避免占满 max-files 导致下次选不了文件。
-        """
+    def cancel_upload(self):
+        """中止传输和未受理文件；已受理的任务在文件列表中单独取消。"""
+        self._upload_cancelled = True
         upload_input = self.ui_refs.get("upload_input")
         if upload_input:
-            upload_input.run_method("removeUploadedFiles")
-        await self.load_files()
+            upload_input.run_method("abort")
+            upload_input.reset()
+        self.state["uploading_count"] = 0
+        self._refresh_upload_banner()
+        ui.notify(t("files.upload_cancelled"), type="info")
 
-    async def _process_single_upload(self, e: events.UploadEventArguments):
-        """GUI 只负责接收上传流和展示结果，导入规则与其他入口共用。"""
+    def on_upload_failed(self, e):
+        # QUploader 的 abort 同样触发 failed，不把主动取消误报成网络错误。
+        if self._upload_stopped(e.sender):
+            return
+        self._upload_cancelled = True
+        e.sender.reset()
+        self.state["uploading_count"] = 0
+        self._refresh_upload_banner()
+        ui.notify(t("files.upload_failed"), type="negative", timeout=0, close_button=True)
+
+    async def handle_multi_upload(self, e: events.MultiUploadEventArguments):
+        """NiceGUI 的批次回调不等待逐文件回调，由这里统一等待落盘和受理。"""
+        if self._upload_stopped(e.sender):
+            return
+        self._upload_received = True
+        collection_ids = self._upload_collection_ids[:]
+        self.state["uploading_count"] = len(e.files)
+        self._refresh_upload_banner()
+
+        async def process(file):
+            # gather 子任务不继承 slot；绑定原客户端，上传控件取消后可能已被重建。
+            with e.sender.client:
+                try:
+                    async with self._upload_semaphore:
+                        if not self._upload_stopped(e.sender):
+                            await self._process_single_upload(file, e.sender, collection_ids)
+                finally:
+                    if not self._upload_stopped(e.sender):
+                        self.state["uploading_count"] = max(0, self.state["uploading_count"] - 1)
+                        self._refresh_upload_banner()
+
+        await asyncio.gather(*(process(file) for file in e.files))
+        if e.sender is self.ui_refs.get("upload_input"):
+            e.sender.run_method("removeUploadedFiles")
+        try:
+            await self.load_files()
+        except Exception as exc:
+            logger.error("上传后刷新失败 (%s)", type(exc).__name__)
+            ui.notify(t("files.upload_refresh_failed"), type="warning")
+
+    async def _process_single_upload(self, file, sender, collection_ids):
+        """保存失败、导入失败和取消均收尾临时文件，不中断同批其他文件。"""
         import os
         import tempfile
         from pathlib import Path
 
-        filename = e.file.name
-        descriptor, temp_name = tempfile.mkstemp(suffix=Path(filename).suffix)
-        os.close(descriptor)
-        path = Path(temp_name)
+        path = None
         try:
-            await await_completion(e.file.save(path))
-            result = await run_sync(
-                file_service.import_file, path, filename,
-                list(self.state.get("active_collection_ids") or []),
-            )
-        except (ValueError, OSError) as exc:
-            ui.notify(str(exc), type="negative")
-            return
+            descriptor, temp_name = tempfile.mkstemp(suffix=Path(file.name).suffix)
+            path = Path(temp_name)
+            os.close(descriptor)
+            await await_completion(file.save(path))
+            if self._upload_stopped(sender):
+                return
+            result = await run_sync(file_service.import_file, path, file.name, collection_ids)
+            if self._upload_stopped(sender):
+                # 同步受理不能强杀；等它返回，只取消本次新建任务，绝不取消查重命中的任务。
+                if not result["duplicate"]:
+                    await run_sync(task_service.cancel_task, result["task_id"])
+                return
+        except Exception as exc:
+            logger.error("文件上传受理失败 (%s)", type(exc).__name__)
+            reason = str(exc) if isinstance(exc, (ValueError, OSError)) else t("files.upload_error_generic")
+            ui.notify(t("files.upload_file_failed", filename=file.name, error=reason),
+                      type="negative", timeout=0, close_button=True)
+        else:
+            ui.notify(t("files.upload_exists") if result["duplicate"] else t("files.upload_processing"),
+                      type="warning" if result["duplicate"] else "positive")
         finally:
-            path.unlink(missing_ok=True)
-        ui.notify(t("files.upload_exists") if result["duplicate"] else t("files.upload_processing"),
-                  type="warning" if result["duplicate"] else "positive")
-        await self.load_files()
+            if path is not None:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("上传临时文件清理失败 (%s)", type(exc).__name__)
 
     def on_upload_rejected(self, _):
         """处理被拒绝的文件。
@@ -743,26 +957,33 @@ class FileHandlers:
         filtered_ids = {f["id"] for f in self.state["filtered_files"]}
         return self.state["batch_selected_ids"] == filtered_ids
 
-    def confirm_batch_delete(self):
-        """确认批量删除"""
-        if not self.state["batch_selected_ids"]:
+    async def confirm_batch_delete(self):
+        """确认批量删除并固定本次选择，避免对话框打开后扩大范围。"""
+        from indexing.services.maintenance_service import delete_files
+        file_ids = list(self.state["batch_selected_ids"])
+        if not file_ids:
             ui.notify(t("files.batch_none_selected"), type="warning")
             return
+        try:
+            impact = await run_sync(delete_files, file_ids, dry_run=True)
+        except ValueError as exc:
+            ui.notify(str(exc), type="negative")
+            return
 
-        count = len(self.state["batch_selected_ids"])
         confirm_dialog(
             title=t("files.batch_delete_confirm_title"),
-            message=t("files.batch_delete_confirm_msg", count=count),
-            on_confirm=self._do_batch_delete,
+            message=t("files.batch_delete_confirm_msg", count=len(file_ids)) + "\n\n" + t(
+                "files.knowledge_delete_warning", count=impact["knowledge_evidence_count"]),
+            on_confirm=lambda: self._do_batch_delete(file_ids),
             confirm_text=t("confirm_dialog.btn_delete"),
             danger=True,
         )
 
-    async def _do_batch_delete(self):
-        """执行批量删除（异步优化，避免阻塞界面）"""
+    async def _do_batch_delete(self, file_ids):
+        """执行已确认的文件集合，避免阻塞界面。"""
         from indexing.services.maintenance_service import delete_files
         try:
-            result = await run_sync(delete_files, list(self.state["batch_selected_ids"]), confirmed=True)
+            result = await run_sync(delete_files, file_ids, confirmed=True)
         except ValueError as exc:
             ui.notify(str(exc), type="negative")
             return

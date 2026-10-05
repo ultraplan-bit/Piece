@@ -123,6 +123,18 @@ def _ensure_file_alive(file_id: int) -> None:
         raise SourceFileGone(f"文件已被删除（file_id={file_id}），任务终止")
 
 
+class _TaskStopEvent:
+    """解析线程同时观察停机和当前任务取消，不影响其他任务。"""
+
+    def __init__(self, task_id, worker_stop):
+        self.task_id = task_id
+        self.worker_stop = worker_stop
+
+    def is_set(self):
+        return ((self.worker_stop is not None and self.worker_stop.is_set())
+                or task_service.is_cancel_requested(self.task_id))
+
+
 def _raise_if_stopping(stop_event) -> None:
     if stop_event is not None and stop_event.is_set():
         raise WorkerStopRequested("Worker 已停止，任务未完成")
@@ -245,9 +257,7 @@ def insert_chunks_batch(file_id, chunks, embeddings, task_id=None) -> None:
 def _publish_file(task_id, file_id, working_path, metadata):
     """新工作代已落盘；索引、工作路径及任务产物在同一事务切换。"""
     with get_db_cursor(write=True) as cursor:
-        cursor.execute("SELECT status FROM tasks WHERE id = ?", (task_id,))
-        if cursor.fetchone()[0] != "processing":
-            raise ValueError("任务已不在处理中，拒绝发布")
+        task_service.ensure_task_publishable(task_id, cursor)
         cursor.execute("DELETE FROM vec_chunks WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id = ?)", (file_id,))
         cursor.execute("DELETE FROM chunks WHERE file_id = ?", (file_id,))
         staged = cursor.connection.execute("SELECT * FROM staged_chunks WHERE task_id = ? ORDER BY chunk_index", (task_id,))
@@ -662,6 +672,7 @@ async def process_task(task_id: int, stop_event=None) -> None:
     """处理一个文件索引任务。"""
     # 与 UI 共用配置缓存，不再从另一个进程重读并覆盖刚保存的设置。
 
+    stop_event = _TaskStopEvent(task_id, stop_event)
     task = await run_sync(task_service.get_task, task_id)
     if not task:
         return
@@ -701,6 +712,7 @@ async def process_task(task_id: int, stop_event=None) -> None:
     metadata = None
 
     try:
+        _raise_if_stopping(stop_event)
         await run_sync(_mark_generation, staging)
         if source == "working":
             await run_sync(shutil.copy2, old_working, working_file_path)
@@ -800,25 +812,19 @@ async def process_task(task_id: int, stop_event=None) -> None:
             error_message=str(exc),
         )
     except (WorkerStopRequested, ParserStopped) as exc:
-        await run_sync(mark_file_failure, file_id)
-        await run_sync(
-            task_service.update_task_status,
-            task_id,
-            "failed",
-            error_message=str(exc),
-        )
+        if not await run_sync(task_service.is_cancel_requested, task_id):
+            await run_sync(mark_file_failure, file_id)
+            await run_sync(task_service.update_task_status, task_id, "failed", error_message=str(exc))
     except Exception as exc:
-        logger.exception("[Worker] 文件处理失败: task_id=%s", task_id)
-        await run_sync(mark_file_failure, file_id)
-        await run_sync(
-            task_service.update_task_status,
-            task_id,
-            "failed",
-            error_message=str(exc),
-            error_code="PROCESSING_FAILED",
-        )
+        if not await run_sync(task_service.is_cancel_requested, task_id):
+            logger.exception("[Worker] 文件处理失败: task_id=%s", task_id)
+            await run_sync(mark_file_failure, file_id)
+            await run_sync(task_service.update_task_status, task_id, "failed",
+                           error_message=str(exc), error_code="PROCESSING_FAILED")
     finally:
         await run_sync(_clean_staging, task_id, file_id, staging, destination)
+        if await run_sync(task_service.is_cancel_requested, task_id):
+            await run_sync(task_service.finish_cancelled_task, task_id)
 
 
 class TaskProcessor:
@@ -881,6 +887,9 @@ class TaskProcessor:
         task = task_service.get_task(task_id)
         if not task or task["status"] != "processing":
             return
+        if task_service.is_cancel_requested(task_id):
+            task_service.finish_cancelled_task(task_id)
+            return
         task_service.update_task_status(task_id, "failed", error_message=message)
         if task.get("file_id") and task["task_type"] == "file_index":
             mark_file_failure(task["file_id"])
@@ -888,7 +897,7 @@ class TaskProcessor:
     async def _dispatch_task(self, task: dict, stop_event) -> None:
         task_id = task["id"]
         task_type = task["task_type"]
-        try:
+        async def execute():
             _raise_if_stopping(stop_event)
             if task_type == "chunk_update":
                 await chunk_service.process_chunk_update_task(task_id)
@@ -898,14 +907,35 @@ class TaskProcessor:
                 await process_task(task_id, stop_event)
             else:
                 raise ValueError(f"未知任务类型：{task_type}")
+
+        execution = asyncio.create_task(execute())
+        try:
+            while not execution.done():
+                done, _ = await asyncio.wait({execution}, timeout=IDLE_POLL_SECONDS)
+                if done:
+                    break
+                if await run_sync(task_service.is_cancel_requested, task_id):
+                    execution.cancel()
+                    break
+            await execution
         except asyncio.CancelledError:
+            # run_sync 会排空线程，必须先等解析、写入和 finally 清理结束再写终态。
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
             await run_sync(self._fail_task, task_id, "应用关闭，索引任务已中断")
-            raise
+            if not await run_sync(task_service.is_cancel_requested, task_id):
+                raise
         except (WorkerStopRequested, ParserStopped) as exc:
             await run_sync(self._fail_task, task_id, str(exc))
         except Exception as exc:
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
             logger.exception("[Worker] 任务调度失败: task_id=%s", task_id)
             await run_sync(self._fail_task, task_id, str(exc))
+        finally:
+            if not execution.done():
+                execution.cancel()
+                await asyncio.gather(execution, return_exceptions=True)
 
 
 processor = TaskProcessor()

@@ -188,12 +188,12 @@ def _require_role(request, role):
         raise BusinessError("FORBIDDEN", "当前凭据没有此操作的权限")
 
 
-async def _json_body(request):
+async def _json_body(request, max_bytes=MAX_JSON_BYTES):
     body = bytearray()
     async for part in request.stream():
         body.extend(part)
-        if len(body) > MAX_JSON_BYTES:
-            raise BusinessError("INPUT_TOO_LARGE", "JSON 输入不能超过 2 MiB")
+        if len(body) > max_bytes:
+            raise BusinessError("INPUT_TOO_LARGE", f"JSON 输入不能超过 {max_bytes} 字节")
     try:
         return json.loads(body or b"{}")
     except (ValueError, UnicodeError):
@@ -217,6 +217,8 @@ def create_api(runtime):
     from indexing.services import file_service as files, chunk_service as chunks, task_service as tasks
     from indexing.services import collection_service as collections, metadata_service
     from indexing.services import config_service, maintenance_service as maintenance, zotero_service
+    from indexing.services import knowledge_service as knowledge
+    from indexing import knowledge_models as km
     from retrieval.service import search
     from app.logging_config import get_log_buffer
 
@@ -225,7 +227,9 @@ def create_api(runtime):
 
     @app.exception_handler(BusinessError)
     async def business_error(request, exc):
-        status = {"NOT_FOUND": 404, "FORBIDDEN": 403, "FILE_BUSY": 409, "REQUEST_CONFLICT": 409}.get(exc.code, 400)
+        status = {"NOT_FOUND": 404, "FORBIDDEN": 403, "FILE_BUSY": 409, "REQUEST_CONFLICT": 409,
+                  "VERSION_CONFLICT": 409, "KNOWLEDGE_CONFLICT": 409, "IMPACT_CONFLICT": 409,
+                  "SOURCE_CHANGED": 409}.get(exc.code, 400)
         return JSONResponse(jsonable_encoder(envelope(exc.data, str(exc), code=exc.code)), status_code=status)
 
     @app.exception_handler(RequestValidationError)
@@ -244,14 +248,18 @@ def create_api(runtime):
 
     @app.get("/api/v1/status")
     async def status(request: Request):
-        return envelope({**identity(runtime), **runtime.status(), "config_dir": str(get_default_data_dir()),
-                         "data_path": str(get_settings().get_data_path())})
+        data = {**identity(runtime), **runtime.status(), "config_dir": str(get_default_data_dir()),
+                "data_path": str(get_settings().get_data_path())}
+        if runtime.ready:
+            data["library_id"] = await run_sync(knowledge.library_id)
+        return envelope(data)
 
-    def register(operation, role, schema, function):
+    def register(operation, role, schema, function, *, exclude_unset=False):
         async def endpoint(request: Request):
             _require_role(request, role)
             try:
-                payload = schema.model_validate(await _json_body(request)).model_dump()
+                limit = min(MAX_JSON_BYTES, knowledge.MAX_REQUEST_BYTES) if operation == "knowledge/apply" else MAX_JSON_BYTES
+                payload = schema.model_validate(await _json_body(request, limit)).model_dump(exclude_unset=exclude_unset)
             except ValidationError as exc:
                 fields = [".".join(map(str, e["loc"])) for e in exc.errors(include_input=False)]
                 raise BusinessError("INVALID_INPUT", f"参数校验失败：{', '.join(fields)}") from None
@@ -271,9 +279,12 @@ def create_api(runtime):
             return envelope(data)
         app.add_api_route(f"/api/v1/{operation}", endpoint, methods=["POST"], name=operation)
 
-    def list_files(limit=20, offset=0, status=None, collections=None, name=None):
+    def list_files(limit=20, offset=0, status=None, collections=None, name=None,
+                   include_descendants=True, uncategorized=False, sort_by="created_at", descending=True):
         scope = None if collections is None else collection_ids(collections)
-        return files.get_files_list_paginated(limit, offset, status, scope, name=name)
+        return files.get_files_list_paginated(limit, offset, status, scope, name=name,
+                                              include_descendants=include_descendants,
+                                              uncategorized=uncategorized, sort_by=sort_by, descending=descending)
 
     def scan_files(dry_run=False):
         if dry_run:
@@ -351,7 +362,8 @@ def create_api(runtime):
     chunk_id_model = _model("ChunkId", chunk_id=(Id, ...))
     task_id_model = _model("TaskId", task_id=(Id, ...))
     confirm = {"dry_run": (bool, False), "confirmed": (bool, False)}
-    register("file/list", "read", _model("FileList", **pagination, status=(Literal["pending", "indexed", "error", "empty"] | None, None), collections=(Names | None, None), name=(Annotated[str, Field(min_length=1, max_length=200)] | None, None)), list_files)
+    descendants = {"include_descendants": (bool, Field(default=True, description="集合是逻辑分类；读取父范围默认包含后代，归类只写入明确指定集合，不补齐祖先"))}
+    register("file/list", "read", _model("FileList", **pagination, **descendants, status=(Literal["pending", "indexed", "error", "empty"] | None, None), collections=(Names | None, None), name=(Annotated[str, Field(min_length=1, max_length=200)] | None, None), uncategorized=(bool, False), sort_by=(Literal["created_at", "updated_at", "filename", "id"], "created_at"), descending=(bool, True)), list_files)
     register("file/scan", "admin", _model("FileScan", dry_run=(bool, False)), scan_files)
     register("storage/stats", "read", empty, files.get_storage_stats)
     register("file/get", "read", file_id_model, maintenance.file_info)
@@ -370,8 +382,11 @@ def create_api(runtime):
     register("chunk/update", "write", _model("ChunkUpdate", chunk_id=(Id, ...), doc_title=(Text | None, None), chunk_text=(Text | None, None), request_key=(Key, None)), chunk_update)
     register("chunk/delete", "write", _model("DeleteChunks", chunk_ids=(Ids, ...), **confirm), maintenance.delete_chunks)
     register("chunk/images", "read", chunk_id_model, images)
+    register("chunk/extract", "read", km.ChunkExtractInput, maintenance.extract_chunk)
     register("collection/list", "read", _model("CollectionList", **pagination), list_collections)
-    register("collection/create", "write", _model("CollectionCreate", name=(str, ...), description=(str | None, None)), collections.create_collection)
+    register("collection/tree", "read", empty, collections.collection_tree)
+    register("collection/create", "write", _model("CollectionCreate", name=(str, ...), description=(str | None, None), parent_id=(Id | None, None)), collections.create_collection)
+    register("collection/move", "write", _model("CollectionMove", collection_id=(Id, ...), parent_id=(Id | None, ...)), collections.move_collection)
     register("collection/rename", "write", _model("CollectionRename", collection_id=(Id, ...), name=(str, ...)), collections.rename_collection)
     register("collection/delete", "write", _model("CollectionDelete", collection_id=(Id, ...), **confirm), maintenance.delete_collection)
     register("collection/set", "write", _model("CollectionSet", file_ids=(Ids, ...), collection_names=(Names, ...)), lambda file_ids, collection_names: collections.assign_collections(file_ids, collection_names))
@@ -380,7 +395,20 @@ def create_api(runtime):
     register("task/query", "read", _model("TaskQuery", task_ids=(Ids, ...)), query_tasks)
     register("task/cancel", "write", task_id_model, lambda task_id: public_task(tasks.cancel_task(task_id)))
     register("task/retry", "write", task_id_model, retry)
-    register("search", "read", _model("Search", query=(str, ...), file_ids=(Ids | None, None), collections=(Names | None, None), limit=(Annotated[int, Field(ge=1, le=50)], 20), diagnostics=(bool, False)), search)
+    register("search", "read", _model("Search", **descendants, query=(str, ...), file_ids=(Ids | None, None), collections=(Names | None, None), limit=(Annotated[int, Field(ge=1, le=50)], 20), diagnostics=(bool, False)), search)
+    register("knowledge/list", "read", km.ListInput, knowledge.list_objects)
+    register("knowledge/search", "read", km.SearchInput, knowledge.search_objects)
+    register("knowledge/get", "read", km.GetInput, knowledge.get_record)
+    register("knowledge/graph", "read", km.GraphInput, knowledge.graph)
+    register("knowledge/references", "read", km.ReferencesInput, knowledge.references)
+    register("knowledge/lint", "read", km.LintInput, knowledge.lint)
+    register("knowledge/history", "read", km.HistoryInput, knowledge.history)
+    register("knowledge/request", "read", km.RequestInput, knowledge.request_result)
+    # 更新字段必须保留“未传”与显式清空的区别，不用模型默认值覆盖已有正文。
+    register("knowledge/apply", "write", km.ApplyInput,
+             lambda **payload: knowledge.apply(payload, actor="api:write"), exclude_unset=True)
+    register("knowledge/delete", "write", km.DeleteInput,
+             lambda **payload: knowledge.delete(payload, actor="api:write"))
     register("config/show", "admin", empty, config_service.show_config)
     register("config/update", "admin", _model("ConfigPatch", patch=(dict[str, Any], ...)), config_service.update_config)
     register("config/test", "admin", _model("ConfigTest", component=(Literal["embedding", "ocr", "office", "webdav"], ...)), config_service.test_config)

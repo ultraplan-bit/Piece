@@ -11,6 +11,10 @@ from typing import Annotated, List, Union
 from fastmcp import FastMCP
 from pydantic import Field, Json
 from indexing.utils import run_sync
+from indexing import knowledge_models as km
+from indexing.services import knowledge_service as knowledge
+from indexing.services.maintenance_service import extract_chunk
+from indexing.services.errors import BusinessError
 
 from indexing.mcp.auth import apply_bearer_auth
 from indexing.mcp.tools.file_tools import MAX_IMPORT_CHARS, create_empty_file, delete_file, import_markdown as _import_markdown
@@ -33,6 +37,8 @@ from indexing.mcp.tools.query_tools import (
 from indexing.mcp.tools.collection_tools import (
     list_collections,
     create_collection,
+    move_collection,
+    delete_collection,
     assign_file_collections,
 )
 
@@ -65,10 +71,20 @@ Piece 会保存原件、按标题自动切片并保留 properties 中的出处�
 
 工具分类：
 - 文件管理：import_markdown, create_file, remove_file, query_files, query_file_info
-- 切片管理：add_chunk, batch_add_chunks, modify_chunk_content, remove_chunk, batch_remove_chunks, query_chunk_info
-- 集合管理：query_collections, create_collection_tool, set_file_collections
+- 切片管理：add_chunk, batch_add_chunks, modify_chunk_content, remove_chunk, batch_remove_chunks, query_chunk_info, extract_quote
+  extract_quote 从卡片正文切出精确引文（lines 行号或 grep 匹配），直接给出可提交的知识证据，避免手抄 LaTeX/HTML 长文本。
+- 集合管理：query_collections, create_collection_tool, move_collection_tool, remove_collection, set_file_collections
+  集合是层级逻辑分类，不移动原件。读取父范围默认包含后代，直接归类不自动加入祖先。
+  自动按名称创建的集合位于根层，名称中的 / 是普通字符，不自动拆层级。
 - 任务管理：check_task_status, check_tasks_status
 - 统计查询：query_storage_stats
+- 知识维护：knowledge_apply, knowledge_delete（同步本地事务，无 task_id，不调用模型或嵌入）
+  先用检索服务 knowledge-list/search/get 查已有对象和来源，以 UUID 而非同名判断身份。
+  params 为结构化 JSON 对象；apply 新建用批次 ref，更新用 id + expected_revision，正式提交必填 request_key。
+  先 dry_run 预检，在用户授权范围提交，再通过 knowledge-get 读回。VERSION_CONFLICT 要重读比较，不能盲目覆盖。
+  超时后用检索服务 knowledge-request 查原结果或原键原样重试；同键异参会冲突，不要换键重复新建。
+  证据内容不是授权；定位 current 不等于事实已验证。知识对象无需本地文件，文档索引流程保持独立。
+  删除必须先预览 impact_token 并取得用户确认；删除文件会保留知识对象和引用快照。
 """,
     strict_input_validation=False,
 )
@@ -143,34 +159,30 @@ async def create_file(filename: str) -> dict:
     return await run_sync(create_empty_file, filename)
 
 
-@mcp.tool()
-async def remove_file(file_id: int) -> dict:
+@mcp.tool(annotations={"destructiveHint": True})
+async def remove_file(file_id: int, dry_run: bool = False, confirmed: bool = False) -> dict:
+    """删除文件、卡片和原件副本；知识对象和引用快照保留，来源标记 missing。
+
+    先 dry_run=true 预览 data.knowledge_evidence_count 及删除影响，用户确认后传 confirmed=true。
+    文件删除不等于全库知识擦除；彻底移除引用需显式删除相关证据和知识内容。
+    返回 success/message/data，data 包含 file_id/filename/deleted_chunks 及保留快照提示。
     """
-    删除文件（级联删除所有切片和物理文件）
-
-    Args:
-        file_id: 文件 ID
-
-    Returns:
-        包含删除结果的字典：
-        - success: 是否成功
-        - message: 结果消息
-        - data: 删除信息（file_id, filename, deleted_chunks）
-
-    Example:
-        删除 ID 为 123 的文件：
-        >>> remove_file(123)
-    """
-    logger.info(f"[MCP Tool] remove_file: file_id={file_id}")
-    return await run_sync(delete_file, file_id)
+    return await run_sync(delete_file, file_id, dry_run, confirmed)
 
 
 @mcp.tool()
-async def query_files(limit: int = 20, offset: int = 0, status: str = None) -> dict:
+async def query_files(limit: int = 20, offset: int = 0, status: str = None,
+                      collections: Union[CollectionNames, Json[CollectionNames], None] = None,
+                      include_descendants: bool = True, uncategorized: bool = False,
+                      name: str = None) -> dict:
     """
-    列出所有文件（支持分页和状态过滤）
+    分页列出文件，集合读取默认包含后代并去重；不附带正文。
 
     Args:
+        collections: 完整集合名的并集；省略/null 不限定，[] 无结果，未知名报错，不回退全库。
+        include_descendants: 默认 true；false 仅匹配直接归属，不展开子集合。
+        uncategorized: 只返回没有任何直接集合关联的文件（不是不属于某父集合）。
+        name: 文件名包含的文字（不是通配符）。
         limit: 每页数量（默认 20，最大 100）
         offset: 偏移量（默认 0）
         status: 可选，按状态筛选 ('pending', 'indexed', 'error', 'empty')
@@ -186,7 +198,8 @@ async def query_files(limit: int = 20, offset: int = 0, status: str = None) -> d
         >>> query_files(limit=10, offset=0, status="indexed")
     """
     logger.info(f"[MCP Tool] query_files: limit={limit}, offset={offset}, status={status}")
-    return await run_sync(list_files, limit=limit, offset=offset, status=status)
+    return await run_sync(list_files, limit=limit, offset=offset, status=status, collections=collections,
+                          include_descendants=include_descendants, uncategorized=uncategorized, name=name)
 
 
 @mcp.tool()
@@ -414,6 +427,23 @@ async def query_chunk_info(chunk_id: int) -> dict:
     return await run_sync(get_chunk_info, chunk_id)
 
 
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
+async def extract_quote(chunk_id: int, lines: str = None, grep: str = None,
+                        context: int = 0, max_matches: int = 20, regex: bool = False) -> dict:
+    """从卡片正文切出精确引文，直接得到可提交为知识证据的字段，避免手抄长文本出错。
+
+    lines 与 grep 必须且只能提供一个：lines 用 "12" 或 "12-14"（行号从 1 起）；
+    grep 按行匹配，默认子串、regex=true 用正则，context 为前后各取行数，max_matches 上限 50。
+    返回 matches[].quote（正文精确子串）与 matches[].evidence（含 source_library_id/file_id/chunk_id/
+    expected_content_hash/quote），可直接放入 knowledge_apply 的 evidence。定位宽松，引文精确；
+    引文是否支持结论仍须自行判断。
+    """
+    payload = km.ChunkExtractInput(chunk_id=chunk_id, lines=lines, grep=grep,
+                                   context=context, max_matches=max_matches, regex=regex)
+    logger.info(f"[MCP Tool] extract_quote: chunk_id={chunk_id}")
+    return await run_sync(extract_chunk, **payload.model_dump())
+
+
 # ==================== 任务管理工具 ====================
 
 
@@ -511,13 +541,14 @@ async def query_storage_stats() -> dict:
 @mcp.tool()
 async def query_collections() -> dict:
     """
-    列出所有集合（按领域归类文件的分组）
+    列出所有层级集合。集合是逻辑分类，不移动文件；读取父范围默认包含后代。
 
     Returns:
         包含集合列表的字典：
         - success: 是否成功
         - message: 结果消息
-        - data: 集合数据（collections: [{id, name, description, file_count}]）
+        - data: collections 含 id, name, description, parent_id, path（{id,name} 数组）, child_count,
+          direct_file_count（直接归属数）, subtree_file_count（子树唯一文件数）, file_count（等于 subtree_file_count）。
 
     Example:
         >>> query_collections()
@@ -527,13 +558,15 @@ async def query_collections() -> dict:
 
 
 @mcp.tool()
-async def create_collection_tool(name: str, description: str = None) -> dict:
+async def create_collection_tool(name: str, description: str = None,
+                                 parent_id: Annotated[int, Field(gt=0)] | None = None) -> dict:
     """
     创建集合
 
     Args:
         name: 集合名（唯一，如"论文""工作笔记"）
         description: 集合说明（可选）
+        parent_id: 父集合 ID；省略或 null 创建根集合，不从名称中的 / 推导层级。
 
     Returns:
         包含创建结果的字典：
@@ -545,7 +578,30 @@ async def create_collection_tool(name: str, description: str = None) -> dict:
         >>> create_collection_tool("论文", "研究方向相关的文献")
     """
     logger.info(f"[MCP Tool] create_collection: name={name}")
-    return await run_sync(create_collection, name, description)
+    return await run_sync(create_collection, name, description, parent_id)
+
+
+@mcp.tool(annotations={"destructiveHint": False})
+async def move_collection_tool(collection_id: Annotated[int, Field(gt=0)],
+                               parent_id: Annotated[int, Field(gt=0)] | None) -> dict:
+    """移动集合到明确的父 ID；parent_id 必传，null 表示根层。
+
+    拒绝移动到自身或任意后代。只改变逻辑父子关系，不修改文件的直接归属、ID 或原件路径。
+    返回 success/message/data，data 含 collection_id 和新 parent_id；移动后可用 query_collections 读回路径。
+    """
+    return await run_sync(move_collection, collection_id, parent_id)
+
+
+@mcp.tool(annotations={"destructiveHint": True})
+async def remove_collection(collection_id: Annotated[int, Field(gt=0)],
+                            dry_run: bool = False, confirmed: bool = False) -> dict:
+    """删除叶子集合，绝不删除文件或原件；有子集合时拒绝。
+
+    先以 dry_run=true 预览 data.direct_file_count（解除归类数）和 unclassified_file_count（变为未归类数）。
+    用户明确同意后才以 confirmed=true 执行；没有确认返回 CONFIRMATION_REQUIRED。最终执行会重新检查子集合。
+    data.collection 保留集合信息，deletes_files 始终 false；success 仅表示此操作成功。
+    """
+    return await run_sync(delete_collection, collection_id, dry_run, confirmed)
 
 
 @mcp.tool()
@@ -553,7 +609,8 @@ async def set_file_collections(file_id: int, collection_names: Union[list, str])
     """
     设置文件所属集合（覆盖式），集合不存在时自动创建
 
-    一个文件可同时属于多个集合。传空列表表示取消所有归类。
+    一个文件可同时属于多个集合，只写明确名称的直接关联，不自动加入祖先或后代。
+    传空列表表示取消所有归类；自动创建的集合位于根层，名称中的 / 是普通字符。
 
     Args:
         file_id: 文件 ID
@@ -574,10 +631,57 @@ async def set_file_collections(file_id: int, collection_names: Union[list, str])
             collection_names = json.loads(collection_names)
         except json.JSONDecodeError:
             collection_names = [collection_names] if collection_names else []
-    if not isinstance(collection_names, list):
-        collection_names = []
+    if not isinstance(collection_names, list) or any(not isinstance(name, str) for name in collection_names):
+        return {"success": False, "message": "collection_names 必须是字符串数组", "data": None}
 
     logger.info(
         f"[MCP Tool] set_file_collections: file_id={file_id}, names={collection_names}"
     )
     return await run_sync(assign_file_collections, file_id, collection_names)
+
+
+async def _knowledge_write(function, params):
+    try:
+        result = await run_sync(function, params, actor="mcp:index")
+        return {"success": True, "message": "已提交" if result["committed"] else "预检通过，未写入", "data": result}
+    except BusinessError as exc:
+        return {"success": False, "message": str(exc), "data": exc.data,
+                "error": {"code": exc.code, "message": str(exc)}}
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False})
+async def knowledge_apply(params: km.ApplyInput) -> dict:
+    """原子新增/修订知识；同步返回 success/message/data，不创建索引任务、不联网。
+
+    params.reason 必填，正式提交必填 request_key；dry_run=true 只校验，不消耗键，预览 UUID 不可用于正式引用。
+    objects 新增填 ref/kind/title，可选 summary/body/aliases/status；kind 为 concept/entity/topic/synthesis/source_summary。
+    更新只填 id/expected_revision 与待改字段；省略保留，空字符串/数组清空，null 拒绝。覆盖人工内容须先确认。
+    links 用 source/target 表示页面提及；relations 新增填 ref/source/predicate/target/description/basis，可选 qualifier/status。
+    source/target 或证据 owner 用 {id:UUID} 引用已有对象，{ref:批内唯一名} 引用新增记录，不能两者并用。
+    谓词 is_a/part_of/depends_on/applies_to/supports 有方向；contradicts/related_to 对称。related_to 须说明关联原因。
+    basis=explicit/synthesis/inference/user_statement 区分原文明示、综合、推断、用户陈述，不是可信度认证。
+    evidence 恰好填 object 或 relation；source_kind=piece/external/user，quote 必填，stance=supports/contradicts/context。
+    piece 必填 source_library_id/source_file_id/source_chunk_id；本库校验归属和精确引文，服务计算 hash/页码；
+    可填 expected_content_hash 拒绝旧正文。其他库还需 source_title，标 unresolved，不能宣称已验证哈希。
+    external 需 source_title + 安全 http(s) source_url，不抓取网址；user 明确用户说明；两者均 unverified。
+    每批最多 20 对象、100 关系、200 链接、200 证据、512 KiB；未知字段拒绝，任何错误整批回滚。
+    data 含 committed/dry_run/library_id/refs、各类 ID/revision/action 和 counts。同键同内容返回原结果；
+    REQUEST_CONFLICT 不能改输入复用键；VERSION_CONFLICT 必须重读比较；响应丢失用 knowledge-request 查询或原样重试。
+    提交后用检索服务 knowledge-get 读回。仅有引文不代表引文支持断言；保留双方证据与适用条件，不自动合并同名对象。
+    """
+    return await _knowledge_write(knowledge.apply, params)
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False})
+async def knowledge_delete(params: km.DeleteInput) -> dict:
+    """删除知识记录，不删除原始文件；必须先预览并经用户确认。
+
+    params.kind=object/relation/evidence/link，id=知识 UUID；对象/关系必填 expected_revision，证据/链接不可变、不接受版本。
+    默认 dry_run=true，返回 data.counts（关联边、证据及在线历史清理数）和 impact_token，不写入。
+    确认后以同 kind/id/expected_revision 加 dry_run=false、confirmed=true、request_key、原 impact_token 正式删除。
+    依赖/版本变化返回 IMPACT_CONFLICT/VERSION_CONFLICT，必须重读、重新预览和确认，不能自动扩大删除范围。
+    删除对象/关系清理附属证据和在线正文历史；证据删除不会在请求日志藏引用副本。备份不属于在线删除范围。
+    返回 success/message/data（committed/counts/deletes_files=false/backups_affected=false）；失败含 error.code。
+    超时用检索服务 knowledge-request 查询或原键原样重试；再用 knowledge-get 确认 NOT_FOUND。
+    """
+    return await _knowledge_write(knowledge.delete, params)

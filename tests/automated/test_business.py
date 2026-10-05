@@ -91,13 +91,15 @@ def test_conflicts_cancel_retry_and_restart(knowledge_base):
     claimed = tasks.claim_next_pending_task()
     assert claimed["id"] == first
     assert tasks.claim_next_pending_task() is None
-    with pytest.raises(BusinessError, match="未领取"):
-        tasks.cancel_task(first)
+    assert tasks.cancel_task(first)["stage"] == "cancelling"
+    assert tasks.get_task(first)["status"] == "processing"
+    assert tasks.claim_next_pending_task() is None
     database.close_connection_pool()
     database.init_database()
     database.init_connection_pool()
     tasks.mark_processing_tasks_failed("应用重启")
-    assert tasks.get_task(first)["error_code"] == "INTERRUPTED"
+    assert tasks.get_task(first)["error_code"] == "CANCELLED"
+    assert tasks.get_task(first)["status"] == "cancelled"
     assert tasks.get_task(second)["status"] == "pending"
     tasks.cancel_task(second)
     retry_id = tasks.retry_task(second)

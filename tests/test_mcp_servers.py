@@ -274,6 +274,8 @@ def test_split_keys_are_enforced_over_real_http():
     ("query_storage_stats", "get_storage_stats", []),
     ("query_collections", "list_collections", []),
     ("create_collection_tool", "create_collection", ["name"]),
+    ("move_collection_tool", "move_collection", [1, None]),
+    ("remove_collection", "delete_collection", [1]),
     ("set_file_collections", "assign_file_collections", [1, ["name"]]),
 ])
 def test_index_tools_offload_synchronous_io(monkeypatch, tool_name, backend_name, args):

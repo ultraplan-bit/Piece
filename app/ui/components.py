@@ -179,7 +179,7 @@ def chunk_card(
                         ui.button(
                             icon="image",
                             on_click=lambda: on_view_source(source_page)
-                        ).props("flat dense round size=xs").classes(
+                        ).props(f'flat dense round size=xs aria-label="{t("chunks.view_source_page", page=source_page)}"').classes(
                             "theme-text-muted"
                         ).tooltip(t("chunks.view_source_page", page=source_page))
                     # 编辑按钮
@@ -440,90 +440,94 @@ def collection_labels(names: list):
         ).tooltip(" · ".join(names))
 
 
+def collection_path_label(item: dict) -> str:
+    """路径仅用于展示，永远不将显示字符串解析回集合身份。"""
+    return " › ".join(part["name"] for part in item.get("path", [])) or item["name"]
+
+
 def collection_manage_dialog(
     collections: list,
     on_create: Callable,
     on_rename: Callable,
+    on_move: Callable,
     on_delete: Callable,
-    on_close: Callable = None,
+    on_preview_delete: Callable,
+    selected_id: int | None = None,
+    on_close: Callable | None = None,
 ):
-    """
-    集合管理对话框（新建 / 重命名 / 删除）
-
-    Args:
-        collections: 集合列表 [{"id", "name", "file_count"}]
-        on_create: 新建回调，传入 name，返回最新集合列表
-        on_rename: 重命名回调，传入 (collection_id, name)，返回最新集合列表
-        on_delete: 删除回调，传入 collection_id，返回最新集合列表
-        on_close: 关闭回调
-    """
-    items = {"list": list(collections)}
+    """按稳定 ID 管理集合；删除先预览，最终写入仍由服务重新校验。"""
+    items = {"list": list(collections), "selected_id": selected_id}
 
     async def run(callback, *args):
-        """执行回调并用其返回的最新集合列表刷新列表"""
         result = callback(*args)
         if inspect.isawaitable(result):
             result = await result
         if isinstance(result, list):
             items["list"] = result
-            rows.refresh()
+            if items["selected_id"] not in {item["id"] for item in result}:
+                items["selected_id"] = None
+            editor.refresh()
 
-    with ui.dialog() as dialog, ui.card().classes("w-[460px] theme-card theme-card-shadow"):
-        with ui.row().classes(
-            "w-full items-center justify-between pb-2"
-        ).style("border-bottom: 1px solid var(--border-color)"):
+    def select(value):
+        items["selected_id"] = value
+        editor.refresh()
+
+    async def delete(collection_id):
+        preview = await on_preview_delete(collection_id)
+        if preview is None:
+            return
+        confirm_dialog(
+            title=t("collections.delete"),
+            message=t("collections.delete_preview", count=preview["direct_file_count"],
+                      unclassified=preview["unclassified_file_count"]),
+            on_confirm=lambda: run(on_delete, collection_id),
+            danger=True,
+        )
+
+    with ui.dialog() as dialog, ui.card().classes("w-[520px] max-w-full theme-card theme-card-shadow"):
+        with ui.row().classes("w-full items-center justify-between"):
             ui.label(t("collections.manage_title")).classes("text-base font-semibold theme-text")
             ui.button(icon="close", on_click=dialog.close).props("flat dense round").classes("theme-text-muted")
+        ui.label(t("collections.manage_hint")).classes("text-xs theme-text-muted")
 
-        with ui.column().classes("w-full gap-2 py-3"):
-            @ui.refreshable
-            def rows():
-                if not items["list"]:
-                    ui.label(t("collections.empty")).classes("text-xs theme-text-muted")
-                    return
-                for item in items["list"]:
-                    with ui.row().classes("w-full items-center gap-2"):
-                        name_input = ui.input(value=item["name"]).props(
-                            "dense outlined"
-                        ).classes("flex-1 text-sm")
-                        # 回车提交重命名，避免每敲一个字都写库
-                        name_input.on(
-                            "keydown.enter",
-                            lambda _, cid=item["id"], field=name_input: run(
-                                on_rename, cid, field.value
-                            ),
-                        )
-                        ui.label(
-                            t("collections.file_count", count=item["file_count"])
-                        ).classes("text-xs theme-text-muted whitespace-nowrap")
-                        ui.button(
-                            icon="delete",
-                            on_click=lambda _, cid=item["id"]: run(on_delete, cid),
-                        ).props("flat dense round size=xs").classes("text-red-400")
+        @ui.refreshable
+        def editor():
+            options = {item["id"]: collection_path_label(item) for item in items["list"]}
+            ui.select(options, value=items["selected_id"], label=t("collections.tree_title"),
+                      on_change=lambda e: select(e.value)).props("outlined dense options-dense clearable").classes("w-full")
+            item = next((item for item in items["list"] if item["id"] == items["selected_id"]), None)
+            if item:
+                cid = item["id"]
+                with ui.row().classes("w-full items-center flex-nowrap"):
+                    name = ui.input(value=item["name"], label=t("collections.rename")).props("dense outlined").classes("flex-1 min-w-0")
+                    ui.button(icon="check", on_click=lambda: run(on_rename, cid, name.value)).props("flat dense round").tooltip(t("chunk_dialog.btn_save"))
+                    name.on("keydown.enter", lambda: run(on_rename, cid, name.value))
+                ui.label(t("collections.counts", direct=item["direct_file_count"],
+                           subtree=item["subtree_file_count"])).classes("text-xs theme-text-muted")
+                # 只展示合法父候选；服务端仍会在事务内再次检查循环。
+                parents = {0: t("collections.root")}
+                parents.update({candidate["id"]: collection_path_label(candidate)
+                                for candidate in items["list"]
+                                if cid not in {part["id"] for part in candidate["path"]}})
+                with ui.row().classes("w-full items-center flex-nowrap"):
+                    parent = ui.select(parents, value=item["parent_id"] or 0,
+                                       label=t("collections.parent")).props("outlined dense options-dense").classes("flex-1 min-w-0")
+                    ui.button(t("collections.move"), on_click=lambda: run(on_move, cid, parent.value or None)).props("flat dense")
+                ui.button(t("collections.delete"), icon="delete", on_click=lambda: delete(cid)).props("flat color=red")
+            ui.separator()
+            new_name = ui.input(label=t("collections.create"), placeholder=t("collections.new_placeholder")).props("dense outlined").classes("w-full")
+            new_parent = ui.select({0: t("collections.root"), **options}, value=items["selected_id"] or 0,
+                                   label=t("collections.parent")).props("dense outlined options-dense").classes("w-full")
 
-            rows()
+            async def create():
+                if (new_name.value or "").strip():
+                    await run(on_create, new_name.value, new_parent.value or None)
 
-            ui.label(t("collections.manage_hint")).classes("text-xs theme-text-muted")
+            new_name.on("keydown.enter", create)
+            ui.button(t("collections.create_child") if item else t("collections.create"),
+                      icon="create_new_folder", on_click=create).props("color=primary")
 
-            with ui.row().classes("w-full items-center gap-2 pt-2").style(
-                "border-top: 1px solid var(--border-color)"
-            ):
-                new_input = ui.input(
-                    placeholder=t("collections.new_placeholder")
-                ).props("dense outlined").classes("flex-1 text-sm")
-
-                async def add_collection():
-                    name = (new_input.value or "").strip()
-                    if not name:
-                        return
-                    await run(on_create, name)
-                    new_input.value = ""
-
-                new_input.on("keydown.enter", add_collection)
-                ui.button(icon="add", on_click=add_collection).props(
-                    "flat dense round size=sm"
-                ).classes("theme-text-accent")
-
+        editor()
     if on_close:
         dialog.on("close", on_close)
     _open_dialog(dialog)
@@ -582,7 +586,7 @@ def file_collections_dialog(
                 with ui.column().classes("w-full gap-1 max-h-64 overflow-auto"):
                     for item in items["list"]:
                         ui.checkbox(
-                            item["name"],
+                            collection_path_label(item),
                             value=item["id"] in chosen,
                             on_change=lambda e, cid=item["id"]: toggle(cid, e.value),
                         ).props("dense").classes("text-sm")

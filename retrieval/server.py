@@ -21,6 +21,8 @@ from .tools import collect_chunk_images, resolve_database_keywords, get_docs
 from indexing.mcp.auth import apply_bearer_auth
 from indexing.services.errors import BusinessError
 from indexing.settings import get_mcp_config
+from indexing import knowledge_models as km
+from indexing.services import knowledge_service as knowledge
 
 
 # 创建FastMCP服务实例
@@ -28,7 +30,8 @@ from indexing.settings import get_mcp_config
 # 设置为 False 启用灵活验证模式，自动转换字符串参数（如 "5" -> 5）
 mcp = FastMCP(
     name="piece-kb",
-    instructions="Piece searches user's personal documents. Call resolve-keywords to find relevant documents, then get-docs to retrieve content. Use get-source-page with a file_id and 1-based page_number to inspect a full source page when OCR, tables, formulas, or layout need verification.",
+    instructions="""Piece searches user's personal documents. Call resolve-keywords to find relevant documents, then get-docs to retrieve content. Use get-source-page with a file_id and 1-based page_number to inspect a full source page when OCR, tables, formulas, or layout need verification.
+Knowledge pages are separate from document search: use knowledge-list/search, then knowledge-get for body and paginated evidence, knowledge-graph for bounded neighbors, knowledge-references for source backlinks, knowledge-lint for read-only structural checks, knowledge-history/request for revisions and committed outcomes. These tools take a params JSON object, use UUID knowledge IDs (not integer file/chunk IDs), and never call models or modify data. library_id is the persistent source-library UUID, not the service connection identity. Evidence location_status is current/changed/missing/unresolved/unverified; even current does not verify a claim. Read sources before drawing conclusions; duplicate names do not imply identical objects. To turn a source passage into exact evidence, call extract-quote with a chunk_id and lines or grep instead of copying long LaTeX/HTML text by hand. Knowledge mutations are provided by the index service.""",
     strict_input_validation=False,
 )
 
@@ -38,21 +41,21 @@ apply_bearer_auth(mcp, "retrieval")
 def _coerce_str_list(value: Union[List[str], str, None]) -> Optional[List[str]]:
     """把模型可能传来的 JSON 字符串或单个字符串统一成字符串列表。"""
     if value is None or isinstance(value, list):
-        return value or None
+        return value
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError:
-            return [value] if value else None
+            return [value] if value else []
         if isinstance(parsed, list):
-            return [str(item) for item in parsed] or None
-        return [str(parsed)] if parsed else None
+            return [str(item) for item in parsed]
+        return [str(parsed)] if parsed else []
     return None
 
 
 @mcp.tool(
     name="list-collections",
-    description="Lists the user's collections (named groups of documents, e.g. 'papers', 'work notes'). Call this before resolve-keywords when the user refers to a topic area, so you can pass the exact collection name and keep unrelated domains out of the search.",
+    description="Lists logical collection hierarchies: id, parent_id, path [{id,name}], child_count, direct_file_count, subtree_file_count and file_count (alias of subtree_file_count). Files may belong directly to multiple collections. Parent search scopes include descendants by default; assignment never adds ancestors. Call this before resolve-keywords to discover collection names. Names containing / are ordinary names, not paths.",
     tags={"retrieval", "collections"},
 )
 async def list_collections_tool(ctx: Context) -> dict:
@@ -60,16 +63,7 @@ async def list_collections_tool(ctx: Context) -> dict:
 
     collections = await run_sync(list_collections)
     await ctx.info(f"[Tool 3] Listed {len(collections)} collections")
-    return {
-        "collections": [
-            {
-                "name": item["name"],
-                "description": item.get("description"),
-                "file_count": item["file_count"],
-            }
-            for item in collections
-        ]
-    }
+    return {"collections": collections}
 
 
 @mcp.tool(
@@ -88,7 +82,7 @@ async def resolve_keywords_tool(
     ] = None,
     collections: Annotated[
         Optional[Union[List[str], str]],
-        Field(description="Filter search to whole collections (user-defined groups of files, e.g. 'papers', 'work', 'recipes'). USE THIS when the user refers to a topic area rather than one document - it keeps unrelated domains out of the results. Supports fuzzy match. Use list-collections to discover available names.")
+        Field(description="Filter by collection names using fuzzy substring matching. Default includes all descendant collections and deduplicates files; false include_descendants uses direct membership only. Omit/null means no collection scope; [] or unmatched names means no results, never global fallback. Use list-collections to discover names.")
     ] = None,
     max_results: Annotated[
         int,
@@ -96,6 +90,7 @@ async def resolve_keywords_tool(
             description="Maximum number of keywords to return (default: 20, range: 1-50)"
         ),
     ] = 20,
+    include_descendants: Annotated[bool, Field(description="Include descendant collections in the read scope (default true); false means direct membership only.")] = True,
 ) -> dict:
     # 处理字符串形式的列表（某些模型会传递 '["name1","name2"]' 而不是 ["name1","name2"]）
     filenames = _coerce_str_list(filenames)
@@ -109,7 +104,7 @@ async def resolve_keywords_tool(
     try:
         # 调用核心工作流（传递可选的文件名/集合过滤）
         result = await resolve_database_keywords(
-            query, filenames=filenames, collections=collections
+            query, filenames=filenames, collections=collections, include_descendants=include_descendants
         )
 
         keywords = result.get("keywords", [])
@@ -134,7 +129,7 @@ async def resolve_keywords_tool(
             f"BM25: {debug_stats.get('bm25_recall_count', 0)}, "
             f"Vector: {debug_stats.get('vector_recall_count', 0)}, "
             f"Fused: {result.get('stats', {}).get('total_fused_results', 0)}, "
-            f"FileFilter: {file_ids_filter if file_ids_filter else 'None (global)'}"
+            f"FileFilter: {file_ids_filter if file_ids_filter is not None else 'None (global)'}"
         )
 
         # 返回精简结果（不包含 debug_stats）
@@ -318,3 +313,116 @@ async def get_source_page_tool(
         content=[json.dumps(result, ensure_ascii=False), Image(path=path)],
         structured_content=result,
     )
+
+
+_KNOWLEDGE_READ = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
+
+
+@mcp.tool(name="extract-quote", annotations=_KNOWLEDGE_READ)
+async def extract_quote(params: km.ChunkExtractInput) -> dict:
+    """Extract an exact quote from a chunk's text for use as knowledge evidence, instead of hand-copying long text.
+
+    params: chunk_id (integer chunk ID, not a knowledge UUID) plus exactly one of lines or grep.
+    lines accepts "12" or "12-14" (1-based); grep matches per line (substring by default, regex=true for regex),
+    with context lines and max_matches (<=50). Returns matches[].quote (exact substring of the chunk text) and
+    matches[].evidence (source_library_id/file_id/chunk_id/expected_content_hash/quote) ready to drop into
+    knowledge_apply evidence. Location is fuzzy but the quote is exact; whether it supports a claim is still your call.
+    """
+    from indexing.services.maintenance_service import extract_chunk
+
+    try:
+        return await run_sync(extract_chunk, **params.model_dump())
+    except BusinessError as exc:
+        raise ToolError(json.dumps({"code": exc.code, "message": str(exc), "data": exc.data}, ensure_ascii=False)) from exc
+
+
+async def _knowledge_read(function, params):
+    try:
+        return await run_sync(function, **params.model_dump())
+    except BusinessError as exc:
+        raise ToolError(json.dumps({"code": exc.code, "message": str(exc), "data": exc.data}, ensure_ascii=False)) from exc
+
+
+@mcp.tool(name="knowledge-list", annotations=_KNOWLEDGE_READ)
+async def knowledge_list(params: km.ListInput) -> dict:
+    """List knowledge objects, not document chunks. params: optional kind/status, limit 1..100 (default 50), offset >=0.
+
+    Returns library_id and objects [{id,kind,title,summary,status,revision,created_at,updated_at}], total/limit/offset.
+    Same-name objects are distinct; read details and evidence to disambiguate. No full bodies here.
+    """
+    return await _knowledge_read(knowledge.list_objects, params)
+
+
+@mcp.tool(name="knowledge-search", annotations=_KNOWLEDGE_READ)
+async def knowledge_search(params: km.SearchInput) -> dict:
+    """Search names/aliases and Chinese-tokenized title/summary/body without embedding calls.
+
+    params: required query (plain text, not SQL/FTS syntax), optional kind/status, limit/offset as knowledge-list.
+    Returns library_id, objects, total/limit/offset. Use knowledge-get for bodies and sources; do not merge by name.
+    """
+    return await _knowledge_read(knowledge.search_objects, params)
+
+
+@mcp.tool(name="knowledge-get", annotations=_KNOWLEDGE_READ)
+async def knowledge_get(params: km.GetInput) -> dict:
+    """Read a knowledge record: params.kind=object/relation/evidence/link, id=UUID; limit/offset paginate evidence.
+
+    Returns library_id, kind, record (including object body/aliases or relation endpoints/predicate/basis/qualifier).
+    Objects/relations also include has_evidence and evidence {items,total,limit,offset}; evidence location_status is
+    current/changed/missing/unresolved/unverified, never fact verification. No evidence means unsupported, not false.
+    Piece evidence carries file/chunk IDs and server-derived page_number; use get-source-page for available original pages.
+    """
+    return await _knowledge_read(knowledge.get_record, params)
+
+
+@mcp.tool(name="knowledge-graph", annotations=_KNOWLEDGE_READ)
+async def knowledge_graph(params: km.GraphInput) -> dict:
+    """Get bounded neighbors of params.root_id (object UUID). depth=1 or 2; edge_types=[link,relation] by default.
+
+    Optional predicates/statuses filter semantic relations; [] means none. max_nodes<=100, max_edges<=300.
+    Returns nodes, edges with complete endpoints, truncated and budgets. No bodies/quotes; not full-graph statistics.
+    related_to/contradicts are symmetric; other predicates are directed. Page links are mentions, not semantic claims.
+    """
+    return await _knowledge_read(knowledge.graph, params)
+
+
+@mcp.tool(name="knowledge-references", annotations=_KNOWLEDGE_READ)
+async def knowledge_references(params: km.ReferencesInput) -> dict:
+    """Find source backlinks: params.source_library_id=library UUID, source_file_id=integer, optional limit/offset.
+
+    Returns evidence with owner_kind and owner object/relation summaries, location_status, total/limit/offset.
+    Always use both library and file ID; other libraries with the same file ID are not interchangeable.
+    """
+    return await _knowledge_read(knowledge.references, params)
+
+
+@mcp.tool(name="knowledge-lint", annotations=_KNOWLEDGE_READ)
+async def knowledge_lint(params: km.LintInput) -> dict:
+    """Read-only structural checks; params.object_ids optionally limits UUID scope ([] checks none), limit/offset paginate objects.
+
+    Returns issues, checked_objects, total_objects, truncated, read_only=true, semantic_review=false.
+    Checks missing evidence, isolated objects, body/explicit links, changed/missing sources, ambiguous names/aliases.
+    No network, automatic fixes, merging or semantic truth judgement. Read candidate bodies and evidence before proposing edits.
+    """
+    return await _knowledge_read(knowledge.lint, params)
+
+
+@mcp.tool(name="knowledge-history", annotations=_KNOWLEDGE_READ)
+async def knowledge_history(params: km.HistoryInput) -> dict:
+    """Read revisions: params.kind=object/relation, id=UUID, optional limit/offset.
+
+    Returns history [{before,after,before_revision,after_revision,reason,batch_id,actor,...}], total/limit/offset.
+    Read-only; corrections require a new revision using the current expected_revision, not rollback.
+    Deleting an object/relation clears its online body history; backups are outside online deletion.
+    """
+    return await _knowledge_read(knowledge.history, params)
+
+
+@mcp.tool(name="knowledge-request", annotations=_KNOWLEDGE_READ)
+async def knowledge_request(params: km.RequestInput) -> dict:
+    """Recover a committed apply/delete result using params.request_key after a timeout or lost response.
+
+    Returns original IDs/revisions/counts, not input bodies. NOT_FOUND does not prove failure: retry only the identical
+    payload and key on the same library. Returned IDs may since have been deleted; verify with knowledge-get.
+    """
+    return await _knowledge_read(knowledge.request_result, params)

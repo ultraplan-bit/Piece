@@ -1,146 +1,128 @@
-"""
-侧边栏视图
+"""应用导航与文件库集合树，共用一栏，不叠加常驻导航列。"""
 
-职责:
-- 渲染左侧导航栏
-- Logo、导航按钮、统计信息
-"""
+from typing import Callable
 
 from nicegui import ui
 
 from app.i18n import t
 from app.skills import get_version
+from app.ui.components import collection_path_label
+
+
+def collection_tree_nodes(collections: list) -> list:
+    """从稳定 ID 组装显示树，并对异常结构给出有限、明确的失败。"""
+    nodes = {
+        item["id"]: {"id": str(item["id"]), "label": f"{item['name']} ({item['file_count']})",
+                     "path": collection_path_label(item), "icon": "folder", "children": []}
+        for item in collections
+    }
+    roots = []
+    for item in collections:
+        node = nodes[item["id"]]
+        parent_id = item["parent_id"]
+        if parent_id is None:
+            roots.append(node)
+        elif parent_id in nodes:
+            nodes[parent_id]["children"].append(node)
+        else:
+            raise ValueError(t("collections.invalid_tree"))
+    visited = set()
+    pending = list(roots)
+    while pending:
+        node = pending.pop()
+        if node["id"] in visited:
+            raise ValueError(t("collections.invalid_tree"))
+        visited.add(node["id"])
+        pending.extend(node["children"])
+    if len(visited) != len(collections):
+        raise ValueError(t("collections.invalid_tree"))
+    return roots
 
 
 def render_sidebar(
     current_view: dict,
-    switch_to_files: callable,
-    switch_to_recall_test: callable,
-    switch_to_cloud_sync: callable,
-    switch_to_mcp_config: callable,
-    switch_to_skills: callable,
-    switch_to_logs: callable,
-    switch_to_settings: callable,
+    switch_to_files: Callable,
+    switch_to_recall_test: Callable,
+    switch_to_cloud_sync: Callable,
+    switch_to_mcp_config: Callable,
+    switch_to_skills: Callable,
+    switch_to_logs: Callable,
+    switch_to_settings: Callable,
     ui_refs: dict,
+    state: dict,
+    file_handlers,
+    switch_to_knowledge: Callable | None = None,
 ):
-    """
-    渲染侧边栏
+    navigation = [
+        ("files", "folder", switch_to_files),
+        ("recall_test", "manage_search", switch_to_recall_test),
+        ("cloud_sync", "cloud_sync", switch_to_cloud_sync),
+        ("mcp_config", "settings_input_component", switch_to_mcp_config),
+        ("skills", "extension", switch_to_skills),
+        ("logs", "description", switch_to_logs),
+        ("settings", "settings", switch_to_settings),
+    ]
 
-    Args:
-        current_view: 当前视图状态 {"value": "files" | "recall_test" | "cloud_sync" | "mcp_config" | "skills" | "logs" | "settings"}
-        switch_to_files: 切换到文件库的回调
-        switch_to_recall_test: 切换到召回测试的回调
-        switch_to_cloud_sync: 切换到云同步的回调
-        switch_to_mcp_config: 切换到 MCP 配置的回调
-        switch_to_skills: 切换到 Skill 导出的回调
-        switch_to_logs: 切换到日志的回调
-        switch_to_settings: 切换到设置的回调
-        ui_refs: UI 组件引用字典（用于存储 stats_label）
+    if switch_to_knowledge:
+        navigation.insert(1, ("knowledge", "auto_stories", switch_to_knowledge))
 
-    Returns:
-        sidebar_nav: 可刷新的导航组件
-    """
-    with ui.column().classes(
-        "w-44 h-full theme-sidebar gap-0"
-    ).style("border-right: 1px solid var(--border-color)"):
-        # Logo/标题
-        with ui.row().classes("w-full px-4 items-center gap-2").style(
-            "border-bottom: 1px solid var(--border-color); height: 49px"
-        ):
-            ui.icon("auto_stories", size="sm").classes("theme-text-accent")
-            ui.label(t("app.name")).classes("text-base font-semibold theme-text")
+    @ui.refreshable
+    def sidebar_nav():
+        with ui.column().classes("w-full h-full theme-sidebar gap-0 overflow-hidden"):
+            with ui.row().classes("w-full px-3 items-center justify-between flex-nowrap library-heading"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("auto_stories", size="sm").classes("theme-text-accent")
+                    ui.label(t("app.name")).classes("text-base font-semibold theme-text")
+                ui.label(f"v{get_version()}").classes("text-xs theme-text-muted")
 
-        # 导航按钮
-        with ui.column().classes("w-full gap-0.5 px-2 pt-2"):
-            @ui.refreshable
-            def sidebar_nav():
-                is_files = current_view["value"] == "files"
-                is_recall_test = current_view["value"] == "recall_test"
-                is_cloud_sync = current_view["value"] == "cloud_sync"
-                is_mcp_config = current_view["value"] == "mcp_config"
-                is_skills = current_view["value"] == "skills"
-                is_logs = current_view["value"] == "logs"
-                is_settings = current_view["value"] == "settings"
+            # 应用导航折叠为当前视图标题，为集合树留下纵向空间。
+            with ui.expansion(t(f"sidebar.{current_view['value']}"), icon="apps",
+                              value=state.get("navigation_expanded", False),
+                              on_value_change=lambda e: state.update(navigation_expanded=e.value)).props("dense").classes("w-full"):
+                with ui.column().classes("w-full gap-0.5 px-2 pb-2"):
+                    for key, icon, callback in navigation:
+                        selected = key == current_view["value"]
+                        ui.button(t(f"sidebar.{key}"), icon=icon, on_click=callback).props("flat no-caps align=left").classes(
+                            "w-full text-sm " + ("theme-selected" if selected else "theme-hover theme-text-muted")
+                        )
 
-                # 文件库
-                files_classes = "w-full justify-start gap-2 px-3 py-1.5 rounded-md "
-                if is_files:
-                    files_classes += "theme-selected"
-                else:
-                    files_classes += "theme-hover"
-                with ui.button(on_click=switch_to_files).props("flat no-caps align=left").classes(files_classes):
-                    ui.icon("folder", size="xs").classes("theme-text-accent" if is_files else "theme-text-muted")
-                    ui.label(t("sidebar.files")).classes("text-sm " + ("theme-text" if is_files else "theme-text-muted"))
+            if current_view["value"] == "files":
+                with ui.row().classes("w-full px-3 items-center justify-between pt-3 pb-1 flex-nowrap"):
+                    ui.label(t("collections.tree_title")).classes("text-xs font-semibold theme-text-muted").tooltip(t("collections.keyboard_hint"))
+                    ui.button(icon="create_new_folder", on_click=file_handlers.handle_manage_collections).props(
+                        f'flat dense round size=sm aria-label="{t("collections.manage")}"'
+                    ).classes("theme-text-accent").tooltip(t("collections.manage"))
+                with ui.scroll_area(on_scroll=lambda e: state.update(tree_scroll=e.vertical_position)).classes("flex-1 w-full scroll-flush") as scroll:
+                    @ui.refreshable
+                    def collection_tree():
+                        nodes = [
+                            {"id": "all", "label": t("files.all_files"), "icon": "inventory_2"},
+                            {"id": "uncategorized", "label": t("collections.none"), "icon": "folder_off"},
+                        ]
+                        try:
+                            nodes.extend(collection_tree_nodes(state.get("collections", [])))
+                        except ValueError as exc:
+                            ui.label(str(exc)).classes("text-sm text-red-400 px-3")
+                        tree = ui.tree(nodes, on_select=file_handlers.on_tree_select,
+                                       on_expand=lambda e: state.update(expanded_collection_ids=list(e.value))).props(
+                            "dense no-transition selected-color=primary"
+                        ).classes("w-full px-2 collection-tree theme-text")
+                        tree.add_slot("default-header", '<q-icon :name="props.node.icon" size="xs" class="q-mr-xs" /><span class="break-words" :title="props.node.path || props.node.label">{{ props.node.label }}</span>')
+                        tree.select("uncategorized" if state.get("uncategorized") else
+                                    str(state["active_collection_ids"][0]) if state.get("active_collection_ids") else "all")
+                        tree.expand(state.get("expanded_collection_ids", []))
+                        ui_refs["tree_element"] = tree
+                    ui_refs["collection_tree"] = collection_tree
+                    collection_tree()
+                scroll.scroll_to(pixels=state.get("tree_scroll", 0))
+            else:
+                ui_refs["collection_tree"] = None
+                ui_refs["tree_element"] = None
+                ui.space()
 
-                # 召回测试（紧跟文件库：改完卡片标题就在这里验证检索效果）
-                recall_test_classes = "w-full justify-start gap-2 px-3 py-1.5 rounded-md "
-                if is_recall_test:
-                    recall_test_classes += "theme-selected"
-                else:
-                    recall_test_classes += "theme-hover"
-                with ui.button(on_click=switch_to_recall_test).props("flat no-caps align=left").classes(recall_test_classes):
-                    ui.icon("manage_search", size="xs").classes("theme-text-accent" if is_recall_test else "theme-text-muted")
-                    ui.label(t("sidebar.recall_test")).classes("text-sm " + ("theme-text" if is_recall_test else "theme-text-muted"))
-
-                # 云同步
-                cloud_sync_classes = "w-full justify-start gap-2 px-3 py-1.5 rounded-md "
-                if is_cloud_sync:
-                    cloud_sync_classes += "theme-selected"
-                else:
-                    cloud_sync_classes += "theme-hover"
-                with ui.button(on_click=switch_to_cloud_sync).props("flat no-caps align=left").classes(cloud_sync_classes):
-                    ui.icon("cloud_sync", size="xs").classes("theme-text-accent" if is_cloud_sync else "theme-text-muted")
-                    ui.label(t("sidebar.cloud_sync")).classes("text-sm " + ("theme-text" if is_cloud_sync else "theme-text-muted"))
-
-                # MCP 配置
-                mcp_config_classes = "w-full justify-start gap-2 px-3 py-1.5 rounded-md "
-                if is_mcp_config:
-                    mcp_config_classes += "theme-selected"
-                else:
-                    mcp_config_classes += "theme-hover"
-                with ui.button(on_click=switch_to_mcp_config).props("flat no-caps align=left").classes(mcp_config_classes):
-                    ui.icon("settings_input_component", size="xs").classes("theme-text-accent" if is_mcp_config else "theme-text-muted")
-                    ui.label(t("sidebar.mcp_config")).classes("text-sm " + ("theme-text" if is_mcp_config else "theme-text-muted"))
-
-                # Skill 导出
-                skills_classes = "w-full justify-start gap-2 px-3 py-1.5 rounded-md "
-                if is_skills:
-                    skills_classes += "theme-selected"
-                else:
-                    skills_classes += "theme-hover"
-                with ui.button(on_click=switch_to_skills).props("flat no-caps align=left").classes(skills_classes):
-                    ui.icon("extension", size="xs").classes("theme-text-accent" if is_skills else "theme-text-muted")
-                    ui.label(t("sidebar.skills")).classes("text-sm " + ("theme-text" if is_skills else "theme-text-muted"))
-
-                # 日志
-                logs_classes = "w-full justify-start gap-2 px-3 py-1.5 rounded-md "
-                if is_logs:
-                    logs_classes += "theme-selected"
-                else:
-                    logs_classes += "theme-hover"
-                with ui.button(on_click=switch_to_logs).props("flat no-caps align=left").classes(logs_classes):
-                    ui.icon("description", size="xs").classes("theme-text-accent" if is_logs else "theme-text-muted")
-                    ui.label(t("sidebar.logs")).classes("text-sm " + ("theme-text" if is_logs else "theme-text-muted"))
-
-                # 设置
-                settings_classes = "w-full justify-start gap-2 px-3 py-1.5 rounded-md "
-                if is_settings:
-                    settings_classes += "theme-selected"
-                else:
-                    settings_classes += "theme-hover"
-                with ui.button(on_click=switch_to_settings).props("flat no-caps align=left").classes(settings_classes):
-                    ui.icon("settings", size="xs").classes("theme-text-accent" if is_settings else "theme-text-muted")
-                    ui.label(t("sidebar.settings")).classes("text-sm " + ("theme-text" if is_settings else "theme-text-muted"))
-
-            sidebar_nav()
-
-        # 底部：统计信息 + 版本号（安装元数据单一来源）
-        ui.space()
-        with ui.column().classes("w-full px-4 gap-0.5 pb-2"):
-            with ui.row().classes("items-center gap-1"):
+            with ui.row().classes("w-full px-3 py-2 items-center gap-1 library-footer"):
                 ui.icon("storage", size="xs").classes("theme-text-muted")
-                stats_label = ui.label(t("stats.loading")).classes("text-xs theme-text-muted")
-                ui_refs["stats_label"] = stats_label
-            ui.label(f"v{get_version()}").classes("text-xs theme-text-muted")
+                ui_refs["stats_label"] = ui.label(state.get("stats_text", t("stats.loading"))).classes("text-xs theme-text-muted")
 
+    sidebar_nav()
     return sidebar_nav

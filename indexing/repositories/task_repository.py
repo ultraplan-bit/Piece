@@ -118,19 +118,21 @@ class TaskRepository(BaseRepository):
     def mark_processing_failed(self, error_message):
         with get_db_cursor(write=True) as cursor:
             cursor.execute(
-                "UPDATE tasks SET status = 'failed', error_code = 'INTERRUPTED', error_message = ?, updated_at = ? "
+                "UPDATE tasks SET status = CASE WHEN stage = 'cancelling' THEN 'cancelled' ELSE 'failed' END, "
+                "error_code = CASE WHEN stage = 'cancelling' THEN 'CANCELLED' ELSE 'INTERRUPTED' END, "
+                "error_message = CASE WHEN stage = 'cancelling' THEN '用户取消任务' ELSE ? END, updated_at = ? "
                 "WHERE status = 'processing'",
                 (error_message, datetime.now().isoformat()),
             )
             count = cursor.rowcount
-            cursor.execute("DELETE FROM staged_chunks WHERE task_id IN (SELECT id FROM tasks WHERE status = 'failed')")
+            cursor.execute("DELETE FROM staged_chunks WHERE task_id IN (SELECT id FROM tasks WHERE status IN ('failed', 'cancelled'))")
             return count
 
     def update_page_progress(self, task_id, current_page, total_pages, processed_chunks, progress, stage=None):
         with get_db_cursor(write=True) as cursor:
             cursor.execute(
                 "UPDATE tasks SET status = 'processing', progress = ?, current_page = ?, total_pages = ?, "
-                "processed_chunks = ?, stage = COALESCE(?, stage), updated_at = ? "
+                "processed_chunks = ?, stage = CASE WHEN stage = 'cancelling' THEN stage ELSE COALESCE(?, stage) END, updated_at = ? "
                 "WHERE id = ? AND status IN ('pending', 'processing')",
                 (progress, current_page, total_pages, processed_chunks, stage, datetime.now().isoformat(), task_id),
             )
@@ -152,16 +154,24 @@ class TaskRepository(BaseRepository):
         )
         return cursor.rowcount > 0
 
-    def cancel_pending(self, task_id):
+    def cancel(self, task_id):
         with get_db_cursor(write=True) as cursor:
-            cursor.execute("SELECT status FROM tasks WHERE id = ?", (task_id,))
+            cursor.execute("SELECT status, file_id, task_type FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
                 raise BusinessError("NOT_FOUND", "任务不存在")
-            if row[0] != "pending":
-                raise BusinessError("TASK_NOT_CANCELLABLE", "仅允许取消未领取任务；运行中任务必须等安全完成")
-            return self.update_status(task_id, "cancelled", error_message="用户取消未领取任务",
-                                      error_code="CANCELLED", cursor=cursor)
+            if row["status"] == "processing":
+                # 保持 processing 和文件互斥，直到执行协程、解析线程及暂存清理全部退出。
+                cursor.execute("UPDATE tasks SET stage = 'cancelling', updated_at = ? WHERE id = ?",
+                               (datetime.now().isoformat(), task_id))
+            elif row["status"] == "pending":
+                self.update_status(task_id, "cancelled", error_message="用户取消任务",
+                                   error_code="CANCELLED", cursor=cursor)
+                if row["task_type"] == "file_index":
+                    cursor.execute("UPDATE files SET status = 'error' WHERE id = ? AND status = 'pending' "
+                                   "AND NOT EXISTS (SELECT 1 FROM chunks WHERE file_id = ?)",
+                                   (row["file_id"], row["file_id"]))
+            # 重复取消或任务已先完成时返回真实终态，不把已发布的结果撤销。
 
     def retry(self, task_id):
         with get_db_cursor(write=True) as cursor:

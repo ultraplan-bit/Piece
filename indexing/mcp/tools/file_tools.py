@@ -11,8 +11,6 @@ from indexing.services.collection_service import resolve_collection_ids
 from indexing.services.file_service import (
     MAX_MARKDOWN_CHARS,
     create_empty_file as _create_empty_file,
-    delete_file as _delete_file,
-    get_file_by_id as _get_file_by_id,
     import_markdown as _import_markdown,
 )
 
@@ -119,71 +117,19 @@ def create_empty_file(filename: str) -> Dict[str, Any]:
         return {"success": False, "message": f"创建文件失败: {str(e)}", "data": None}
 
 
-def delete_file(file_id: int) -> Dict[str, Any]:
-    """
-    删除文件（级联删除所有切片和物理文件）
-
-    Args:
-        file_id: 文件 ID
-
-    Returns:
-        {
-            "success": bool,
-            "message": str,
-            "data": {
-                "file_id": int,
-                "filename": str,
-                "deleted_chunks": int
-            }
-        }
-
-    Example:
-        >>> delete_file(123)
-        {
-            "success": True,
-            "message": "文件删除成功",
-            "data": {
-                "file_id": 123,
-                "filename": "学术论文_2024研究.md",
-                "deleted_chunks": 15
-            }
-        }
-    """
+def delete_file(file_id: int, dry_run: bool = False, confirmed: bool = False) -> Dict[str, Any]:
+    """文件删除统一走维护服务，预览包含知识证据引用数与快照保留提示。"""
+    from indexing.services.maintenance_service import delete_files
+    from indexing.services.errors import BusinessError
     try:
-        # 先获取文件信息（用于日志和返回）
-        file_info = _get_file_by_id(file_id)
-        if not file_info:
-            logger.warning(f"[MCP] 删除文件失败: 文件不存在 (ID: {file_id})")
-            return {
-                "success": False,
-                "message": f"文件不存在 (ID: {file_id})",
-                "data": None,
-            }
-
-        filename = file_info["filename"]
-
-        # 获取切片数量（用于返回）
-        from indexing.services.chunk_service import get_chunks_count_by_file_id
-        chunks_count = get_chunks_count_by_file_id(file_id)
-
-        # 调用业务逻辑层删除（返回 bool）
-        success = _delete_file(file_id)
-
-        if success:
-            logger.info(f"[MCP] 删除文件成功: {filename} (ID: {file_id})")
-            return {
-                "success": True,
-                "message": "文件删除成功",
-                "data": {
-                    "file_id": file_id,
-                    "filename": filename,
-                    "deleted_chunks": chunks_count,
-                },
-            }
-        else:
-            logger.error(f"[MCP] 删除文件失败: 未知错误")
-            return {"success": False, "message": "删除文件失败", "data": None}
-
-    except Exception as e:
-        logger.error(f"[MCP] 删除文件异常: {str(e)}", exc_info=True)
-        return {"success": False, "message": f"删除文件失败: {str(e)}", "data": None}
+        impact = delete_files([file_id], dry_run=dry_run, confirmed=confirmed)
+        success = not impact.get("failed_count")
+        return {
+            "success": success,
+            "message": "删除预览，未执行" if dry_run else ("文件删除成功" if success else "文件删除失败"),
+            "data": {**impact, "file_id": file_id, "filename": impact["filenames"][0],
+                     "deleted_chunks": impact["chunks_count"] if not dry_run and success else 0},
+        }
+    except BusinessError as exc:
+        return {"success": False, "message": str(exc), "data": exc.data,
+                "error": {"code": exc.code, "message": str(exc)}}

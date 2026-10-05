@@ -25,8 +25,10 @@ import re
 
 from app.platform import load_sqlite_vec as _load_sqlite_vec
 from .settings import get_settings, get_vector_dim
+from . import knowledge_schema
 
 logger = logging.getLogger(__name__)
+SCHEMA_VERSION = 3
 
 # 全局连接池（线程安全）
 _connection_pool = None
@@ -253,16 +255,39 @@ def init_database(db_path: Path = None) -> None:
         tables = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
-        if (tables and version != 1) or version not in (0, 1):
+        if (tables and version != SCHEMA_VERSION) or version not in (0, SCHEMA_VERSION):
             raise RuntimeError(
                 f"知识库结构不受支持（schema={version}）：{db_path}。"
                 "本版本仅支持新库；请停止服务后检查并显式选择空数据目录，程序不会删除或迁移此库。"
             )
-        if version == 1:
-            required = {"task_type", "input_json", "result_json", "request_key", "error_code"}
-            actual = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
-            if not required <= actual:
-                raise RuntimeError("知识库任务结构不完整，拒绝自动修复或覆盖")
+        if version == SCHEMA_VERSION:
+            required_objects = {
+                "files", "chunks", "tasks", "staged_chunks", "collections", "file_collections",
+                "chunks_fts", "vec_chunks", "chunks_ai", "chunks_ad", "chunks_au",
+                "idx_file_hash", "idx_file_status", "idx_doc_title", "idx_file_id", "idx_chunk_order",
+                "idx_task_status", "idx_task_updated", "idx_task_file_status",
+                "idx_file_collections_collection", "idx_collections_parent",
+            }
+            objects = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+            required_columns = {
+                "files": {"id", "file_hash", "filename", "file_path", "file_size", "original_file_type", "original_file_path", "metadata", "working_dirty", "status", "created_at", "updated_at"},
+                "chunks": {"id", "file_id", "doc_title", "chunk_text", "chunk_index", "heading_path", "heading_level", "embedding"},
+                "tasks": {"id", "file_id", "original_filename", "task_type", "input_json", "result_json", "request_key", "error_code", "status", "progress", "current_page", "total_pages", "processed_chunks", "stage", "error_message", "created_at", "updated_at"},
+                "staged_chunks": {"task_id", "file_id", "doc_title", "chunk_text", "chunk_index", "heading_path", "heading_level", "embedding"},
+                "collections": {"id", "name", "description", "parent_id", "created_at"},
+                "file_collections": {"file_id", "collection_id"},
+            }
+            required_objects.update(knowledge_schema.REQUIRED_OBJECTS)
+            required_columns.update(knowledge_schema.REQUIRED_COLUMNS)
+            if not required_objects <= objects or any(
+                not columns <= {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                for table, columns in required_columns.items()
+            ):
+                raise RuntimeError("知识库结构不完整，拒绝自动修复或覆盖")
+            parents = conn.execute("PRAGMA foreign_key_list(collections)").fetchall()
+            if not any(row[2] == "collections" and row[3] == "parent_id" and row[4] == "id" and row[6] == "RESTRICT" for row in parents):
+                raise RuntimeError("知识库集合结构不完整，拒绝自动修复或覆盖")
+            knowledge_schema.validate_identity(conn)
         # 启用 WAL 模式
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
@@ -445,10 +470,13 @@ def init_database(db_path: Path = None) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL,
                 description TEXT,
+                parent_id INTEGER REFERENCES collections(id) ON DELETE RESTRICT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """
         )
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_collections_parent ON collections(parent_id)")
 
         # 13. 创建 file_collections 关联表（多对多：一个文件可属于多个集合）
         conn.execute(
@@ -467,7 +495,9 @@ def init_database(db_path: Path = None) -> None:
             "ON file_collections(collection_id)"
         )
 
-        conn.execute("PRAGMA user_version=1")
+        if version != SCHEMA_VERSION:
+            knowledge_schema.create_schema(conn)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.commit()
         logger.info(f"[DB] 数据库初始化完成: {db_path}")
 

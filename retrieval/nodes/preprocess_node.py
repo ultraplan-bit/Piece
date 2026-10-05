@@ -75,21 +75,10 @@ def resolve_filenames_to_ids(filenames: Optional[List[str]]) -> Optional[List[in
         raise
 
 
-def resolve_collections_to_ids(collections: Optional[List[str]]) -> Optional[List[int]]:
-    """
-    将集合名列表解析为文件ID列表（模糊匹配）
-
-    Args:
-        collections: 集合名列表（可选）
-
-    Returns:
-        匹配到的文件ID列表，如果没有匹配或参数为空则返回 None
-    """
-    if not collections:
-        return None
-
+def resolve_collections_to_ids(collections: Optional[List[str]], include_descendants=True) -> Optional[List[int]]:
+    """集合名按原模糊规则匹配；None 不限制，空列表/未知集合返回空范围。"""
     from indexing.services.collection_service import resolve_names_to_file_ids
-    return resolve_names_to_file_ids(collections)
+    return resolve_names_to_file_ids(collections, include_descendants)
 
 
 def preprocess_node(state: State) -> State:
@@ -133,7 +122,7 @@ def preprocess_node(state: State) -> State:
     file_ids = state.get("file_ids")
     if file_ids is None:
         file_ids = resolve_filenames_to_ids(state.get("filenames"))
-    collection_file_ids = resolve_collections_to_ids(state.get("collections"))
+    collection_file_ids = resolve_collections_to_ids(state.get("collections"), state.get("include_descendants", True))
     if file_ids is not None and collection_file_ids is not None:
         file_ids = sorted(set(file_ids) & set(collection_file_ids))
     elif collection_file_ids is not None:

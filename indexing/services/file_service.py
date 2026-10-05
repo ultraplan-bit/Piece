@@ -275,7 +275,15 @@ def get_note_files():
     return _file_repo.find_notes()
 
 
-def get_files_list_paginated(limit=20, offset=0, status=None, collection_ids=None, name=None):
+def get_files_list_paginated(limit=20, offset=0, status=None, collection_ids=None, name=None, *,
+                             include_descendants=True, uncategorized=False,
+                             sort_by="created_at", descending=True):
+    """与检索共用集合范围；未归类表示没有任何直接关联，分页前完成过滤去重。"""
+    from ..repositories.collection_repository import file_ids_query
+    if sort_by not in {"created_at", "updated_at", "filename", "id"}:
+        raise BusinessError("INVALID_INPUT", "不支持的文件排序字段")
+    if limit < 1 or offset < 0:
+        raise BusinessError("INVALID_INPUT", "分页参数无效")
     conditions, params = [], []
     if status:
         conditions.append("status = ?")
@@ -284,13 +292,19 @@ def get_files_list_paginated(limit=20, offset=0, status=None, collection_ids=Non
         conditions.append("filename LIKE ? ESCAPE '!'")
         params.append("%" + name.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%")
     if collection_ids is not None:
-        conditions.append(f"id IN (SELECT file_id FROM file_collections WHERE collection_id IN ({','.join('?' for _ in collection_ids)}))" if collection_ids else "0")
-        params.extend(collection_ids)
+        scope_sql, scope_params = file_ids_query(collection_ids, include_descendants)
+        conditions.append(f"id IN ({scope_sql})")
+        params.extend(scope_params)
+    if uncategorized:
+        conditions.append("NOT EXISTS (SELECT 1 FROM file_collections WHERE file_id = files.id)")
     where = " AND ".join(conditions) or "1"
+    order = "DESC" if descending else "ASC"
+    field = "filename COLLATE NOCASE" if sort_by == "filename" else sort_by
     with get_db_cursor() as cursor:
+        cursor.execute("BEGIN")
         cursor.execute(f"SELECT COUNT(*) FROM files WHERE {where}", params)
         total = cursor.fetchone()[0]
-        cursor.execute(f"SELECT * FROM files WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?", (*params, limit, offset))
+        cursor.execute(f"SELECT * FROM files WHERE {where} ORDER BY {field} {order}, id {order} LIMIT ? OFFSET ?", (*params, limit, offset))
         files = [dict(row) for row in cursor.fetchall()]
     return {"files": files, "total": total, "limit": limit, "offset": offset}
 
@@ -299,9 +313,18 @@ def get_chunks_by_file_id(file_id):
     return _chunk_repo.find_by_file_id(file_id) if file_exists(file_id) else None
 
 
-def get_chunks_paginated(file_id, page=1, page_size=50):
+def get_chunks_paginated(file_id, page=1, page_size=50, *, chunk_id=None):
     if not file_exists(file_id):
         return None
+    if chunk_id is not None:
+        with get_db_cursor() as cursor:
+            position = cursor.execute("""SELECT position FROM (
+                SELECT id, ROW_NUMBER() OVER (ORDER BY chunk_index,id) AS position
+                FROM chunks WHERE file_id=?
+            ) WHERE id=?""", (file_id, chunk_id)).fetchone()
+        if position is None:
+            raise BusinessError("NOT_FOUND", "卡片已不存在或不属于指定文件")
+        page = (position["position"] - 1) // page_size + 1
     total = _chunk_repo.count_by_file_id(file_id)
     return {"chunks": _chunk_repo.find_by_file_id_paginated(file_id, page, page_size), "total": total,
             "page": page, "page_size": page_size, "total_pages": max(1, (total + page_size - 1) // page_size)}

@@ -197,9 +197,7 @@ def _publish_chunk(task, embedding_blob):
     payload = task["input"]
     file_id = task["file_id"]
     with get_db_cursor(write=True) as cursor:
-        cursor.execute("SELECT status FROM tasks WHERE id = ?", (task["id"],))
-        if cursor.fetchone()[0] != "processing":
-            raise BusinessError("TASK_STATE", "任务已不在处理中，拒绝发布")
+        task_service.ensure_task_publishable(task["id"], cursor)
         if task["task_type"] == "chunk_add":
             path = heading_path_from_doc_title(payload["doc_title"])
             cursor.execute("SELECT COALESCE(MAX(chunk_index), -1) + 1 FROM chunks WHERE file_id = ?", (file_id,))
@@ -243,7 +241,10 @@ async def _process_chunk_task(task_id, expected_type):
             raise BusinessError("EMBEDDING_FAILED", "嵌入服务返回数量不匹配")
         result = await run_sync(_publish_chunk, task, serialize_float32(vectors[0]))
     except Exception as exc:
-        await run_sync(task_service.update_task_status, task_id, "failed", error_message=str(exc), error_code=getattr(exc, "code", "PROCESSING_FAILED"))
+        if await run_sync(task_service.is_cancel_requested, task_id):
+            await run_sync(task_service.finish_cancelled_task, task_id)
+        else:
+            await run_sync(task_service.update_task_status, task_id, "failed", error_message=str(exc), error_code=getattr(exc, "code", "PROCESSING_FAILED"))
         return
     # 产物与 completed 在同一事务提交；导出副本失败不可把已完成新增标成失败诱导重放。
     try:

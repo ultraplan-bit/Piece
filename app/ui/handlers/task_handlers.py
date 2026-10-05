@@ -72,6 +72,7 @@ class TaskHandlers:
         progress = task.get("progress", 0)
         status = task.get("status", "pending")
         return {
+            "task_id": task["id"],
             "file_id": task.get("file_id"),
             "filename": task.get("original_filename", ""),
             "progress": progress,

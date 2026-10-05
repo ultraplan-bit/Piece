@@ -87,6 +87,9 @@ def render_recall_test_middle(recall_state: dict, ui_refs: dict):
                 "w-full text-sm theme-card theme-border-soft"
             )
 
+            ui.switch(t("collections.include_descendants"), value=recall_state.get("include_descendants", True),
+                      on_change=lambda e: recall_state.update(include_descendants=e.value)).props("dense").classes("text-xs")
+
             @ui.refreshable
             def run_button():
                 button = ui.button(
@@ -333,6 +336,7 @@ async def _run_search(recall_state: dict, ui_refs: dict):
             query,
             filenames=filenames or None,
             collections=collections or None,
+            include_descendants=recall_state.get("include_descendants", True),
         )
         keywords = result.get("keywords", [])
         # 一次把 top-k 的正文全取回来：条数上限 3 是 MCP 工具层的约束，

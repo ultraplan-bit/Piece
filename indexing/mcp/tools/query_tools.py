@@ -22,7 +22,11 @@ logger = logging.getLogger(__name__)
 def list_files(
     limit: int = 20,
     offset: int = 0,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    collections=None,
+    include_descendants=True,
+    uncategorized=False,
+    name=None,
 ) -> Dict[str, Any]:
     """
     列出所有文件（支持分页和状态过滤）
@@ -92,8 +96,12 @@ def list_files(
                 "data": None
             }
 
-        # 调用业务逻辑层
-        result = get_files_list_paginated(limit=limit, offset=offset, status=status)
+        # 读范围与 API/GUI 共用，明确的空集合范围不能扩为全库。
+        from indexing.services.collection_service import resolve_collection_ids
+        scope = None if collections is None else resolve_collection_ids(collections)
+        result = get_files_list_paginated(limit=limit, offset=offset, status=status,
+                                          collection_ids=scope, include_descendants=include_descendants,
+                                          uncategorized=uncategorized, name=name)
 
         logger.info(
             f"[MCP] 查询文件列表: limit={limit}, offset={offset}, "

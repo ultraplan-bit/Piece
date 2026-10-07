@@ -124,7 +124,7 @@
     "uncertain": "响应未确认。保留原请求键 {request_key} 与原提交内容；再次保存先查原结果。此时修改输入不会替换原请求。",
     "delete_preview": "删除影响预览",
     "impact_count": "{kind}：{count}",
-    "delete_scope": "确认会清理预览中的关联边、证据与在线正文历史；不会删除原文件，也不会改动备份。范围变化须重新预览。",
+    "delete_scope": "确认后按预览范围删除；范围变化需重新预览。不删除原件，也不改动备份。",
     "delete_conflict": "删除未完成（{code}）。请取消并重新读取、预览；不会使用过期确认范围。",
     "confirm_delete": "确认删除预览范围",
     "cancel": "取消",
@@ -153,7 +153,25 @@
     "reading": "阅读模式",
     "return_file": "返回原文件",
     "return_knowledge": "返回知识页",
-    "saved_unread": "已提交，但未能读回目标；记录可能已被其他调用者删除。请按返回 ID 重新核查，不要重复新建。"
+    "saved_unread": "已提交，但未能读回目标；记录可能已被其他调用者删除。请按返回 ID 重新核查，不要重复新建。",
+    "page": "知识页",
+    "open_page": "打开所属页面",
+    "target_page": "目标页面",
+    "partial_saved": "已提交，但有 {count} 处未完成；索引状态：{index}。请按返回 ID 核查。",
+    "index_fresh": "索引正常",
+    "index_stale": "文件已写入，索引待重建",
+    "index_missing": "索引缺失",
+    "index_unknown": "索引状态未知",
+    "references_wiki": "Wiki 引用",
+    "references_graph": "图谱引用",
+    "lint_WIKI_BROKEN_LINK": "Wiki 内链指向不存在的页面。",
+    "lint_WIKI_ORPHAN_PAGE": "页面没有入链，可能缺少引用（仅供参考）。",
+    "delete_retains_history": "在线修订历史会保留，删除后仍可读取。",
+    "delete_clears_history": "会清除该记录自身的在线修订历史。",
+    "index_current": "索引已同步",
+    "index_failed": "索引更新失败",
+    "affected_backlinks": "受影响的反向链接",
+    "delete_local_recovery": "被替换的 Markdown 会留作本地恢复副本（.wiki-recovery-*.bak），不是彻底擦除。"
   },
   "sidebar": {
     "knowledge": "知识库",
@@ -164,7 +182,9 @@
     "skills": "Skill 导出",
     "logs": "日志",
     "settings": "设置",
-    "cloud_sync_dev": "云同步功能开发中"
+    "cloud_sync_dev": "云同步功能开发中",
+    "wiki": "Wiki",
+    "graph": "知识图谱"
   },
   "stats": {
     "loading": "加载中...",
@@ -654,5 +674,32 @@
     "doc_missing": "正文已不存在（卡片可能刚被删除）",
     "chunk_position": "第 {index}/{total} 张",
     "toggle_view": "切换渲染 / 原文"
+  },
+  "wiki": {
+    "heading": "Wiki 知识页",
+    "outgoing_links": "链接到的页面",
+    "backlinks": "引用本页的页面",
+    "intro": "阅读与维护 Markdown 知识页；页面链接来自正文，不进入知识图谱。",
+    "choose_page": "在左侧选择一篇 Wiki 页面开始阅读。",
+    "rebuild_index": "重建页面索引",
+    "rebuild_intro": "只从 Markdown 文件重建搜索与链接索引，不重写正文、不调用模型。",
+    "rebuild_done": "已从 Markdown 重建页面索引。",
+    "return": "返回 Wiki",
+    "link_missing": "链接目标不存在",
+    "lint_INDEX_STALE": "页面内容已变更，派生索引待重建。",
+    "lint_FILE_MISSING_OR_INVALID": "索引对应的 Markdown 文件缺失或无法读取。",
+    "lint_DUPLICATE_PAGE_ID": "多个文件声明同一页面身份，拒绝猜测真源。",
+    "lint_DUPLICATE_EVIDENCE_ID": "证据身份在多个页面重复。"
+  },
+  "graph": {
+    "heading": "知识图谱",
+    "objects": "实体",
+    "intro": "独立维护实体、语义关系与证据；图节点没有 Wiki 正文。",
+    "choose_node": "在左侧选择一个图节点查看关系与证据。",
+    "create": "新建图节点",
+    "return": "返回图谱",
+    "rebuild_index": "重建查询索引",
+    "rebuild_intro": "只从已有实体、关系与证据重建查询索引，不改动知识内容或历史，也不调用模型。",
+    "rebuild_done": "已重建图谱查询索引。"
   }
 }

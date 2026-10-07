@@ -4,6 +4,7 @@
 作业由核心服务持有，与 GUI 会话无关；目录枚举失败不能被当作空目录。
 """
 
+import hashlib
 import logging
 import os
 import tempfile
@@ -67,14 +68,14 @@ class SyncService:
         self.last_result: Optional[SyncResult] = None
         self.last_finished_at: Optional[datetime] = None
 
-    def _get_client(self):
-        webdav = get_settings().webdav
-        if not self.is_enabled() or not webdav.username or not webdav.password:
+    def _get_client(self, settings):
+        webdav = settings.webdav
+        if not webdav.enabled or not webdav.hostname or not webdav.username or not webdav.password:
             return None
         return WebDAV4Client(webdav.hostname, auth=(webdav.username, webdav.password), timeout=60.0)
 
-    def _get_local_paths(self):
-        root = get_settings().get_files_path()
+    def _get_local_paths(self, settings):
+        root = settings.get_files_path()
         return {"originals": root / "originals", "working": root / "working"}
 
     def is_enabled(self):
@@ -162,9 +163,11 @@ class SyncService:
             self.last_finished_at = datetime.now()
             self.status.last_error = None if result.success else result.message
 
-    def _update_last_sync_time(self):
-        from .config_service import update_config
-        update_config({"webdav": {"last_sync_time": datetime.now().isoformat()}})
+    def _update_last_sync_time(self, settings):
+        from .config_service import record_sync_success
+        timestamp = datetime.now()
+        if record_sync_success(settings, timestamp.isoformat()):
+            self.status.last_sync_time = timestamp
 
     def _ensure_remote_dir(self, client, path):
         if not path:
@@ -235,6 +238,19 @@ class SyncService:
                 files[name[len(remote_dir) + 1:]] = int(size)
         return files
 
+    def _same_content(self, client, remote_file, local_file, expected_size):
+        if expected_size == 0:
+            return local_file.stat().st_size == 0
+        # ponytail: 无服务端内容校验和时，等长文件需逐个下载；流量成为瓶颈再接入可信校验和。
+        with tempfile.TemporaryDirectory(prefix="piece-sync-") as directory:
+            temporary = Path(directory) / "remote"
+            client.download_file(remote_file, temporary)
+            self._check_stopping()
+            if temporary.stat().st_size != expected_size:
+                raise OSError("云端文件传输不完整或在传输中发生变化")
+            with local_file.open("rb") as local, temporary.open("rb") as remote:
+                return hashlib.file_digest(local, "sha256").digest() == hashlib.file_digest(remote, "sha256").digest()
+
     def _download_atomic(self, client, remote_file, local_file, expected_size):
         local_file.parent.mkdir(parents=True, exist_ok=True)
         descriptor, name = tempfile.mkstemp(prefix=".sync-", dir=local_file.parent)
@@ -267,13 +283,14 @@ class SyncService:
         client = None
         try:
             self._check_stopping()
-            client = self._get_client()
+            settings = get_settings().model_copy(deep=True)
+            client = self._get_client(settings)
             if client is None:
                 result.success = False
                 result.message = "云同步未启用或连接配置不完整"
                 return result
-            paths = self._get_local_paths()
-            first = self.is_first_sync()
+            paths = self._get_local_paths(settings)
+            first = settings.webdav.last_sync_time is None
             # 先完整取得两棵目录树。任何枚举异常都在上传/删除之前终止。
             snapshots = []
             for remote, local in paths.items():
@@ -285,8 +302,7 @@ class SyncService:
             self._check_stopping()
             result.success = not result.errors
             if result.success:
-                self._update_last_sync_time()
-                self.status.last_sync_time = datetime.now()
+                self._update_last_sync_time(settings)
             result.message = f"同步{'完成' if result.success else '部分失败'}: ↑{len(result.uploaded)} ↓{len(result.downloaded)}，错误 {len(result.errors)} 项"
         except Exception as exc:
             result.success = False
@@ -319,6 +335,7 @@ class SyncService:
             self._check_stopping()
             if progress_callback:
                 progress_callback(index, len(names), rel)
+            self._check_stopping()
             local_file = local_dir / rel
             remote_file = f"{remote_dir}/{rel}"
             label = f"{remote_dir}/{rel}"
@@ -334,7 +351,11 @@ class SyncService:
                     else:
                         client.remove(remote_file)
                         result.uploaded.append(f"[删除] {label}")
-                elif rel not in remote_files or (not first and local_files[rel] != remote_files[rel]):
+                elif rel not in remote_files or (not first and (
+                    local_files[rel] != remote_files[rel]
+                    or not self._same_content(client, remote_file, local_file, remote_files[rel])
+                )):
+                    self._check_stopping()
                     self._ensure_remote_dir(client, str(PurePosixPath(remote_file).parent))
                     # 新项上传不允许覆盖扫描后才出现的远端对象。
                     headers = {"If-None-Match": "*"} if rel not in remote_files else None

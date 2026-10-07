@@ -1,4 +1,4 @@
-"""知识层输入契约；服务、HTTP 与 MCP 共用，核心模式不依赖 GUI。"""
+"""图谱与共享来源输入契约；服务、HTTP 与 MCP 共用，核心模式不依赖 GUI。"""
 
 import unicodedata
 from typing import Annotated, Literal
@@ -7,11 +7,11 @@ from uuid import UUID
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 
-ObjectKind = Literal["concept", "entity", "topic", "synthesis", "source_summary"]
+ObjectKind = Literal["concept", "entity"]
 Status = Literal["active", "disputed", "outdated"]
 Predicate = Literal["is_a", "part_of", "depends_on", "applies_to", "supports", "contradicts", "related_to"]
 Basis = Literal["explicit", "synthesis", "inference", "user_statement"]
-RecordKind = Literal["object", "relation", "evidence", "link"]
+RecordKind = Literal["object", "relation", "evidence"]
 PositiveInt = Annotated[int, Field(strict=True, ge=1)]
 NonNegative = Annotated[int, Field(strict=True, ge=0)]
 Limit = Annotated[int, Field(strict=True, ge=1, le=100)]
@@ -70,7 +70,6 @@ class ObjectCreate(Input):
     kind: ObjectKind
     title: Title
     summary: ShortText = ""
-    body: Text = ""
     aliases: Aliases = Field(default_factory=list)
     status: Status = "active"
 
@@ -92,14 +91,8 @@ class ObjectUpdate(Update):
     kind: ObjectKind | None = None
     title: Title | None = None
     summary: ShortText | None = None
-    body: Text | None = None
     aliases: Aliases | None = None
     status: Status | None = None
-
-
-class LinkCreate(Input):
-    source: Target
-    target: Target
 
 
 class RelationCreate(Input):
@@ -123,9 +116,7 @@ class RelationUpdate(Update):
     status: Status | None = None
 
 
-class EvidenceCreate(Input):
-    object: Target | None = None
-    relation: Target | None = None
+class SourceInput(Input):
     source_kind: Literal["piece", "external", "user"]
     stance: Literal["supports", "contradicts", "context"] = "supports"
     source_library_id: Uuid | None = None
@@ -138,8 +129,6 @@ class EvidenceCreate(Input):
 
     @model_validator(mode="after")
     def source_fields(self):
-        if (self.object is None) == (self.relation is None):
-            raise ValueError("证据必须且只能附属于 object 或 relation")
         if self.source_kind == "piece":
             if None in (self.source_library_id, self.source_file_id, self.source_chunk_id):
                 raise ValueError("Piece 来源必须提供库 UUID、文件 ID 和卡片 ID")
@@ -156,11 +145,21 @@ class EvidenceCreate(Input):
         return self
 
 
+class EvidenceCreate(SourceInput):
+    object: Target | None = None
+    relation: Target | None = None
+
+    @model_validator(mode="after")
+    def owner_fields(self):
+        if (self.object is None) == (self.relation is None):
+            raise ValueError("证据必须且只能附属于 object 或 relation")
+        return self
+
+
 class ApplyInput(Input):
     request_key: Key | None = None
     reason: Annotated[str, Field(min_length=1, max_length=2000), AfterValidator(nonblank)]
     objects: Annotated[list[ObjectCreate | ObjectUpdate], Field(max_length=20)] = Field(default_factory=list)
-    links: Annotated[list[LinkCreate], Field(max_length=200)] = Field(default_factory=list)
     relations: Annotated[list[RelationCreate | RelationUpdate], Field(max_length=100)] = Field(default_factory=list)
     evidence: Annotated[list[EvidenceCreate], Field(max_length=200)] = Field(default_factory=list)
     dry_run: bool = False
@@ -169,7 +168,7 @@ class ApplyInput(Input):
     def nonempty(self):
         if not self.dry_run and not self.request_key:
             raise ValueError("正式提交必须提供 request_key")
-        if not any((self.objects, self.links, self.relations, self.evidence)):
+        if not any((self.objects, self.relations, self.evidence)):
             raise ValueError("批次不能为空")
         return self
 
@@ -195,7 +194,7 @@ class GetInput(Input):
 class GraphInput(Input):
     root_id: Uuid
     depth: Literal[1, 2] = 1
-    edge_types: Annotated[list[Literal["link", "relation"]], Field(min_length=1, max_length=2)] = Field(default_factory=lambda: ["link", "relation"])
+    edge_types: Annotated[list[Literal["relation"]], Field(min_length=1, max_length=1)] = Field(default_factory=lambda: ["relation"])
     predicates: Annotated[list[Predicate], Field(max_length=7)] | None = None
     statuses: Annotated[list[Status], Field(max_length=3)] | None = None
     max_nodes: Annotated[int, Field(strict=True, ge=1, le=100)] = 100
@@ -260,8 +259,8 @@ class DeleteInput(Input):
     def confirmation_fields(self):
         if self.kind in ("object", "relation") and self.expected_revision is None:
             raise ValueError("删除对象/关系必须提供 expected_revision")
-        if self.kind in ("evidence", "link") and self.expected_revision is not None:
-            raise ValueError("不可变证据/页面链接不接受 expected_revision")
+        if self.kind == "evidence" and self.expected_revision is not None:
+            raise ValueError("不可变证据不接受 expected_revision")
         if not self.dry_run and (not self.request_key or not self.impact_token):
             raise ValueError("正式删除必须提供 request_key 和预览的 impact_token")
         return self

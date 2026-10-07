@@ -37,7 +37,7 @@ def test_current_schema_new_database_and_no_repair(knowledge_base):
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='idx_collections_parent'").fetchone() is None
 
 
-@pytest.mark.parametrize("version", [0, 1, 2, database.SCHEMA_VERSION + 1])
+@pytest.mark.parametrize("version", [0, 1, 2, 3, 4, database.SCHEMA_VERSION + 1])
 def test_existing_unsupported_schema_is_not_migrated(tmp_path, version):
     path = tmp_path / "old.db"
     with sqlite3.connect(path) as conn:

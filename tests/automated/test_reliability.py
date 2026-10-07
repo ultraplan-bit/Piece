@@ -214,7 +214,7 @@ def test_gui_edit_preserves_pending_and_concurrent_configuration(knowledge_base,
     saved = config_service.get_saved_settings()
     assert saved.data_path == next_path and settings.get_settings().data_path != next_path
     assert saved.appearance.theme == "dark"
-    assert saved.webdav.last_sync_time == "2026-09-09T10:00:00"
+    assert saved.webdav.last_sync_time is None
 
 
 def test_gui_busy_failures_are_visible_and_do_not_clear_selection(knowledge_base, monkeypatch):

@@ -7,6 +7,7 @@ from indexing.database import get_db_cursor
 from indexing.services.errors import BusinessError
 from indexing.services.page_render import page_number_from_heading
 from indexing.utils import run_sync
+from .config import config
 from .nodes import (State, preprocess_node, exact_match_node, vector_search_node,
                     bm25_search_node, rrf_rerank_node, output_node)
 
@@ -61,36 +62,37 @@ async def _resolve(query, filenames=None, collections=None, file_ids=None, limit
     return result
 
 
-async def resolve_database_keywords(query, filenames=None, collections=None, include_descendants=True):
-    result = await _resolve(query, filenames, collections, include_descendants=include_descendants)
+async def resolve_database_keywords(query, filenames=None, collections=None, include_descendants=True, limit=20):
+    result = await _resolve(query, filenames, collections, include_descendants=include_descendants, limit=limit)
     return {"keywords": result.get("final_keywords", []), "confidence_scores": result.get("confidence_scores", {}),
+            "candidates": await run_sync(_candidates, result, limit),
             "stats": result.get("stats", {}), "debug_stats": result.get("debug_stats", {})}
 
 
 def _candidates(result, limit):
-    candidates = []
+    hits = result.get("fused_results", [])[:limit]
     scope = result.get("file_ids")
+    if not hits or scope == []:
+        return []
+    params = [hit["chunk_id"] for hit in hits]
+    where = f"c.id IN ({','.join('?' for _ in params)})"
+    if scope is not None:
+        where += f" AND c.file_id IN ({','.join('?' for _ in scope)})"
+        params.extend(scope)
     with get_db_cursor() as cursor:
-        for title in result.get("final_keywords", []):
-            params = [title]
-            where = "c.doc_title = ?"
-            if scope is not None:
-                if not scope:
-                    break
-                where += f" AND c.file_id IN ({','.join('?' for _ in scope)})"
-                params.extend(scope)
-            cursor.execute(
-                f"SELECT c.id AS chunk_id,c.file_id,c.doc_title,c.heading_path,f.filename FROM chunks c "
-                f"JOIN files f ON f.id=c.file_id WHERE {where} ORDER BY c.id LIMIT ?",
-                (*params, limit - len(candidates)),
-            )
-            for row in cursor.fetchall():
-                item = dict(row)
-                item["score"] = result["confidence_scores"].get(title, 0)
-                item["page_number"] = page_number_from_heading(item["heading_path"])
-                candidates.append(item)
-            if len(candidates) >= limit:
-                break
+        cursor.execute(
+            "SELECT c.id AS chunk_id,c.file_id,c.doc_title,c.heading_path,f.filename FROM chunks c "
+            f"JOIN files f ON f.id=c.file_id WHERE {where}", params,
+        )
+        rows = {row["chunk_id"]: dict(row) for row in cursor.fetchall()}
+    candidates = []
+    for hit in hits:
+        item = rows.get(hit["chunk_id"])
+        if item is None:
+            continue  # 查询过程中删除的卡片不能用同名卡片替代。
+        item["score"] = round(hit["rrf_score"] * (config.rrf_k + 1), 4)
+        item["page_number"] = page_number_from_heading(item["heading_path"])
+        candidates.append(item)
     return candidates
 
 

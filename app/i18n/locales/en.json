@@ -124,7 +124,7 @@
     "uncertain": "Response not confirmed. Original request key {request_key} and submitted content are retained. Save again to query it first. Edited fields will not replace that request.",
     "delete_preview": "Deletion impact preview",
     "impact_count": "{kind}: {count}",
-    "delete_scope": "Confirmation removes the listed edges, evidence and online content history. It does not delete original files or alter backups. Changed scope requires a new preview.",
+    "delete_scope": "Confirmation follows the previewed scope; changed scope requires a new preview. Original files and backups are not touched.",
     "delete_conflict": "Deletion not completed ({code}). Cancel, reload and preview again; stale confirmation will not be used.",
     "confirm_delete": "Confirm the previewed deletion",
     "cancel": "Cancel",
@@ -153,7 +153,25 @@
     "reading": "Reading mode",
     "return_file": "Back to original file",
     "return_knowledge": "Back to knowledge page",
-    "saved_unread": "Committed, but the target could not be read back; another caller may have deleted it. Check the returned ID rather than creating a duplicate."
+    "saved_unread": "Committed, but the target could not be read back; another caller may have deleted it. Check the returned ID rather than creating a duplicate.",
+    "page": "Wiki page",
+    "open_page": "Open owning page",
+    "target_page": "Target page",
+    "partial_saved": "Committed, but {count} item(s) did not finish; index status: {index}. Check the returned IDs.",
+    "index_fresh": "Index up to date",
+    "index_stale": "File written, index needs rebuild",
+    "index_missing": "Index missing",
+    "index_unknown": "Index status unknown",
+    "references_wiki": "Wiki references",
+    "references_graph": "Graph references",
+    "lint_WIKI_BROKEN_LINK": "A Wiki internal link points to a missing page.",
+    "lint_WIKI_ORPHAN_PAGE": "Page has no incoming links; may be unreferenced (informational).",
+    "delete_retains_history": "Online revision history is retained and remains readable after deletion.",
+    "delete_clears_history": "Clears this record's own online revision history.",
+    "index_current": "Index up to date",
+    "index_failed": "Index update failed",
+    "affected_backlinks": "Affected backlinks",
+    "delete_local_recovery": "The replaced Markdown is kept as a local recovery copy (.wiki-recovery-*.bak); this is not complete erasure."
   },
   "sidebar": {
     "knowledge": "Knowledge",
@@ -164,7 +182,9 @@
     "skills": "Skill Export",
     "logs": "Logs",
     "settings": "Settings",
-    "cloud_sync_dev": "Cloud sync is under development"
+    "cloud_sync_dev": "Cloud sync is under development",
+    "wiki": "Wiki",
+    "graph": "Knowledge graph"
   },
   "stats": {
     "loading": "Loading...",
@@ -654,5 +674,32 @@
     "doc_missing": "Content no longer exists (the card may have just been deleted)",
     "chunk_position": "Card {index}/{total}",
     "toggle_view": "Toggle rendered / raw text"
+  },
+  "wiki": {
+    "heading": "Wiki pages",
+    "outgoing_links": "Linked pages",
+    "backlinks": "Pages linking here",
+    "intro": "Read and maintain Markdown pages; page links come from the body and never enter the knowledge graph.",
+    "choose_page": "Choose a Wiki page on the left to start reading.",
+    "rebuild_index": "Rebuild page index",
+    "rebuild_intro": "Rebuild search and link indexes from Markdown files only; never rewrite the body or call models.",
+    "rebuild_done": "Page index rebuilt from Markdown.",
+    "return": "Back to Wiki",
+    "link_missing": "Link target missing",
+    "lint_INDEX_STALE": "Page content changed; derived index needs a rebuild.",
+    "lint_FILE_MISSING_OR_INVALID": "The Markdown file behind the index is missing or unreadable.",
+    "lint_DUPLICATE_PAGE_ID": "Multiple files declare the same page identity; the true source is not guessed.",
+    "lint_DUPLICATE_EVIDENCE_ID": "An evidence identity is duplicated across pages."
+  },
+  "graph": {
+    "heading": "Knowledge graph",
+    "objects": "Entities",
+    "intro": "Maintain entities, semantic relations and evidence independently; graph nodes have no Wiki body.",
+    "choose_node": "Choose a graph node on the left to read its relations and evidence.",
+    "create": "New graph node",
+    "return": "Back to graph",
+    "rebuild_index": "Rebuild query index",
+    "rebuild_intro": "Rebuild the query index from existing entities, relations and evidence only; it never rewrites knowledge or history and never calls models.",
+    "rebuild_done": "Graph query index rebuilt."
   }
 }

@@ -99,11 +99,13 @@ MCP 可以理解为 AI 访问知识库的连接方式。打开 Piece 的 **MCP �
 
 **方式二：Skill 导出**
 
-如果你的 AI 能运行本机命令行，也可以在 **Skill 导出** 页面导出并安装工作流：`piece-search` 用于查资料，`piece-index` 用于导入和整理资料，`piece-wiki` 用于按需保存、更新和核查知识页及证据关系。移动程序或更换数据目录后，请重新导出。
+如果你的 AI 能运行本机命令行，也可以在 **Skill 导出** 页面导出并安装工作流：`piece-search` 用于查资料，`piece-index` 用于导入和整理资料，`piece-wiki` 用于编译和维护 Markdown 页面，`piece-graph` 用于维护图实体、语义关系和证据。移动程序或更换数据目录后，请重新导出。
 
-在 **知识库** 页面阅读、搜索和人工维护知识页，通过局部图谱或关系表格查看关联，再沿证据回到来源卡片和原页；**待核查** 提供只读结构检查。知识页也可通过 `piece wiki` CLI 或两个现有 MCP 服务读写。
+**Wiki** 提供页面搜索、正文、引用、页面链接与历史；**知识图谱** 提供实体、关系表格、有界邻域和证据核查。分别使用 `piece wiki`、`piece graph` CLI，也可通过现有两个 MCP 服务读写。两边身份与生命周期独立，页面链接不是语义关系，同名不会自动关联，搜索不会跨功能合并。
 
-上传资料不会自动生成知识页，知识操作不会调用模型或嵌入接口。删除来源文件会保留知识对象和引用快照，并把来源标记为缺失；“引用与当前来源一致”不代表事实已验证。
+Wiki 正文及元数据保存在配置 `data_path` 下的 `wiki/` Markdown 文件中；SQLite 只保留可重建的页面索引和独立审计。页面内链使用 `[标题](piece://wiki/页面UUID)`，改标题或文件名不改变身份。外部编辑后显式运行 `piece wiki rebuild-index` 刷新索引，不会重写 MD 或调用模型。
+
+上传资料不会自动生成 Wiki 或图谱。删除来源文件会保留页面、图实体和各自引用快照，并把来源标记为缺失；“引用与当前来源一致”不代表事实已验证。
 
 知识页的证据要求逐字引用原文，含公式、表格的长文本手抄极易出错。Agent 可用 `piece chunk extract` 从卡片正文按行号或匹配切出精确子串，直接得到可提交的证据（CLI、两个 MCP 服务均提供；MCP 中为索引服务的 `extract_quote` 与检索服务的 `extract-quote`）。
 
@@ -113,12 +115,14 @@ MCP 可以理解为 AI 访问知识库的连接方式。打开 Piece 的 **MCP �
 
 ```bash
 piece chunk extract CHUNK_ID --lines 2-3 --out evidence.json
-piece wiki object add --kind concept --title "增量维护" \
+piece wiki page add --kind concept --title "增量维护" \
   --summary "只修改明确变化的内容" \
   --evidence-file evidence.json --request-file object-request.json
 ```
 
-更新用 `wiki object update UUID --expected-revision N`，关系用 `wiki relation add/update`；每次新操作使用新的请求文件，已有对象仅按 UUID 定位。
+页面更新用 `wiki page update UUID --expected-revision N --expected-content-hash HASH`，哈希从最新读回取得，不能只改版本号绕过外部修改冲突。图实体用 `graph object add/update`，关系用 `graph relation add/update`；每次新操作使用新的请求文件，已有记录仅按各自 UUID 定位。
+
+图谱批次在 SQLite 事务内提交；Wiki 批次按页面写入，可能部分成功。检查 `partial`、`errors` 和 `index_status`；文件已保存但索引失败时保留文件并显式重建索引，不重新生成或覆盖正文。
 
 `--request-file` 保存本次操作的完整正文、证据和自动生成的请求键；文件已存在时只有目标与内容都相同才允许复用，绝不覆盖。`--dry-run` 只预检但同样写这份文件，确认后可原样正式提交：
 
@@ -157,7 +161,7 @@ Piece 负责提供资料，聊天和回答仍在你常用的 AI 客户端中进�
 
 **数据在哪里，怎么备份？**
 
-Windows 解压版默认保存在程序旁的 `data/` 文件夹。升级或搬家前，先完全退出 Piece，再备份该文件夹；如果改过存储位置，也要备份对应的数据目录。
+Windows 解压版默认保存在程序旁的 `data/` 文件夹。升级或搬家前，先完全退出 Piece，再备份该文件夹；如果改过存储位置，也要备份对应的数据目录。必须同时备份 `wiki/` Markdown 文件与 SQLite 数据库（图谱、Wiki 审计历史及资料元数据），不能只复制数据库。删除 Wiki 页面会保留审计历史与 `.wiki-recovery-*.bak` 本地恢复副本；这些副本也应纳入备份。本地请求文件与外部备份不会随在线删除清除，在线删除不是彻底擦除。
 
 **能在多台电脑间同步吗？**
 

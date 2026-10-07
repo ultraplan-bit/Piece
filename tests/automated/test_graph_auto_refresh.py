@@ -1,4 +1,4 @@
-"""知识页自动更新：外部写入、只读差异刷新、分页及迟到请求。"""
+"""图谱自动更新：外部写入、只读差异刷新、分页及迟到请求。"""
 import asyncio
 from copy import deepcopy
 from types import SimpleNamespace
@@ -22,20 +22,20 @@ def remove(kind, ident, revision=None):
 
 
 def workbench():
-    from app.ui.views.knowledge_view import KnowledgeWorkbench
-    view = KnowledgeWorkbench()
+    from app.ui.views.graph_view import GraphWorkbench
+    view = GraphWorkbench()
     view.refresh_list = Mock()
     view.refresh_detail = Mock()
     return view
 
 
-def test_external_changes_update_list_detail_links_and_evidence_only_when_changed(knowledge_base):
+def test_external_changes_update_list_detail_relations_and_evidence_only_when_changed(knowledge_base):
     view = workbench()
 
     async def scenario():
         await view.poll()
         assert view.results["total"] == 0
-        result = apply(objects=[{"ref": "a", "kind": "topic", "title": "外部知识", "body": "旧正文"}])
+        result = apply(objects=[{"ref": "a", "kind": "concept", "title": "外部节点", "summary": "旧摘要"}])
         oid = result["refs"]["a"]["id"]
         await view.poll()
         assert view.results["objects"][0]["id"] == oid
@@ -49,9 +49,9 @@ def test_external_changes_update_list_detail_links_and_evidence_only_when_change
         area = SimpleNamespace(is_deleted=False, scroll_to=Mock())
         view._scroll_areas["detail"] = area
         view._scroll_positions["detail"] = 240
-        apply(objects=[{"id": oid, "expected_revision": 1, "body": "外部更新正文"}])
+        apply(objects=[{"id": oid, "expected_revision": 1, "summary": "外部更新摘要"}])
         await view.poll()
-        assert view.detail["record"]["body"] == "外部更新正文"
+        assert view.detail["record"]["summary"] == "外部更新摘要"
         assert view.detail["record"]["revision"] == 2
         area.scroll_to.assert_called_with(pixels=240)
 
@@ -60,10 +60,11 @@ def test_external_changes_update_list_detail_links_and_evidence_only_when_change
         await view.poll()
         assert view.detail["record"]["revision"] == 2
         assert view.detail["evidence"]["total"] == 1
-        linked = apply(objects=[{"ref": "b", "kind": "entity", "title": "关联页"}],
-                       links=[{"source": {"id": oid}, "target": {"ref": "b"}}])
+        linked = apply(objects=[{"ref": "b", "kind": "entity", "title": "关联节点"}],
+                       relations=[{"ref": "r", "source": {"id": oid}, "target": {"ref": "b"},
+                                   "predicate": "related_to", "description": "外部关系", "basis": "inference"}])
         await view.poll()
-        assert view.page_links["edges"][0]["id"] == linked["links"][0]["id"]
+        assert view.local_relations["edges"][0]["id"] == linked["relations"][0]["id"]
         remove("evidence", evidence["evidence"][0]["id"])
         await view.poll()
         assert view.detail["evidence"]["total"] == 0
@@ -82,7 +83,7 @@ def test_source_changes_are_detected_without_a_knowledge_revision(knowledge_base
     knowledge_base.drain()
     chunk = file_service.get_chunks_paginated(fid)["chunks"][0]
     library = service.list_objects()["library_id"]
-    result = apply(objects=[{"ref": "a", "kind": "concept", "title": "引用知识"}], evidence=[{
+    result = apply(objects=[{"ref": "a", "kind": "concept", "title": "引用节点"}], evidence=[{
         "object": {"ref": "a"}, "source_kind": "piece", "source_library_id": library,
         "source_file_id": fid, "source_chunk_id": chunk["id"], "quote": "原始引文"}])
     view = workbench()
@@ -121,7 +122,7 @@ def test_poll_preserves_applied_filters_and_moves_off_deleted_last_page(knowledg
 
 
 def test_late_poll_cannot_overwrite_a_new_search_or_overlap(knowledge_base, monkeypatch):
-    from app.ui.views import knowledge_view
+    from app.ui.views import graph_view
     apply(objects=[{"ref": "a", "kind": "entity", "title": "新查询"}])
     view = workbench()
 
@@ -136,7 +137,7 @@ def test_late_poll_cannot_overwrite_a_new_search_or_overlap(knowledge_base, monk
                 await release.wait()
             return function(**kwargs)
 
-        monkeypatch.setattr(knowledge_view.run, "io_bound", io_bound)
+        monkeypatch.setattr(graph_view.run, "io_bound", io_bound)
         old = asyncio.create_task(view.poll())
         await entered.wait()
         await view.poll()
@@ -153,8 +154,8 @@ def test_late_poll_cannot_overwrite_a_new_search_or_overlap(knowledge_base, monk
 
 
 def test_late_detail_cannot_overwrite_selection(knowledge_base, monkeypatch):
-    from app.ui.views import knowledge_view
-    result = apply(objects=[{"ref": ref, "kind": "topic", "title": ref} for ref in ("a", "b")])
+    from app.ui.views import graph_view
+    result = apply(objects=[{"ref": ref, "kind": "concept", "title": ref} for ref in ("a", "b")])
     a, b = (result["refs"][ref]["id"] for ref in ("a", "b"))
     view = workbench()
 
@@ -168,7 +169,7 @@ def test_late_detail_cannot_overwrite_selection(knowledge_base, monkeypatch):
                 await release.wait()
             return function(**kwargs)
 
-        monkeypatch.setattr(knowledge_view.run, "io_bound", io_bound)
+        monkeypatch.setattr(graph_view.run, "io_bound", io_bound)
         old = asyncio.create_task(view.poll())
         await entered.wait()
         await view.select("object", b)
@@ -181,7 +182,7 @@ def test_late_detail_cannot_overwrite_selection(knowledge_base, monkeypatch):
 
 
 def test_failed_poll_keeps_data_and_stopped_view_does_not_query(knowledge_base, monkeypatch):
-    from app.ui.views import knowledge_view
+    from app.ui.views import graph_view
     view = workbench()
     asyncio.run(view.poll())
     previous = view.results
@@ -189,11 +190,11 @@ def test_failed_poll_keeps_data_and_stopped_view_does_not_query(knowledge_base, 
     async def fail(*args, **kwargs):
         raise RuntimeError("temporary read failure")
 
-    original = knowledge_view.run.io_bound
-    monkeypatch.setattr(knowledge_view.run, "io_bound", fail)
+    original = graph_view.run.io_bound
+    monkeypatch.setattr(graph_view.run, "io_bound", fail)
     asyncio.run(view.poll())
     assert view.results is previous and not view._polling
-    monkeypatch.setattr(knowledge_view.run, "io_bound", original)
+    monkeypatch.setattr(graph_view.run, "io_bound", original)
     apply(objects=[{"ref": "new", "kind": "concept", "title": "恢复后可见"}])
     view._poll_timer = SimpleNamespace(is_deleted=True)
     asyncio.run(view.poll())

@@ -26,15 +26,21 @@ import re
 from app.platform import load_sqlite_vec as _load_sqlite_vec
 from .settings import get_settings, get_vector_dim
 from . import knowledge_schema
+from .fts import tokenize_fts_text
 
 logger = logging.getLogger(__name__)
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 # 全局连接池（线程安全）
 _connection_pool = None
 _pool_lock = threading.Lock()
 _pool_size = 10  # 连接池大小
 _write_lock = threading.Lock()
+
+
+def register_sqlite_functions(conn: sqlite3.Connection) -> None:
+    """所有写连接均需注册；独立 SQLite 调用者也可复用，不能绕过分词触发器。"""
+    conn.create_function("piece_tokenize", 1, tokenize_fts_text, deterministic=True)
 
 
 class ConnectionPool:
@@ -86,18 +92,19 @@ class ConnectionPool:
 
         # 启用 WAL 模式
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=FULL")
         conn.execute("PRAGMA busy_timeout=5000")
 
         # 启用外键约束
         conn.execute("PRAGMA foreign_keys=ON")
 
-        # 性能优化
-        conn.execute("PRAGMA synchronous=NORMAL")
+        # 性能优化（同步级别保留 FULL，保证 Wiki 写文件前审计意向断电持久）
         conn.execute("PRAGMA cache_size=-64000")  # 64MB 缓存
         conn.execute("PRAGMA temp_store=MEMORY")
 
         # 加载 sqlite-vec 扩展
         _load_sqlite_vec(conn)
+        register_sqlite_functions(conn)
 
         return conn
 
@@ -258,7 +265,7 @@ def init_database(db_path: Path = None) -> None:
         if (tables and version != SCHEMA_VERSION) or version not in (0, SCHEMA_VERSION):
             raise RuntimeError(
                 f"知识库结构不受支持（schema={version}）：{db_path}。"
-                "本版本仅支持新库；请停止服务后检查并显式选择空数据目录，程序不会删除或迁移此库。"
+                "本版本仅支持新库；请停止服务后自行清理旧库或选择空数据目录，程序不会删除或迁移此库。"
             )
         if version == SCHEMA_VERSION:
             required_objects = {
@@ -290,6 +297,7 @@ def init_database(db_path: Path = None) -> None:
             knowledge_schema.validate_identity(conn)
         # 启用 WAL 模式
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=FULL")
         conn.execute("PRAGMA busy_timeout=5000")
 
         # 启用外键约束
@@ -297,6 +305,9 @@ def init_database(db_path: Path = None) -> None:
 
         # 加载 sqlite-vec 扩展
         _load_sqlite_vec(conn)
+        register_sqlite_functions(conn)
+        # 建表与版本号同一事务提交，避免留下不完整的新库。
+        conn.execute("BEGIN IMMEDIATE")
         # 1. 创建 files 表（母表：文件物理元数据）
         # 主表记录工作文件（working/），新增字段记录原始文件（originals/）
         conn.execute(
@@ -348,53 +359,42 @@ def init_database(db_path: Path = None) -> None:
             "CREATE INDEX IF NOT EXISTS idx_chunk_order ON chunks(file_id, chunk_index)"
         )
 
-        # 5. 创建 FTS5 虚拟表（全文检索 chunk_text 和 doc_title）
+        # 5. FTS 独立存储分词文本，原文始终从 chunks 读取。
+        # 原生 rebuild 也只使用分词文本，不会重新索引未分词原文。
         conn.execute(
             """
             CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
-            USING fts5(
-                chunk_text,
-                doc_title,
-                content='chunks',
-                content_rowid='id',
-                tokenize='unicode61'
-            )
-        """
+            USING fts5(chunk_text, doc_title, tokenize='unicode61')
+            """
         )
 
-        # 6. 创建触发器：chunks 表插入时同步到 FTS5
+        # 6–8. 在数据库边界同步，覆盖普通写入、批量发布和级联删除。
         conn.execute(
             """
             CREATE TRIGGER IF NOT EXISTS chunks_ai
             AFTER INSERT ON chunks BEGIN
                 INSERT INTO chunks_fts(rowid, chunk_text, doc_title)
-                VALUES (new.id, new.chunk_text, new.doc_title);
+                VALUES (new.id, piece_tokenize(new.chunk_text), piece_tokenize(new.doc_title));
             END
-        """
+            """
         )
-
-        # 7. 创建触发器：chunks 表删除时同步到 FTS5
         conn.execute(
             """
             CREATE TRIGGER IF NOT EXISTS chunks_ad
             AFTER DELETE ON chunks BEGIN
-                INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, doc_title)
-                VALUES ('delete', old.id, old.chunk_text, old.doc_title);
+                DELETE FROM chunks_fts WHERE rowid = old.id;
             END
-        """
+            """
         )
-
-        # 8. 创建触发器：chunks 表更新时同步到 FTS5
         conn.execute(
             """
             CREATE TRIGGER IF NOT EXISTS chunks_au
-            AFTER UPDATE ON chunks BEGIN
-                INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, doc_title)
-                VALUES ('delete', old.id, old.chunk_text, old.doc_title);
+            AFTER UPDATE OF id, chunk_text, doc_title ON chunks BEGIN
+                DELETE FROM chunks_fts WHERE rowid = old.id;
                 INSERT INTO chunks_fts(rowid, chunk_text, doc_title)
-                VALUES (new.id, new.chunk_text, new.doc_title);
+                VALUES (new.id, piece_tokenize(new.chunk_text), piece_tokenize(new.doc_title));
             END
-        """
+            """
         )
 
         # 9. 创建 vec0 虚拟表（向量检索）
@@ -495,7 +495,7 @@ def init_database(db_path: Path = None) -> None:
             "ON file_collections(collection_id)"
         )
 
-        if version != SCHEMA_VERSION:
+        if version == 0:
             knowledge_schema.create_schema(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.commit()

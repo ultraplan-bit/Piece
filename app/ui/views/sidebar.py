@@ -51,7 +51,8 @@ def render_sidebar(
     ui_refs: dict,
     state: dict,
     file_handlers,
-    switch_to_knowledge: Callable | None = None,
+    switch_to_wiki: Callable | None = None,
+    switch_to_graph: Callable | None = None,
 ):
     navigation = [
         ("files", "folder", switch_to_files),
@@ -63,8 +64,11 @@ def render_sidebar(
         ("settings", "settings", switch_to_settings),
     ]
 
-    if switch_to_knowledge:
-        navigation.insert(1, ("knowledge", "auto_stories", switch_to_knowledge))
+    # Wiki 与知识图谱是两个独立功能，各自有导航入口，不共用同一个知识视图。
+    if switch_to_graph:
+        navigation.insert(1, ("graph", "hub", switch_to_graph))
+    if switch_to_wiki:
+        navigation.insert(1, ("wiki", "menu_book", switch_to_wiki))
 
     @ui.refreshable
     def sidebar_nav():

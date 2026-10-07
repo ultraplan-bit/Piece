@@ -21,9 +21,13 @@ def test_right_panel_layout(gui_service):
             expect(page.get_by_role("button", name='Collapse "文件库"', exact=True)).to_be_visible()
             for width in (1440, 850):
                 page.set_viewport_size({"width": width, "height": 900})
-                for view in ("文件库", "知识库", "设置", "MCP 配置", "Skill 导出", "召回测试", "云同步", "日志"):
+                for view in ("文件库", "Wiki", "知识图谱", "设置", "MCP 配置", "Skill 导出", "召回测试", "云同步", "日志"):
                     heading = page.get_by_role("button", name=f'Collapse "{view}"', exact=True, include_hidden=True)
                     if heading.count() == 0:
+                        navigation_width = page.locator(".workspace-splitter").first.locator(
+                            ":scope > .q-splitter__before").evaluate("el => el.clientWidth")
+                        if navigation_width == 0:
+                            page.get_by_role("button", name="导航", exact=True).click()
                         page.get_by_role("button", name=view, exact=True).click()
                     expect(heading).to_have_count(1)
                     if view == "设置":
@@ -43,8 +47,6 @@ def test_right_panel_layout(gui_service):
                     assert abs(layout["right"] - layout["rightContent"]) <= 1, (view, width, layout)
                     assert abs(layout["height"] - layout["contentHeight"]) <= 1, (view, width, layout)
                     page.screenshot(path=str(service["path"] / f"layout-{width}-{view}.png"))
-                    if view == "知识库" and width < 1000:
-                        page.get_by_role("button", name="导航", exact=True).click()
             assert not errors, errors
         finally:
             page.screenshot(path=str(service["path"] / "right-final.png"))

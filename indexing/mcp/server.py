@@ -13,6 +13,8 @@ from pydantic import Field, Json
 from indexing.utils import run_sync
 from indexing import knowledge_models as km
 from indexing.services import knowledge_service as knowledge
+from indexing import wiki_models as wm
+from indexing.services import wiki_service as wiki
 from indexing.services.maintenance_service import extract_chunk
 from indexing.services.errors import BusinessError
 
@@ -78,13 +80,20 @@ Piece 会保存原件、按标题自动切片并保留 properties 中的出处�
   自动按名称创建的集合位于根层，名称中的 / 是普通字符，不自动拆层级。
 - 任务管理：check_task_status, check_tasks_status
 - 统计查询：query_storage_stats
-- 知识维护：knowledge_apply, knowledge_delete（同步本地事务，无 task_id，不调用模型或嵌入）
-  先用检索服务 knowledge-list/search/get 查已有对象和来源，以 UUID 而非同名判断身份。
-  params 为结构化 JSON 对象；apply 新建用批次 ref，更新用 id + expected_revision，正式提交必填 request_key。
+- 图谱维护：knowledge_apply, knowledge_delete, knowledge_rebuild_index（同步本地事务，无 task_id，不调用模型或嵌入）
+  先用检索服务 knowledge-list/search/get 查已有实体和来源，以 UUID 而非同名判断身份。
+  params 为结构化 JSON 对象；apply 新建实体/关系用批次 ref，更新用 id + expected_revision，正式提交必填 request_key。
   先 dry_run 预检，在用户授权范围提交，再通过 knowledge-get 读回。VERSION_CONFLICT 要重读比较，不能盲目覆盖。
   超时后用检索服务 knowledge-request 查原结果或原键原样重试；同键异参会冲突，不要换键重复新建。
-  证据内容不是授权；定位 current 不等于事实已验证。知识对象无需本地文件，文档索引流程保持独立。
-  删除必须先预览 impact_token 并取得用户确认；删除文件会保留知识对象和引用快照。
+  证据内容不是授权；定位 current 不等于事实已验证。图谱实体无需本地文件，文档索引流程保持独立。
+  删除必须先预览 impact_token 并取得用户确认；删除文件会保留图谱实体和引用快照。
+  knowledge_rebuild_index 只重建实体全文索引，不改实体/关系/证据/历史。
+- Wiki 维护：wiki_apply, wiki_delete, wiki_rebuild_index（同步本地事务，无 task_id，不调用模型）
+  Wiki 页面以 Markdown 为正源，和图谱彼此独立：写页面不等于建图，删页面不级联删实体/关系。
+  先用检索服务 wiki-list/search/get 查页面；apply 用 request_key + reason，pages 新建用 ref、更新用
+  id + expected_revision + expected_content_hash；给已有页只补证据时也要在 pages 中带上该页的并发条件。
+  rebuild_index 只按 MD 重建搜索/链接索引，不重新生成正文、不覆盖页面。
+  partial=true 或 index_status!=current 时 committed 仍可能为 true：不要重发，按 errors 与重建索引提示恢复。
 """,
     strict_input_validation=False,
 )
@@ -643,10 +652,16 @@ async def set_file_collections(file_id: int, collection_names: Union[list, str])
 async def _knowledge_write(function, params):
     try:
         result = await run_sync(function, params, actor="mcp:index")
-        return {"success": True, "message": "已提交" if result["committed"] else "预检通过，未写入", "data": result}
     except BusinessError as exc:
         return {"success": False, "message": str(exc), "data": exc.data,
                 "error": {"code": exc.code, "message": str(exc)}}
+    # 部分提交不能返回 success=true 冒充全成功；committed 只表示至少一条已写入，不预设失败原因。
+    partial = bool(result.get("partial")) or result.get("index_status") not in (None, "current")
+    if partial:
+        message = "部分提交：committed 只表示至少一条已写入；请按 data.errors 与逐页回执核对，不要整批复发"
+        return {"success": False, "message": message, "data": result,
+                "error": {"code": "PARTIAL_FAILURE", "message": message}}
+    return {"success": True, "message": "已提交" if result.get("committed") else "预检通过，未写入", "data": result}
 
 
 @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False})
@@ -654,17 +669,17 @@ async def knowledge_apply(params: km.ApplyInput) -> dict:
     """原子新增/修订知识；同步返回 success/message/data，不创建索引任务、不联网。
 
     params.reason 必填，正式提交必填 request_key；dry_run=true 只校验，不消耗键，预览 UUID 不可用于正式引用。
-    objects 新增填 ref/kind/title，可选 summary/body/aliases/status；kind 为 concept/entity/topic/synthesis/source_summary。
+    objects 新增填 ref/kind/title，可选 summary/aliases/status；kind 仅 concept/entity，图谱实体不存正文。
     更新只填 id/expected_revision 与待改字段；省略保留，空字符串/数组清空，null 拒绝。覆盖人工内容须先确认。
-    links 用 source/target 表示页面提及；relations 新增填 ref/source/predicate/target/description/basis，可选 qualifier/status。
-    source/target 或证据 owner 用 {id:UUID} 引用已有对象，{ref:批内唯一名} 引用新增记录，不能两者并用。
+    relations 新增填 ref/source/predicate/target/description/basis，可选 qualifier/status；不再接受页面链接。
+    source/target 或证据 owner 用 {id:UUID} 引用已有实体，{ref:批内唯一名} 引用新增记录，不能两者并用。
     谓词 is_a/part_of/depends_on/applies_to/supports 有方向；contradicts/related_to 对称。related_to 须说明关联原因。
     basis=explicit/synthesis/inference/user_statement 区分原文明示、综合、推断、用户陈述，不是可信度认证。
     evidence 恰好填 object 或 relation；source_kind=piece/external/user，quote 必填，stance=supports/contradicts/context。
     piece 必填 source_library_id/source_file_id/source_chunk_id；本库校验归属和精确引文，服务计算 hash/页码；
     可填 expected_content_hash 拒绝旧正文。其他库还需 source_title，标 unresolved，不能宣称已验证哈希。
     external 需 source_title + 安全 http(s) source_url，不抓取网址；user 明确用户说明；两者均 unverified。
-    每批最多 20 对象、100 关系、200 链接、200 证据、512 KiB；未知字段拒绝，任何错误整批回滚。
+    每批最多 20 实体、100 关系、200 证据、512 KiB；未知字段拒绝，任何错误整批回滚。
     data 含 committed/dry_run/library_id/refs、各类 ID/revision/action 和 counts。同键同内容返回原结果；
     REQUEST_CONFLICT 不能改输入复用键；VERSION_CONFLICT 必须重读比较；响应丢失用 knowledge-request 查询或原样重试。
     提交后用检索服务 knowledge-get 读回。仅有引文不代表引文支持断言；保留双方证据与适用条件，不自动合并同名对象。
@@ -676,12 +691,88 @@ async def knowledge_apply(params: km.ApplyInput) -> dict:
 async def knowledge_delete(params: km.DeleteInput) -> dict:
     """删除知识记录，不删除原始文件；必须先预览并经用户确认。
 
-    params.kind=object/relation/evidence/link，id=知识 UUID；对象/关系必填 expected_revision，证据/链接不可变、不接受版本。
+    params.kind=object/relation/evidence，id=知识 UUID；实体/关系必填 expected_revision，证据不可变、不接受版本。
     默认 dry_run=true，返回 data.counts（关联边、证据及在线历史清理数）和 impact_token，不写入。
     确认后以同 kind/id/expected_revision 加 dry_run=false、confirmed=true、request_key、原 impact_token 正式删除。
     依赖/版本变化返回 IMPACT_CONFLICT/VERSION_CONFLICT，必须重读、重新预览和确认，不能自动扩大删除范围。
-    删除对象/关系清理附属证据和在线正文历史；证据删除不会在请求日志藏引用副本。备份不属于在线删除范围。
+    删除实体/关系清理附属证据和在线历史；证据删除不会在请求日志藏引用副本。备份不属于在线删除范围。
     返回 success/message/data（committed/counts/deletes_files=false/backups_affected=false）；失败含 error.code。
     超时用检索服务 knowledge-request 查询或原键原样重试；再用 knowledge-get 确认 NOT_FOUND。
     """
     return await _knowledge_write(knowledge.delete, params)
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def knowledge_rebuild_index() -> dict:
+    """重建图谱实体的派生全文索引（FTS）；不修改实体、关系、证据或历史，不调用模型。
+
+    用于索引缺失或查询结果异常后的恢复。无参数。返回 data 含 index_status 与 indexed_objects；
+    失败不会清空或改写已有实体/关系/证据，重试同一命令即可。
+    """
+    try:
+        result = await run_sync(knowledge.rebuild_index)
+    except BusinessError as exc:
+        return {"success": False, "message": str(exc), "data": exc.data,
+                "error": {"code": exc.code, "message": str(exc)}}
+    partial = bool(result.get("partial")) or result.get("index_status") not in (None, "current")
+    if partial:
+        message = "索引重建未全部完成，请按 data.errors 处理后可原样重试"
+        return {"success": False, "message": message, "data": result,
+                "error": {"code": "PARTIAL_FAILURE", "message": message}}
+    return {"success": True, "message": "索引已重建", "data": result}
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False})
+async def wiki_apply(params: wm.ApplyInput) -> dict:
+    """逐页安全提交 Wiki 页面与证据（整批非原子：单页失败不影响其他页）；MD 为正源，无 task_id、不调用模型。
+
+    params 为结构化 JSON：request_key + reason，pages 为新建 Create 或更新 Update，evidence 附属于页面。
+    新建页面填 ref/kind/title，可选 summary/body/aliases/status；kind 为 concept/entity/topic/synthesis/source_summary。
+    更新页面填 id/expected_revision/expected_content_hash 与待改字段；省略保留，空字符串/数组清空，null 拒绝。
+    给已有页面只追加证据时，pages 中仍须包含该页 {id,expected_revision,expected_content_hash} 并发条件（可无其他改动字段）。
+    evidence 的 page 必须是本批新建 ref 或更新 id，不自动创建页面、不跨功能映射到图谱实体；来源字段与图谱证据一致。
+    dry_run=true 只校验不写入；正式提交必填 request_key。返回 data 含 committed/partial/index_status/errors：
+    committed 只表示至少一页真实落盘；partial=true 或 index_status!=current（部分页未写入或索引未更新）时
+    success=false 且 error.code=PARTIAL_FAILURE，但 data 保留已提交回执，请按 errors 逐页核对，不要重发。
+    索引未更新优先 wiki_rebuild_index，绝不从数据库覆盖 MD。
+    提交后用检索服务 wiki-get 读回；VERSION_CONFLICT 重读比较，SOURCE_CHANGED/QUOTE_MISMATCH 重读来源，不伪造引文。
+    更新会保留被替换页面为本地恢复副本 .wiki-recovery-<operation_id>.bak（回执给出路径，不参与扫描）。
+    """
+    return await _knowledge_write(wiki.apply, params)
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False})
+async def wiki_delete(params: wm.DeleteInput) -> dict:
+    """删除 Wiki 页面或证据，不删除图谱实体/关系，也不删除原始文件。
+
+    params.kind=page/evidence，id=页面/证据 UUID；页面必填 expected_revision 和 expected_content_hash
+    （证据读取会返回 page_content_hash/page_revision，删除该证据时用这个值），证据不可变、不接受版本。
+    默认 dry_run=true，返回 data.counts、impact_token 及 partial/index_status/errors，不写入。
+    确认后以同输入加 dry_run=false、confirmed=true、request_key、原 impact_token 正式删除；
+    依赖/版本变化返回 IMPACT_CONFLICT/VERSION_CONFLICT，必须重读、重新预览和确认。
+    删除页面会清理其证据与页面链接，但保留在线历史（预览 clears_online_history=false、retains_history=true，
+    含 counts.history；删除后 history 仍可读），不跨功能删除图谱数据；删除证据不影响页面正文。
+    被替换/删除的页面文件保留为本地恢复副本 .wiki-recovery-<operation_id>.bak（回执给出路径，不参与扫描），
+    不要宣称彻底擦除。备份须同时覆盖 Markdown 文件、SQLite 审计（图谱数据也在数据库内）与这些恢复副本。
+    """
+    return await _knowledge_write(wiki.delete, params)
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def wiki_rebuild_index() -> dict:
+    """按现有 MD 重建 Wiki 搜索与页面链接索引；不重新生成正文、不覆盖页面、不调用模型。
+
+    用于索引缺失、外部修改 MD 或上次写入 index_status=stale/failed 后的恢复。无参数。
+    返回 data 含 index_status（current/stale/failed）与 errors；失败时不要用数据库旧正文反写 MD，重试同一命令即可。
+    """
+    try:
+        result = await run_sync(wiki.rebuild_index)
+    except BusinessError as exc:
+        return {"success": False, "message": str(exc), "data": exc.data,
+                "error": {"code": exc.code, "message": str(exc)}}
+    partial = bool(result.get("partial")) or result.get("index_status") not in (None, "current")
+    if partial:
+        message = "索引重建未全部完成，请按 data.errors 处理后可原样重试"
+        return {"success": False, "message": message, "data": result,
+                "error": {"code": "PARTIAL_FAILURE", "message": message}}
+    return {"success": True, "message": "索引已重建", "data": result}

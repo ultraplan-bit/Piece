@@ -218,7 +218,10 @@ def create_api(runtime):
     from indexing.services import collection_service as collections, metadata_service
     from indexing.services import config_service, maintenance_service as maintenance, zotero_service
     from indexing.services import knowledge_service as knowledge
+    from indexing.services import knowledge_common
     from indexing import knowledge_models as km
+    from indexing.services import wiki_service as wiki
+    from indexing import wiki_models as wm
     from retrieval.service import search
     from app.logging_config import get_log_buffer
 
@@ -254,11 +257,16 @@ def create_api(runtime):
             data["library_id"] = await run_sync(knowledge.library_id)
         return envelope(data)
 
+    # 图谱与 Wiki 的 apply 共用 512 KiB 批次上限（服务端 knowledge_common._check_size）；
+    # Wiki 单页 8 MiB 只是文件存储上限，不改变批次 JSON 大小限制。
+    apply_limits = {"knowledge/apply": knowledge_common.MAX_REQUEST_BYTES,
+                    "wiki/apply": knowledge_common.MAX_REQUEST_BYTES}
+
     def register(operation, role, schema, function, *, exclude_unset=False):
         async def endpoint(request: Request):
             _require_role(request, role)
             try:
-                limit = min(MAX_JSON_BYTES, knowledge.MAX_REQUEST_BYTES) if operation == "knowledge/apply" else MAX_JSON_BYTES
+                limit = min(MAX_JSON_BYTES, apply_limits[operation]) if operation in apply_limits else MAX_JSON_BYTES
                 payload = schema.model_validate(await _json_body(request, limit)).model_dump(exclude_unset=exclude_unset)
             except ValidationError as exc:
                 fields = [".".join(map(str, e["loc"])) for e in exc.errors(include_input=False)]
@@ -276,6 +284,9 @@ def create_api(runtime):
                     return envelope(data, "部分任务不存在，不要继续轮询缺失的 ID", code="NOT_FOUND")
                 if data.get("task_ids"):
                     return envelope(data, "已受理，尚未完成；请查询任务状态")
+                if data.get("partial") or data.get("index_status") in {"stale", "failed"}:
+                    # 部分提交或索引未更新：committed 只表示至少一条已写入，不预设失败原因，逐页回执以 errors 为准。
+                    return envelope(data, data.get("message", "部分提交：committed 只表示至少一条已写入，请按 errors 与逐页回执核对，不要整批重发"), code="PARTIAL_FAILURE")
             return envelope(data)
         app.add_api_route(f"/api/v1/{operation}", endpoint, methods=["POST"], name=operation)
 
@@ -409,6 +420,22 @@ def create_api(runtime):
              lambda **payload: knowledge.apply(payload, actor="api:write"), exclude_unset=True)
     register("knowledge/delete", "write", km.DeleteInput,
              lambda **payload: knowledge.delete(payload, actor="api:write"))
+    # 只重建图谱 FTS 查询索引，不改实体/关系/证据/历史；仍需写权限。
+    register("knowledge/rebuild-index", "write", empty, knowledge.rebuild_index)
+    # Wiki 页面以 Markdown 为正源，独立于知识图谱；读写角色与图谱一致。
+    register("wiki/list", "read", wm.ListInput, wiki.list_pages)
+    register("wiki/search", "read", wm.SearchInput, wiki.search_pages)
+    register("wiki/get", "read", wm.GetInput, wiki.get_record)
+    register("wiki/references", "read", wm.ReferencesInput, wiki.references)
+    register("wiki/lint", "read", wm.LintInput, wiki.lint)
+    register("wiki/history", "read", wm.HistoryInput, wiki.history)
+    register("wiki/request", "read", wm.RequestInput, wiki.request_result)
+    register("wiki/apply", "write", wm.ApplyInput,
+             lambda **payload: wiki.apply(payload, actor="api:write"), exclude_unset=True)
+    register("wiki/delete", "write", wm.DeleteInput,
+             lambda **payload: wiki.delete(payload, actor="api:write"))
+    # 重建派生索引只刷新搜索/链接索引，不重新生成正文；仍需写权限，读凭据不得触发。
+    register("wiki/rebuild-index", "write", empty, wiki.rebuild_index)
     register("config/show", "admin", empty, config_service.show_config)
     register("config/update", "admin", _model("ConfigPatch", patch=(dict[str, Any], ...)), config_service.update_config)
     register("config/test", "admin", _model("ConfigTest", component=(Literal["embedding", "ocr", "office", "webdav"], ...)), config_service.test_config)

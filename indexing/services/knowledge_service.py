@@ -2,88 +2,24 @@
 
 import hashlib
 import json
-import re
-import sqlite3
-from urllib.parse import urlsplit
 from uuid import uuid4
 
-from pydantic import ValidationError
 
 from ..database import get_db_cursor
 from .. import knowledge_models as models
 from .errors import BusinessError
-from .page_render import page_number_from_heading
 from .task_service import serialized_mutation
 
-MAX_REQUEST_BYTES = 512 * 1024
+from .knowledge_common import (
+    _json, _digest, _validate, _check_size, _library_id, library_id,
+    content_hash, normalize_newlines, source_values, evidence_states as _evidence_states,
+)
 TABLES = {"object": "knowledge_objects", "relation": "knowledge_relations",
-          "link": "knowledge_links", "evidence": "knowledge_evidence"}
+          "evidence": "knowledge_evidence"}
 SYMMETRIC = {"related_to", "contradicts"}
-OBJECT_FIELDS = ("kind", "title", "summary", "body", "aliases", "status")
+OBJECT_FIELDS = ("kind", "title", "summary", "aliases", "status")
 RELATION_FIELDS = ("source_id", "predicate", "target_id", "description", "qualifier", "basis", "status")
 SUMMARY_COLUMNS = "id,kind,title,summary,status,revision,created_at,updated_at"
-
-
-def _json(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-
-
-def _digest(value):
-    return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
-
-
-def content_hash(text):
-    """与引文匹配一致，只统一换行，不模糊匹配或折叠空白。"""
-    return hashlib.sha256(normalize_newlines(text).encode("utf-8")).hexdigest()
-
-
-def normalize_newlines(text):
-    """把 CRLF/CR 统一成 LF；引文校验与正文哈希都以这份文本为准。"""
-    return text.replace("\r\n", "\n").replace("\r", "\n")
-
-
-def _record_context(data, loc):
-    """从原始输入取出记录级 ref/id，让批次中第几条出错可直接定位。"""
-    if not isinstance(data, dict) or len(loc) < 2 or loc[0] not in ("objects", "relations", "links", "evidence"):
-        return {}
-    try:
-        item = data[loc[0]][int(loc[1])]
-    except (KeyError, IndexError, TypeError, ValueError):
-        return {}
-    if not isinstance(item, dict):
-        return {}
-    context = {"section": loc[0], "index": int(loc[1])}
-    for key in ("ref", "id"):
-        if item.get(key) is not None:
-            context[key] = item[key]
-    return context
-
-
-def _validate(schema, data):
-    if isinstance(data, schema):
-        return data
-    try:
-        return schema.model_validate(data)
-    except ValidationError as exc:
-        # 不把整段正文、引用或原始输入装入错误响应。
-        issues = []
-        for error in exc.errors(include_input=False, include_context=False):
-            loc = list(error["loc"])
-            issue = {"field": ".".join(map(str, loc)), "message": error["msg"]}
-            issue.update(_record_context(data, loc))
-            issues.append(issue)
-        raise BusinessError("INVALID_INPUT", "知识层输入无效", data={"issues": issues}) from exc
-
-
-def _check_size(data):
-    if isinstance(data, models.Input):
-        data = data.model_dump(exclude_unset=True)
-    try:
-        size = len(_json(data).encode("utf-8"))
-    except (ValueError, TypeError, UnicodeError) as exc:
-        raise BusinessError("INVALID_INPUT", "输入必须是有效 JSON") from exc
-    if size > MAX_REQUEST_BYTES:
-        raise BusinessError("INPUT_TOO_LARGE", "知识批次最多 512 KiB，请拆批提交")
 
 
 def _locator(section, index, item):
@@ -106,16 +42,6 @@ def _locate(exc, section, index, item):
     data = exc.data if isinstance(exc.data, dict) else {}
     exc.data = {**data, **_locator(section, index, item)}
     return exc
-
-
-def _library_id(cursor):
-    return cursor.execute("SELECT library_id FROM library_metadata WHERE singleton=1").fetchone()[0]
-
-
-def library_id():
-    """当前知识库 UUID；证据定位与反查都用它，不是服务连接身份。"""
-    with get_db_cursor() as cursor:
-        return _library_id(cursor)
 
 
 def _record(cursor, kind, record_id):
@@ -160,8 +86,8 @@ def _save_record(cursor, kind, record_id, values, updating=False):
     if kind == "object":
         from retrieval.nodes.preprocess_node import tokenize_query
         cursor.execute("DELETE FROM knowledge_fts WHERE object_id=?", (record_id,))
-        cursor.execute("INSERT INTO knowledge_fts(object_id,title,summary,body) VALUES (?,?,?,?)",
-                       (record_id, *(" ".join(tokenize_query(values[field])) for field in ("title", "summary", "body"))))
+        cursor.execute("INSERT INTO knowledge_fts(object_id,title,summary) VALUES (?,?,?)",
+                       (record_id, *(" ".join(tokenize_query(values[field])) for field in ("title", "summary"))))
     return _record(cursor, kind, record_id)
 
 
@@ -204,47 +130,11 @@ def _canonical_apply(payload):
     return {"operation": "apply", **data}
 
 
-def _safe_url(value):
-    try:
-        parsed = urlsplit(value)
-        if (parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname or parsed.username
-                or parsed.password or any(ord(c) <= 32 or ord(c) == 127 for c in value) or "\\" in value):
-            raise ValueError("unsafe URL")
-        parsed.port  # 同时校验无效端口。
-    except (ValueError, TypeError) as exc:
-        raise BusinessError("INVALID_SOURCE", "外部出处仅接受不含凭据的安全 http/https URL") from exc
-    return value
-
-
 def _evidence_values(cursor, item, refs, library_id):
     owner_kind = "object" if item.object is not None else "relation"
     owner = _target(cursor, item.object or item.relation, refs, owner_kind)
-    values = item.model_dump(exclude={"object", "relation", "expected_content_hash"})
-    values.update({f"{owner_kind}_id": owner, "content_hash": None, "heading_path": None, "page_number": None})
-    values["quote"] = normalize_newlines(item.quote)
-    if item.source_kind == "piece":
-        if item.source_library_id == library_id:
-            row = cursor.execute("""SELECT c.chunk_text,c.heading_path,c.doc_title,f.filename
-                FROM chunks c JOIN files f ON f.id=c.file_id WHERE c.id=? AND f.id=?""",
-                                 (item.source_chunk_id, item.source_file_id)).fetchone()
-            if row is None:
-                raise BusinessError("INVALID_SOURCE", "本库文件/卡片不存在或卡片不属于指定文件")
-            current_hash = content_hash(row["chunk_text"])
-            if item.expected_content_hash and item.expected_content_hash != current_hash:
-                raise BusinessError("SOURCE_CHANGED", "卡片正文已变化，请重新读取来源")
-            if values["quote"] not in normalize_newlines(row["chunk_text"]):
-                raise BusinessError("QUOTE_MISMATCH", "引文不在当前卡片正文中，不接受模糊匹配")
-            values.update(source_title=row["doc_title"], heading_path=row["heading_path"],
-                          page_number=page_number_from_heading(row["heading_path"]), content_hash=current_hash)
-        else:
-            if not item.source_title:
-                raise BusinessError("INVALID_SOURCE", "跨库未接入的来源需要可展示的 source_title")
-            if item.expected_content_hash:
-                raise BusinessError("INVALID_SOURCE", "不能验证未接入库的正文哈希")
-    elif item.source_kind == "external":
-        values["source_url"] = _safe_url(item.source_url)
-    else:
-        values["source_title"] = item.source_title or "用户陈述"
+    values = source_values(cursor, item)
+    values[f"{owner_kind}_id"] = owner
     values["dedup_key"] = _digest({key: values.get(key) for key in (
         "object_id", "relation_id", "source_kind", "stance", "source_library_id", "source_file_id",
         "source_chunk_id", "source_url", "quote")})
@@ -266,7 +156,7 @@ def apply(data, *, actor="internal"):
         batch_id, refs = str(uuid4()), {}
         result = {"committed": not payload.dry_run, "dry_run": payload.dry_run,
                   "library_id": _library_id(cursor), "batch_id": batch_id, "refs": refs,
-                  "objects": [], "relations": [], "links": [], "evidence": [],
+                  "objects": [], "relations": [], "evidence": [],
                   "counts": {"created": 0, "updated": 0, "reused": 0}}
         all_refs, all_updates = set(), set()
         for item in [*payload.objects, *payload.relations]:
@@ -341,20 +231,6 @@ def apply(data, *, actor="internal"):
             _revision(cursor, "relation", before, record, payload.reason, batch_id, actor)
             report("relations", record, "updated" if updating else "created", None if updating else item.ref, submitted=item)
 
-        for index, item in enumerate(payload.links):
-            try:
-                source = _target(cursor, item.source, refs, "object")
-                target = _target(cursor, item.target, refs, "object")
-                if source == target:
-                    raise BusinessError("INVALID_REFERENCE", "页面链接不允许自连接")
-                row = cursor.execute("SELECT id FROM knowledge_links WHERE source_id=? AND target_id=?", (source, target)).fetchone()
-            except BusinessError as exc:
-                raise _locate(exc, "links", index, item) from None
-            record = {"id": row["id"] if row else str(uuid4()), "source_id": source, "target_id": target}
-            if row is None:
-                _insert(cursor, "knowledge_links", record)
-            report("links", record, "reused" if row else "created")
-
         for index, item in enumerate(payload.evidence):
             try:
                 values = _evidence_values(cursor, item, refs, result["library_id"])
@@ -371,37 +247,6 @@ def apply(data, *, actor="internal"):
         else:
             _remember(cursor, payload.request_key, digest, result)
         return result
-
-
-def _evidence_states(cursor, rows):
-    library_id = _library_id(cursor)
-    local = [row for row in rows if row["source_kind"] == "piece" and row["source_library_id"] == library_id]
-    chunk_ids = list({row["source_chunk_id"] for row in local})
-    chunks = {}
-    if chunk_ids:
-        chunks = {row["id"]: row for row in cursor.execute(
-            f"SELECT c.id,c.file_id,c.chunk_text,c.doc_title,c.heading_path FROM chunks c JOIN files f ON f.id=c.file_id WHERE c.id IN ({','.join('?' for _ in chunk_ids)})",
-            chunk_ids)}
-    result = []
-    for row in rows:
-        item = dict(row)
-        item.pop("dedup_key", None)
-        if item["source_kind"] != "piece":
-            state = "unverified"
-        elif item["source_library_id"] != library_id:
-            state = "unresolved"
-        else:
-            chunk = chunks.get(item["source_chunk_id"])
-            if chunk is None or chunk["file_id"] != item["source_file_id"]:
-                state = "missing"
-            else:
-                state = "current" if content_hash(chunk["chunk_text"]) == item["content_hash"] else "changed"
-                item["current_source_title"] = chunk["doc_title"]
-                item["current_heading_path"] = chunk["heading_path"]
-                item["current_page_number"] = page_number_from_heading(chunk["heading_path"])
-        item["location_status"] = state
-        result.append(item)
-    return result
 
 
 def _evidence_page(cursor, kind, record_id, limit, offset):
@@ -536,7 +381,6 @@ def _impact(cursor, kind, record_id):
         relations = "SELECT id FROM knowledge_relations WHERE source_id=? OR target_id=?"
         queries.extend([
             ("relations", "SELECT id,revision FROM knowledge_relations WHERE source_id=? OR target_id=?", [record_id, record_id]),
-            ("links", "SELECT id FROM knowledge_links WHERE source_id=? OR target_id=?", [record_id, record_id]),
             ("evidence", f"SELECT id FROM knowledge_evidence WHERE object_id=? OR relation_id IN ({relations})", [record_id] * 3),
             ("history", f"SELECT id FROM knowledge_revisions WHERE object_id=? OR relation_id IN ({relations})", [record_id] * 3),
         ])
@@ -659,30 +503,13 @@ def lint(**kwargs):
         for obj in objects:
             oid = obj["id"]
             # 每个对象的附属记录也有上限，避免高出度页将 lint 变成无界全库扫描。
-            links = cursor.execute("SELECT source_id,target_id FROM knowledge_links WHERE source_id=? OR target_id=? ORDER BY id LIMIT 301", (oid, oid)).fetchall()
             relations = cursor.execute(
                 "SELECT id,source_id,predicate,target_id,description FROM knowledge_relations WHERE source_id=? OR target_id=? ORDER BY id LIMIT 301",
                 (oid, oid)).fetchall()
-            if len(links) > 300 or len(relations) > 300:
+            if len(relations) > 300:
                 truncated = True
-            if not links and not relations:
+            if not relations:
                 issues.append({"code": "ISOLATED_OBJECT", "object_id": oid, "message": "孤立对象不一定有误"})
-            explicit = {link["target_id"] for link in links[:300] if link["source_id"] == oid}
-            internal = {target.lower() for target in re.findall(
-                r"piece://knowledge/([0-9a-fA-F-]{36})(?![0-9a-fA-F-])", obj["body"])}
-            if len(internal) > 300:
-                truncated = True
-            for target in sorted(internal)[:300]:
-                exists = cursor.execute("SELECT 1 FROM knowledge_objects WHERE id=?", (target,)).fetchone()
-                if not exists:
-                    issues.append({"code": "BROKEN_BODY_LINK", "object_id": oid, "target_id": target})
-                # 附属列表可能已截断；不能据此断言正文目标没有显式链接。
-                registered = cursor.execute(
-                    "SELECT 1 FROM knowledge_links WHERE source_id=? AND target_id=?", (oid, target)).fetchone()
-                if not registered:
-                    issues.append({"code": "UNREGISTERED_BODY_LINK", "object_id": oid, "target_id": target})
-            for target in sorted(explicit - internal):
-                issues.append({"code": "LINK_NOT_IN_BODY", "object_id": oid, "target_id": target})
             relation_ids = [row["id"] for row in relations[:300]]
             missing_evidence = [row for row in relations[:300]
                                 if not cursor.execute("SELECT 1 FROM knowledge_evidence WHERE relation_id=? LIMIT 1", (row["id"],)).fetchone()]
@@ -723,6 +550,19 @@ def lint(**kwargs):
         return {"issues": list(unique.values()), "checked_objects": len(objects), "total_objects": total,
                 "limit": query.limit, "offset": query.offset, "truncated": truncated,
                 "read_only": True, "semantic_review": False}
+
+
+@serialized_mutation
+def rebuild_index():
+    """仅重建图谱实体的派生全文索引，不改实体、关系、证据或历史。"""
+    from retrieval.nodes.preprocess_node import tokenize_query
+    with get_db_cursor(write=True) as cursor:
+        cursor.execute("DELETE FROM knowledge_fts")
+        rows = cursor.execute("SELECT id,title,summary FROM knowledge_objects ORDER BY id").fetchall()
+        cursor.executemany("INSERT INTO knowledge_fts(object_id,title,summary) VALUES (?,?,?)",
+                           [(row["id"], " ".join(tokenize_query(row["title"])), " ".join(tokenize_query(row["summary"]))) for row in rows])
+        return {"committed": True, "dry_run": False, "indexed_objects": len(rows), "index_status": "current",
+                "rewrote_records": False, "library_id": _library_id(cursor)}
 
 
 def file_reference_count(file_id):

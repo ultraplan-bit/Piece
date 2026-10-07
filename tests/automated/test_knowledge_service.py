@@ -22,11 +22,11 @@ def _batch(**parts):
 
 
 def _create_objects(*specs):
-    """按顺序创建对象并返回 id 列表；spec 可含 ref/title 及可选 summary/body/aliases/status。"""
+    """按顺序创建对象并返回 id 列表；spec 可含 ref/title 及可选 summary/aliases/status。"""
     objects = []
     for spec in specs:
         item = {"ref": spec["ref"], "kind": spec.get("kind", "concept"), "title": spec["title"]}
-        for key in ("summary", "body", "aliases", "status"):
+        for key in ("summary", "aliases", "status"):
             if key in spec:
                 item[key] = spec[key]
         objects.append(item)
@@ -132,7 +132,7 @@ def test_failed_batch_rolls_back_everything(knowledge_base):
     data = _batch(
         request_key="rollback-key",
         objects=[{"ref": "a", "kind": "concept", "title": "不应存在的对象"}],
-        links=[{"source": {"ref": "a"}, "target": {"ref": "a"}}],
+        relations=[{"ref": "r", "source": {"ref": "a"}, "target": {"ref": "a"}, "predicate": "supports", "description": "自连接", "basis": "explicit"}],
     )
     with pytest.raises(BusinessError) as exc:
         knowledge.apply(data)
@@ -190,13 +190,13 @@ def test_same_request_key_rejects_different_payload(knowledge_base):
 
 def test_update_clears_with_empty_rejects_null_and_unknown(knowledge_base):
     [oid] = _create_objects({"ref": "a", "title": "标题", "summary": "摘要",
-                             "body": "正文", "aliases": ["别名"]})
+                             "aliases": ["别名"]})
     result = knowledge.apply(_batch(objects=[{"id": oid, "expected_revision": 1,
-                                              "summary": "", "aliases": [], "body": ""}]))
+                                              "summary": "", "aliases": []}]))
     record = knowledge.get_record(kind="object", id=oid)["record"]
     assert result["objects"][0]["revision"] == 2
-    assert result["objects"][0]["submitted_fields"] == ["aliases", "body", "summary"]
-    assert record["summary"] == "" and record["aliases"] == [] and record["body"] == ""
+    assert result["objects"][0]["submitted_fields"] == ["aliases", "summary"]
+    assert record["summary"] == "" and record["aliases"] == []
     assert record["title"] == "标题" and record["kind"] == "concept"
     assert knowledge.search_objects(query="别名")["total"] == 0
 
@@ -333,7 +333,7 @@ def test_relation_qualifier_variants_and_update_uniqueness(knowledge_base):
 
 def test_delete_impact_conflict_and_history_cleanup(knowledge_base):
     body = "历史正文SECRETBODY"
-    [a, b] = _create_objects({"ref": "a", "title": "对象甲", "body": body},
+    [a, b] = _create_objects({"ref": "a", "title": "对象甲", "summary": body},
                              {"ref": "b", "title": "对象乙"})
     preview = knowledge.delete({"kind": "object", "id": a, "expected_revision": 1, "dry_run": True})
     assert preview["dry_run"] is True and preview["committed"] is False
@@ -396,11 +396,11 @@ def test_delete_evidence_leaves_no_quote_in_requests(knowledge_base):
 # --------------------------------------------------------------------------- #
 
 def test_search_chinese_refresh_and_special_characters(knowledge_base):
-    [oid] = _create_objects({"ref": "a", "title": "机器学习入门", "body": "监督学习与神经网络"})
+    [oid] = _create_objects({"ref": "a", "title": "机器学习入门", "summary": "监督学习与神经网络"})
     assert knowledge.search_objects(query="机器")["total"] == 1
 
     knowledge.apply(_batch(objects=[{"id": oid, "expected_revision": 1,
-                                     "title": "深度学习", "body": "卷积网络"}]))
+                                     "title": "深度学习", "summary": "卷积网络"}]))
     # 旧标题独有的分词（机器）必须随更新消失，新内容可被检索。
     assert knowledge.search_objects(query="机器")["total"] == 0
     assert knowledge.search_objects(query="深度")["total"] == 1
@@ -431,11 +431,10 @@ def test_delete_removes_fts_ghost(knowledge_base):
 def test_graph_depth_cycle_endpoints_and_stability(knowledge_base):
     [a, b, c, d] = _create_objects({"ref": "a", "title": "甲"}, {"ref": "b", "title": "乙"},
                                    {"ref": "c", "title": "丙"}, {"ref": "d", "title": "丁"})
-    knowledge.apply(_batch(links=[
-        {"source": {"id": a}, "target": {"id": b}},
-        {"source": {"id": b}, "target": {"id": a}},  # 双向环
-        {"source": {"id": b}, "target": {"id": c}},
-        {"source": {"id": c}, "target": {"id": d}}]))
+    knowledge.apply(_batch(relations=[
+        {"ref": f"r{i}", "source": {"id": source}, "target": {"id": target},
+         "predicate": "supports", "description": "有向语义关系", "basis": "explicit"}
+        for i, (source, target) in enumerate(((a,b), (b,a), (b,c), (c,d)))]))
 
     one = knowledge.graph(root_id=a, depth=1)
     ids1 = {node["id"] for node in one["nodes"]}
@@ -457,7 +456,7 @@ def test_graph_budget_truncates_without_breaking_endpoints(knowledge_base):
     specs = [{"ref": f"n{i}", "title": f"节点{i}"} for i in range(6)]
     ids = _create_objects(*specs)
     root = ids[0]
-    knowledge.apply(_batch(links=[{"source": {"id": root}, "target": {"id": node}} for node in ids[1:]]))
+    knowledge.apply(_batch(relations=[{"ref": f"r{i}", "source": {"id": root}, "target": {"id": node}, "predicate": "supports", "description": "d", "basis": "explicit"} for i, node in enumerate(ids[1:])]))
 
     result = knowledge.graph(root_id=root, depth=1, max_nodes=2, max_edges=1)
     assert result["truncated"] is True
@@ -576,7 +575,7 @@ def test_cross_library_external_and_user_sources(knowledge_base):
 
 def test_evidence_location_changes_on_edit_delete_and_reindex(knowledge_base):
     fid, cid = _seed_chunk(knowledge_base, "原始正文内容")
-    [oid] = _create_objects({"ref": "a", "title": "知识对象", "body": "保留正文"})
+    [oid] = _create_objects({"ref": "a", "title": "知识对象", "summary": "保留正文"})
     created = knowledge.apply(_batch(evidence=[
         {"object": {"id": oid}, "source_kind": "piece", "source_library_id": _library_id(),
          "source_file_id": fid, "source_chunk_id": cid, "quote": "原始正文"}]))
@@ -595,7 +594,7 @@ def test_evidence_location_changes_on_edit_delete_and_reindex(knowledge_base):
     assert knowledge.get_record(kind="evidence", id=eid)["record"]["location_status"] == "missing"
 
     # 资料层变化不影响知识对象与其证据快照。
-    assert knowledge.get_record(kind="object", id=oid)["record"]["body"] == "保留正文"
+    assert knowledge.get_record(kind="object", id=oid)["record"]["summary"] == "保留正文"
     _execute("DELETE FROM files WHERE id=?", (fid,))
     assert knowledge.get_record(kind="evidence", id=eid)["record"]["location_status"] == "missing"
 
@@ -639,52 +638,21 @@ def test_lint_reports_structural_issues(knowledge_base):
         {"ref": "rel", "source": {"id": owner}, "predicate": "supports", "target": {"id": rel_target},
          "description": "断言", "basis": "inference"}]))
 
-    missing_uuid = str(uuid4())
-    knowledge.apply(_batch(objects=[{"id": target, "expected_revision": 1,
-                                     "body": f"参见 piece://knowledge/{owner} 与 piece://knowledge/{missing_uuid}"}]))
-    knowledge.apply(_batch(objects=[{"id": amb1, "expected_revision": 1, "body": "没有内部链接"}],
-                           links=[{"source": {"id": amb1}, "target": {"id": amb2}}]))
-
     report = knowledge.lint()
     codes = {issue["code"] for issue in report["issues"]}
-    assert {"ISOLATED_OBJECT", "RELATION_WITHOUT_EVIDENCE", "BROKEN_BODY_LINK",
-            "UNREGISTERED_BODY_LINK", "LINK_NOT_IN_BODY", "AMBIGUOUS_NAME"} <= codes
+    assert {"ISOLATED_OBJECT", "RELATION_WITHOUT_EVIDENCE", "AMBIGUOUS_NAME"} <= codes
     assert report["read_only"] is True and report["semantic_review"] is False
     assert report["truncated"] is False
 
 
-def test_lint_normalizes_uppercase_internal_uuid(knowledge_base):
-    [source, target] = _create_objects({"ref": "s", "title": "来源"}, {"ref": "t", "title": "目标"})
-    knowledge.apply(_batch(
-        objects=[{"id": source, "expected_revision": 1, "body": f"[目标](piece://knowledge/{target.upper()})"}],
-        links=[{"source": {"id": source}, "target": {"id": target}}]))
-    assert knowledge.lint(object_ids=[source])["issues"] == []
-
-
-def test_lint_truncated_links_do_not_report_registered_target_missing(knowledge_base):
-    [source, target] = _create_objects({"ref": "s", "title": "来源"}, {"ref": "t", "title": "目标"})
-    knowledge.apply(_batch(objects=[{
-        "id": source, "expected_revision": 1, "body": f"[目标](piece://knowledge/{target})"}]))
-    # 300 条入链先于正文出链，保证读取到的附属列表恰好截掉它。
-    from uuid import UUID
-    with get_db_cursor(write=True) as cursor:
-        for index in range(1, 301):
-            incoming = str(UUID(int=index))
-            cursor.execute("""INSERT INTO knowledge_objects
-                (id,kind,title,title_norm,status,revision) VALUES (?,'entity',?,?,'active',1)""",
-                (incoming, f"入链{index}", f"入链{index}"))
-            cursor.execute("INSERT INTO knowledge_links(id,source_id,target_id) VALUES (?,?,?)",
-                           (incoming, incoming, source))
-        cursor.execute("INSERT INTO knowledge_links(id,source_id,target_id) VALUES (?,?,?)",
-                       (str(UUID(int=2**128 - 1)), source, target))
-    report = knowledge.lint(object_ids=[source])
-    assert report["truncated"]
-    assert report["issues"] == []
-    graph = knowledge.graph(root_id=source)
-    assert graph["truncated"] and len(graph["nodes"]) <= 100 and len(graph["edges"]) <= 300
-    assert graph == knowledge.graph(root_id=source)
-    ids = {node["id"] for node in graph["nodes"]}
-    assert all(edge["source_id"] in ids and edge["target_id"] in ids for edge in graph["edges"])
+def test_graph_rejects_wiki_body_links_and_page_kinds(knowledge_base):
+    for parts in ({"objects": [{"ref": "x", "kind": "topic", "title": "页面"}]},
+                  {"objects": [{"ref": "x", "kind": "entity", "title": "实体", "body": "长正文"}]},
+                  {"links": []}):
+        with pytest.raises(BusinessError) as exc:
+            knowledge.apply(_batch(**parts))
+        assert exc.value.code == "INVALID_INPUT"
+    assert knowledge.list_objects()["total"] == 0
 
 
 def test_lint_object_filter_is_scoped(knowledge_base):

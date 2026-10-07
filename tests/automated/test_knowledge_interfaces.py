@@ -13,6 +13,9 @@ import pytest
 
 from indexing import knowledge_models as km
 from indexing.services import knowledge_service as knowledge
+from indexing.services import knowledge_common
+from indexing import wiki_models as wm
+from indexing.services import wiki_service as wiki
 
 
 def _batch(**parts):
@@ -106,31 +109,68 @@ def test_api_knowledge_read_write_permissions(api):
         assert api.post(path, json=payload, headers=write_key).status_code == 200, name
         assert api.post(path, json=payload, headers={"Authorization": ""}).status_code == 401, name
     writes = {"apply": {**committed, "dry_run": True},
-              "delete": {"kind": "object", "id": oid, "expected_revision": 1, "dry_run": True}}
+              "delete": {"kind": "object", "id": oid, "expected_revision": 1, "dry_run": True},
+              "rebuild-index": {}}
     for name, payload in writes.items():
         path = "/api/v1/knowledge/" + name
         assert api.post(path, json=payload, headers=read_key).status_code == 403
         assert api.post(path, json=payload, headers={"Authorization": ""}).status_code == 401
         granted = api.post(path, json=payload, headers=write_key).json()
-        assert granted["success"] and not granted["data"]["committed"]
+        assert granted["success"], name
+        if name != "rebuild-index":
+            assert not granted["data"]["committed"]
+
+
+def test_api_wiki_read_write_permissions(api):
+    batch = _batch(pages=[{"ref": "p", "kind": "concept", "title": "页面", "body": "正文"}])
+    page = _post(api, "wiki/apply", **batch)
+    pid = page["refs"]["p"]["id"]
+    record = _post(api, "wiki/get", kind="page", id=pid)["record"]
+    assert record["body"] == "正文" and record["content_hash"] and "index_status" in record
+    library_id = _post(api, "wiki/list")["library_id"]
+    reads = {
+        "list": {}, "search": {"query": "页面"}, "get": {"kind": "page", "id": pid},
+        "references": {"source_library_id": library_id, "source_file_id": 1},
+        "lint": {"page_ids": [pid]}, "history": {"kind": "page", "id": pid},
+        "request": {"request_key": batch["request_key"]},
+    }
+    read_key, write_key = {"Authorization": "Bearer read-test-key"}, {"Authorization": "Bearer write-test-key"}
+    for name, payload in reads.items():
+        path = "/api/v1/wiki/" + name
+        assert api.post(path, json=payload, headers=read_key).status_code == 200, name
+        assert api.post(path, json=payload, headers=write_key).status_code == 200, name
+        assert api.post(path, json=payload, headers={"Authorization": ""}).status_code == 401, name
+    writes = {
+        "apply": {"reason": "预检", "dry_run": True, "pages": [{"ref": "x", "kind": "concept", "title": "x"}]},
+        "delete": {"kind": "page", "id": pid, "expected_revision": record["revision"],
+                   "expected_content_hash": record["content_hash"], "dry_run": True},
+        "rebuild-index": {},
+    }
+    for name, payload in writes.items():
+        path = "/api/v1/wiki/" + name
+        # 索引重建会写入派生数据，读凭据不得触发。
+        assert api.post(path, json=payload, headers=read_key).status_code == 403, name
+        assert api.post(path, json=payload, headers={"Authorization": ""}).status_code == 401, name
+        granted = api.post(path, json=payload, headers=write_key).json()
+        assert granted["success"], name
 
 
 def test_api_partial_update_retry_conflicts_and_clear(api):
-    oid = _object(api, summary="原摘要", body="人工正文", aliases=["别名"], status="disputed")
+    oid = _object(api, summary="原摘要", aliases=["别名"], status="disputed")
     update = _batch(objects=[{"id": oid, "expected_revision": 1, "title": "修改标题"}])
     first = _post(api, "knowledge/apply", **update)
     assert _post(api, "knowledge/apply", **update) == first
     assert _post(api, "knowledge/request", request_key=update["request_key"]) == first
     record = _post(api, "knowledge/get", kind="object", id=oid)["record"]
-    assert (record["title"], record["body"], record["summary"], record["aliases"], record["status"], record["revision"]) == (
-        "修改标题", "人工正文", "原摘要", ["别名"], "disputed", 2)
+    assert (record["title"], record["summary"], record["aliases"], record["status"], record["revision"]) == (
+        "修改标题", "原摘要", ["别名"], "disputed", 2)
     stale = api.post("/api/v1/knowledge/apply", json={**update, "request_key": "stale"})
     assert stale.status_code == 409 and stale.json()["error"]["code"] == "VERSION_CONFLICT"
     reused = api.post("/api/v1/knowledge/apply", json={**update, "reason": "改了输入不能复用键"})
     assert reused.status_code == 409 and reused.json()["error"]["code"] == "REQUEST_CONFLICT"
-    _post(api, "knowledge/apply", **_batch(objects=[{"id": oid, "expected_revision": 2, "body": "", "aliases": []}]))
+    _post(api, "knowledge/apply", **_batch(objects=[{"id": oid, "expected_revision": 2, "summary": "", "aliases": []}]))
     record = _post(api, "knowledge/get", kind="object", id=oid)["record"]
-    assert record["body"] == "" and record["aliases"] == [] and record["summary"] == "原摘要"
+    assert record["summary"] == "" and record["aliases"] == []
     assert _post(api, "knowledge/history", kind="object", id=oid)["total"] == 3
 
 
@@ -141,7 +181,7 @@ def test_api_unknown_fields_types_and_raw_size_limit(api):
         ("get", {"kind": "object", "id": 1}),
         ("graph", {"root_id": oid, "depth": 3}),
         ("list", {"limit": "1"}),
-        ("apply", _batch(objects=[{"id": oid, "expected_revision": 1, "body": None}])),
+        ("apply", _batch(objects=[{"id": oid, "expected_revision": 1, "summary": None}])),
         ("apply", _batch(objects=[{"id": oid, "expected_revision": 1, "unexpected": "reject"}])),
         ("apply", _batch(objects=[{"ref": "x", "kind": "concept", "title": "拒绝", "extra": 1}])),
     ]
@@ -150,12 +190,21 @@ def test_api_unknown_fields_types_and_raw_size_limit(api):
         assert result.status_code == 400 and result.json()["error"]["code"] == "INVALID_INPUT"
     body = json.dumps({"reason": "体积边界", "dry_run": True,
                        "objects": [{"ref": "a", "kind": "entity", "title": "预检"}]}).encode()
-    boundary = body + b" " * (knowledge.MAX_REQUEST_BYTES - len(body))
+    boundary = body + b" " * (knowledge_common.MAX_REQUEST_BYTES - len(body))
     assert api.post("/api/v1/knowledge/apply", content=boundary,
                     headers={"Content-Type": "application/json"}).json()["success"]
     too_large = api.post("/api/v1/knowledge/apply", content=boundary + b" ",
                          headers={"Content-Type": "application/json"}).json()
     assert too_large["error"]["code"] == "INPUT_TOO_LARGE"
+    # Wiki 批次与图谱共用 512 KiB 上限；单页 8 MiB 只是文件存储上限，不放宽批次大小。
+    wiki_body = json.dumps({"reason": "体积边界", "dry_run": True,
+                            "pages": [{"ref": "p", "kind": "entity", "title": "预检"}]}).encode()
+    wiki_boundary = wiki_body + b" " * (knowledge_common.MAX_REQUEST_BYTES - len(wiki_body))
+    assert api.post("/api/v1/wiki/apply", content=wiki_boundary,
+                    headers={"Content-Type": "application/json"}).json()["success"]
+    wiki_too_large = api.post("/api/v1/wiki/apply", content=wiki_boundary + b" ",
+                              headers={"Content-Type": "application/json"}).json()
+    assert wiki_too_large["error"]["code"] == "INPUT_TOO_LARGE"
     assert _post(api, "knowledge/list")["total"] == 1
 
 
@@ -169,20 +218,31 @@ def test_mcp_protocol_schema_validation_and_partial_updates(api, mcp_servers):
             writes = {tool.name: tool for tool in await writer.list_tools() if tool.name.startswith("knowledge_")}
             assert set(reads) == {"knowledge-" + name for name in (
                 "list", "search", "get", "graph", "references", "lint", "history", "request")}
-            assert set(writes) == {"knowledge_apply", "knowledge_delete"}
+            assert set(writes) == {"knowledge_apply", "knowledge_delete", "knowledge_rebuild_index"}
             for tool in reads.values():
                 assert tool.annotations.readOnlyHint and tool.annotations.idempotentHint
                 assert not tool.annotations.openWorldHint and not tool.annotations.destructiveHint
                 assert "params" in tool.inputSchema["properties"]
             for tool in writes.values():
-                assert not tool.annotations.readOnlyHint and tool.annotations.destructiveHint
+                assert not tool.annotations.readOnlyHint
                 assert tool.annotations.idempotentHint and not tool.annotations.openWorldHint
+            for name in ("knowledge_apply", "knowledge_delete"):
+                assert writes[name].annotations.destructiveHint
+            assert not writes["knowledge_rebuild_index"].annotations.destructiveHint
+            wiki_reads = {tool.name for tool in await reader.list_tools() if tool.name.startswith("wiki-")}
+            wiki_writes = {tool.name for tool in await writer.list_tools() if tool.name.startswith("wiki_")}
+            assert wiki_reads == {"wiki-" + name for name in (
+                "list", "search", "get", "references", "lint", "history", "request")}
+            assert wiki_writes == {"wiki_apply", "wiki_delete", "wiki_rebuild_index"}
+            for tool in (await reader.list_tools()):
+                if tool.name.startswith("wiki-"):
+                    assert tool.annotations.readOnlyHint and tool.annotations.idempotentHint
             apply_schema = json.dumps(writes["knowledge_apply"].inputSchema)
             assert '"maxItems": 20' in apply_schema and '"expected_revision"' in apply_schema
             assert "reason" in writes["knowledge_apply"].inputSchema["$defs"]["ApplyInput"]["required"]
             assert (await reader.call_tool("knowledge_apply", {"params": {}}, raise_on_error=False)).is_error
             create = _batch(objects=[{"ref": "a", "kind": "concept", "title": "MCP标题",
-                                      "body": "保留正文", "summary": "保留摘要", "aliases": ["MCP别名"]}])
+                                      "summary": "保留摘要", "aliases": ["MCP别名"]}])
             made = (await writer.call_tool("knowledge_apply", {"params": create})).data
             assert made["success"], made
             oid = made["data"]["refs"]["a"]["id"]
@@ -192,23 +252,25 @@ def test_mcp_protocol_schema_validation_and_partial_updates(api, mcp_servers):
             assert first["data"]["objects"][0]["submitted_fields"] == ["title"]
             assert (await writer.call_tool("knowledge_apply", {"params": update})).data == first
             record = (await reader.call_tool("knowledge-get", {"params": {"kind": "object", "id": oid}})).data["record"]
-            assert record["body"] == "保留正文" and record["summary"] == "保留摘要" and record["aliases"] == ["MCP别名"]
-            assert record["revision"] == 2 and record["title"] == "MCP修订"
+            assert record["summary"] == "保留摘要" and record["aliases"] == ["MCP别名"]
+            assert record["revision"] == 2 and record["title"] == "MCP修订" and "body" not in record
             stale = (await writer.call_tool("knowledge_apply", {"params": {**update, "request_key": "mcp-stale"}})).data
             assert stale["error"]["code"] == "VERSION_CONFLICT" and stale["data"]["current_revision"] == 2
             for payload in ({"limit": "1"}, {"unknown": 1}):
                 assert (await reader.call_tool("knowledge-list", {"params": payload}, raise_on_error=False)).is_error
-            bad = _batch(objects=[{"id": oid, "expected_revision": 2, "body": None}])
+            bad = _batch(objects=[{"id": oid, "expected_revision": 2, "summary": None}])
             assert (await writer.call_tool("knowledge_apply", {"params": bad}, raise_on_error=False)).is_error
             assert (await writer.call_tool("knowledge_apply", {"params": {**create, "unknown": 1}}, raise_on_error=False)).is_error
-            large = _batch(objects=[{"ref": str(i), "kind": "entity", "title": "大正文", "body": "x" * 200000} for i in range(3)])
-            rejected = (await writer.call_tool("knowledge_apply", {"params": large})).data
+            large = _batch(pages=[{"ref": "big", "kind": "entity", "title": "大页面"}],
+                           evidence=[{"page": {"ref": "big"}, "source_kind": "user",
+                                      "quote": "x" * 100000} for _ in range(6)])
+            rejected = (await writer.call_tool("wiki_apply", {"params": large})).data
             assert rejected["error"]["code"] == "INPUT_TOO_LARGE"
             assert (await reader.call_tool("knowledge-list", {"params": {}})).data["total"] == 1
             return oid
 
     oid = asyncio.run(scenario())
-    assert _post(api, "knowledge/get", kind="object", id=oid)["record"]["body"] == "保留正文"
+    assert _post(api, "knowledge/get", kind="object", id=oid)["record"]["summary"] == "保留摘要"
 
 
 @pytest.mark.parametrize("tool_name,backend,model,payload", [
@@ -222,19 +284,35 @@ def test_mcp_protocol_schema_validation_and_partial_updates(api, mcp_servers):
     ("knowledge_request", "request_result", km.RequestInput, {"request_key": "x"}),
     ("knowledge_apply", "apply", km.ApplyInput, {"reason": "预检", "dry_run": True, "objects": [{"ref": "x", "kind": "entity", "title": "x"}]}),
     ("knowledge_delete", "delete", km.DeleteInput, {"kind": "evidence", "id": str(uuid4())}),
+    ("knowledge_rebuild_index", "rebuild_index", None, None),
+    ("wiki_list", "list_pages", wm.ListInput, {}),
+    ("wiki_search", "search_pages", wm.SearchInput, {"query": "x"}),
+    ("wiki_get", "get_record", wm.GetInput, {"kind": "page", "id": str(uuid4())}),
+    ("wiki_references", "references", wm.ReferencesInput, {"source_library_id": str(uuid4()), "source_file_id": 1}),
+    ("wiki_lint", "lint", wm.LintInput, {}),
+    ("wiki_history", "history", wm.HistoryInput, {"kind": "page", "id": str(uuid4())}),
+    ("wiki_request", "request_result", wm.RequestInput, {"request_key": "x"}),
+    ("wiki_apply", "apply", wm.ApplyInput, {"reason": "预检", "dry_run": True, "pages": [{"ref": "x", "kind": "entity", "title": "x"}]}),
+    ("wiki_delete", "delete", wm.DeleteInput, {"kind": "evidence", "id": str(uuid4()), "expected_content_hash": "0" * 64}),
+    ("wiki_rebuild_index", "rebuild_index", None, None),
 ])
 def test_knowledge_mcp_offloads_database_io(mcp_servers, monkeypatch, tool_name, backend, model, payload):
     index, retrieval = mcp_servers
     main_thread = threading.get_ident()
     calls = []
+    owner = wiki if tool_name.startswith("wiki") else knowledge
 
     def service(*args, **kwargs):
         calls.append((threading.get_ident(), kwargs))
         return {"committed": False}
 
-    monkeypatch.setattr(knowledge, backend, service)
-    server = index if backend in {"apply", "delete"} else retrieval
-    asyncio.run(getattr(server, tool_name).fn(model.model_validate(payload)))
+    monkeypatch.setattr(owner, backend, service)
+    server = index if backend in {"apply", "delete", "rebuild_index"} else retrieval
+    target = getattr(server, tool_name)
+    if model is None:
+        asyncio.run(target.fn())
+    else:
+        asyncio.run(target.fn(model.model_validate(payload)))
     assert len(calls) == 1 and calls[0][0] != main_thread
     if backend in {"apply", "delete"}:
         assert calls[0][1]["actor"] == "mcp:index"
@@ -243,10 +321,10 @@ def test_knowledge_mcp_offloads_database_io(mcp_servers, monkeypatch, tool_name,
 def test_delete_preview_token_matches_api_mcp_and_cli(api, http_cli, mcp_servers):
     from fastmcp import Client
     index, retrieval = mcp_servers
-    oid = _object(api, body="删除后在线历史不保留")
+    oid = _object(api, summary="删除后在线历史不保留")
     payload = {"kind": "object", "id": oid, "expected_revision": 1}
     preview = _post(api, "knowledge/delete", **payload)
-    code, cli_preview = http_cli("wiki", "delete", "object", oid, "--expected-revision", 1)
+    code, cli_preview = http_cli("graph", "delete", "object", oid, "--expected-revision", 1)
     assert code == 0 and cli_preview["data"] == preview
 
     async def check_and_add_dependency():
@@ -258,7 +336,7 @@ def test_delete_preview_token_matches_api_mcp_and_cli(api, http_cli, mcp_servers
             assert added["success"]
 
     asyncio.run(check_and_add_dependency())
-    code, stale = http_cli("wiki", "delete", "object", oid, "--expected-revision", 1,
+    code, stale = http_cli("graph", "delete", "object", oid, "--expected-revision", 1,
                            "--impact-token", preview["impact_token"], "--request-id", "stale-delete", "--yes")
     assert code == 1 and stale["error"]["code"] == "IMPACT_CONFLICT"
     fresh = _post(api, "knowledge/delete", **payload)
@@ -293,20 +371,20 @@ def test_cross_entry_compile_query_conflict_and_source_lifecycle(api, knowledge_
     library_id = _post(api, "knowledge/list")["library_id"]
     batch = _batch(
         objects=[{"ref": "rag", "kind": "concept", "title": "检索增强生成", "aliases": ["RAG"]},
-                 {"ref": "wiki", "kind": "concept", "title": "知识页"},
-                 {"ref": "summary", "kind": "synthesis", "title": "资料与知识分层", "body": "原文和综合结论各有用途。"}],
-        links=[{"source": {"ref": "summary"}, "target": {"ref": "rag"}},
-               {"source": {"ref": "summary"}, "target": {"ref": "wiki"}}],
-        relations=[{"ref": "relation", "source": {"ref": "rag"}, "predicate": "related_to", "target": {"ref": "wiki"},
-                    "description": "二者都需要追溯到原始资料", "qualifier": "知识库场景", "basis": "synthesis"}],
+                 {"ref": "graph", "kind": "concept", "title": "知识图谱"},
+                 {"ref": "summary", "kind": "concept", "title": "资料与图谱分层", "summary": "原文和综合结论各有用途。"}],
+        relations=[{"ref": "relation", "source": {"ref": "rag"}, "predicate": "related_to", "target": {"ref": "graph"},
+                    "description": "二者都需要追溯到原始资料", "qualifier": "知识库场景", "basis": "synthesis"},
+                   {"ref": "context", "source": {"ref": "summary"}, "predicate": "related_to", "target": {"ref": "rag"},
+                    "description": "按资料与图谱分层组织", "qualifier": "知识库场景", "basis": "synthesis"}],
         evidence=[{"relation": {"ref": "relation"}, "source_kind": "piece", "source_library_id": library_id,
                    "source_file_id": source["file_id"], "source_chunk_id": source["chunk_id"], "quote": source["quote"]} for source in sources])
     input_path = tmp_path / "知识批次.json"
     input_path.write_text(json.dumps(batch, ensure_ascii=False), encoding="utf-8")
-    code, preview = http_cli("wiki", "apply", "--input", input_path, "--dry-run")
+    code, preview = http_cli("graph", "apply", "--input", input_path, "--dry-run")
     assert code == 0 and not preview["data"]["committed"]
     assert _post(api, "knowledge/list")["total"] == 0
-    code, committed = http_cli("wiki", "apply", "--input", input_path, "--request-id", batch["request_key"])
+    code, committed = http_cli("graph", "apply", "--input", input_path, "--request-id", batch["request_key"])
     assert code == 0 and committed["data"]["committed"] and "task_id" not in committed["data"]
     ids = {ref: value["id"] for ref, value in committed["data"]["refs"].items()}
     assert _post(api, "knowledge/request", request_key=batch["request_key"])["refs"] == committed["data"]["refs"]
@@ -316,19 +394,19 @@ def test_cross_entry_compile_query_conflict_and_source_lifecycle(api, knowledge_
             found = (await reader.call_tool("knowledge-search", {"params": {"query": "RAG"}})).data
             assert found["objects"][0]["id"] == ids["rag"]
             graph = (await reader.call_tool("knowledge-graph", {"params": {"root_id": ids["summary"], "depth": 2}})).data
-            assert {node["id"] for node in graph["nodes"]} == {ids["rag"], ids["wiki"], ids["summary"]}
-            assert len(graph["edges"]) == 3 and not graph["truncated"]
+            assert {node["id"] for node in graph["nodes"]} == {ids["rag"], ids["graph"], ids["summary"]}
+            assert len(graph["edges"]) == 2 and not graph["truncated"]
             evidence = (await reader.call_tool("knowledge-get", {"params": {"kind": "relation", "id": ids["relation"], "limit": 1}})).data
             assert evidence["evidence"]["total"] == 2 and len(evidence["evidence"]["items"]) == 1
-            assert evidence["record"]["display"] in {"检索增强生成 —related_to— 知识页", "知识页 —related_to— 检索增强生成"}
-            edge = next(edge for edge in graph["edges"] if edge["kind"] == "relation")
+            assert evidence["record"]["display"] in {"检索增强生成 —related_to— 知识图谱", "知识图谱 —related_to— 检索增强生成"}
+            edge = next(edge for edge in graph["edges"] if edge["id"] == ids["relation"])
             assert edge["display"] == evidence["record"]["display"]
             assert evidence["evidence"]["items"][0]["location_status"] == "current"
-            update = _batch(objects=[{"id": ids["summary"], "expected_revision": 1, "summary": "增量修订摘要"}])
+            update = _batch(objects=[{"id": ids["summary"], "expected_revision": 1, "title": "增量修订标题"}])
             assert (await writer.call_tool("knowledge_apply", {"params": update})).data["success"]
 
     asyncio.run(read_and_revise())
-    code, references = http_cli("wiki", "references", library_id, sources[0]["file_id"])
+    code, references = http_cli("graph", "references", library_id, sources[0]["file_id"])
     assert code == 0 and references["data"]["total"] == 1
     evidence_id = references["data"]["evidence"][0]["id"]
     assert references["data"]["evidence"][0]["owner_kind"] == "relation"
@@ -344,18 +422,18 @@ def test_cross_entry_compile_query_conflict_and_source_lifecycle(api, knowledge_
         outcomes = list(pool.map(revise, ["调用者甲", "调用者乙"]))
     assert sorted(result["success"] for result in outcomes) == [False, True]
     assert next(result for result in outcomes if not result["success"])["error"]["code"] == "VERSION_CONFLICT"
-    code, page = http_cli("wiki", "get", "object", ids["summary"])
+    code, page = http_cli("graph", "get", "object", ids["summary"])
     assert code == 0 and page["data"]["record"]["revision"] == 3
-    assert page["data"]["record"]["body"] == "原文和综合结论各有用途。"
+    assert page["data"]["record"]["summary"] == "原文和综合结论各有用途。"
     _post(api, "file/reindex", file_id=sources[0]["file_id"], source="original", confirmed=True, request_key="reindex-source")
     knowledge_base.drain()
-    code, missing = http_cli("wiki", "get", "evidence", evidence_id)
+    code, missing = http_cli("graph", "get", "evidence", evidence_id)
     assert code == 0 and missing["data"]["record"]["location_status"] == "missing"
     assert missing["data"]["record"]["quote"] == sources[0]["quote"]
     lint = _post(api, "knowledge/lint", object_ids=[ids["rag"]])
     assert any(issue["code"] == "SOURCE_MISSING" and issue["evidence_id"] == evidence_id for issue in lint["issues"])
     preview = _post(api, "knowledge/delete", kind="evidence", id=evidence_id)
-    code, deleted = http_cli("wiki", "delete", "evidence", evidence_id, "--impact-token", preview["impact_token"],
+    code, deleted = http_cli("graph", "delete", "evidence", evidence_id, "--impact-token", preview["impact_token"],
                              "--request-id", "delete-source-evidence", "--yes")
     assert code == 0 and deleted["data"]["committed"]
     assert _post(api, "knowledge/get", kind="relation", id=ids["relation"])["evidence"]["total"] == 1
@@ -370,7 +448,7 @@ def test_file_deletion_exposes_reference_count_and_retains_knowledge(api, knowle
     knowledge_base.drain()
     file_id = source["file_id"]
     chunk = _post(api, "chunk/list", file_id=file_id)["chunks"][0]
-    oid = _object(api, body="知识正文不随原件删除")
+    oid = _object(api, summary="图谱摘要不随原件删除")
     library_id = _post(api, "knowledge/list")["library_id"]
     result = _post(api, "knowledge/apply", **_batch(evidence=[
         {"object": {"id": oid}, "source_kind": "piece", "source_library_id": library_id,
@@ -397,7 +475,7 @@ def test_file_deletion_exposes_reference_count_and_retains_knowledge(api, knowle
 
     asyncio.run(scenario())
     assert api.post("/api/v1/file/get", json={"file_id": file_id}).status_code == 404
-    assert _post(api, "knowledge/get", kind="object", id=oid)["record"]["body"] == "知识正文不随原件删除"
+    assert _post(api, "knowledge/get", kind="object", id=oid)["record"]["summary"] == "图谱摘要不随原件删除"
 
 
 def test_extract_quote_mcp_matches_api_and_feeds_apply(api, knowledge_base, mcp_servers):
@@ -479,7 +557,7 @@ def test_cli_extract_out_and_atomic_object_add_read_back(api, knowledge_base, ht
     assert "$ V_{DD} $" in evidence["quote"] and "<td>表格</td>" in evidence["quote"]
 
     request_path = tmp_path / "请求.json"
-    code, added = http_cli("wiki", "object", "add", "--kind", "concept", "--title", "公式概念",
+    code, added = http_cli("graph", "object", "add", "--kind", "concept", "--title", "公式概念",
                            "--alias", "VD D", "--evidence-file", str(evidence_path),
                            "--request-file", str(request_path), "--reason", "保存公式概念")
     assert code == 0 and added["success"] and added["data"]["committed"] is True
@@ -512,7 +590,7 @@ def test_cli_apply_source_changed_rolls_back_whole_batch(api, knowledge_base, ht
                    "expected_content_hash": "0" * 64}])
     batch_path = tmp_path / "batch.json"
     batch_path.write_text(json.dumps(batch, ensure_ascii=False), encoding="utf-8")
-    code, result = http_cli("wiki", "apply", "--input", batch_path, "--request-id", batch["request_key"])
+    code, result = http_cli("graph", "apply", "--input", batch_path, "--request-id", batch["request_key"])
     assert code == 1 and not result["success"]
     assert result["error"]["code"] == "SOURCE_CHANGED"
     # 整批回滚：对象不能半写，也不缓存请求结果。
@@ -524,8 +602,8 @@ def test_cli_apply_identical_retry_reuses_ids_and_counts(api, http_cli, tmp_path
     batch = _batch(objects=[{"ref": "item", "kind": "concept", "title": "幂等概念"}])
     batch_path = tmp_path / "batch.json"
     batch_path.write_text(json.dumps(batch, ensure_ascii=False), encoding="utf-8")
-    code, first = http_cli("wiki", "apply", "--input", batch_path, "--request-id", batch["request_key"])
-    code2, second = http_cli("wiki", "apply", "--input", batch_path, "--request-id", batch["request_key"])
+    code, first = http_cli("graph", "apply", "--input", batch_path, "--request-id", batch["request_key"])
+    code2, second = http_cli("graph", "apply", "--input", batch_path, "--request-id", batch["request_key"])
     assert code == 0 and code2 == 0
     assert first["data"]["refs"] == second["data"]["refs"]
     assert first["data"]["counts"] == second["data"]["counts"]
@@ -538,7 +616,7 @@ def test_cli_apply_same_title_creates_distinct_objects(api, http_cli, tmp_path):
                             {"ref": "b", "kind": "concept", "title": "同名概念"}])
     batch_path = tmp_path / "batch.json"
     batch_path.write_text(json.dumps(batch, ensure_ascii=False), encoding="utf-8")
-    code, result = http_cli("wiki", "apply", "--input", batch_path, "--request-id", batch["request_key"])
+    code, result = http_cli("graph", "apply", "--input", batch_path, "--request-id", batch["request_key"])
     assert code == 0 and result["success"]
     assert result["data"]["refs"]["a"]["id"] != result["data"]["refs"]["b"]["id"]
     assert _post(api, "knowledge/list")["total"] == 2
@@ -553,7 +631,7 @@ def test_cli_relation_receipt_exposes_submitted_fields_and_actual_structure(api,
                               {**relation, "ref": "b", "qualifier": ""}])
     source = tmp_path / "relations.json"
     source.write_text(json.dumps(batch, ensure_ascii=False), encoding="utf-8")
-    code, made = http_cli("wiki", "apply", "--input", source, "--read-back")
+    code, made = http_cli("graph", "apply", "--input", source, "--read-back")
     assert code == 0 and made["data"]["read_back"]["total"] == 1
     record = made["data"]["read_back"]["records"][0]
     assert record["submitted_fields"] == ["basis", "description", "predicate", "qualifier", "source", "status", "target"]
@@ -561,7 +639,7 @@ def test_cli_relation_receipt_exposes_submitted_fields_and_actual_structure(api,
     rid = record["record"]["id"]
 
     request_file = tmp_path / "description-update.json"
-    code, changed = http_cli("wiki", "relation", "update", rid, "--expected-revision", 1,
+    code, changed = http_cli("graph", "relation", "update", rid, "--expected-revision", 1,
                             "--description", "增量维护依赖稳定身份", "--request-file", request_file)
     assert code == 0 and changed["data"]["read_back"]["complete"]
     read = changed["data"]["read_back"]["records"][0]
@@ -569,7 +647,7 @@ def test_cli_relation_receipt_exposes_submitted_fields_and_actual_structure(api,
     assert read["record"]["display"] == "增量维护 —part_of→ 稳定身份"
     assert read["record"]["source_id"] == a and read["record"]["target_id"] == b
     assert read["record"]["predicate"] == "part_of" and read["record"]["revision"] == 2
-    code, recovered = http_cli("wiki", "request", "--input", request_file, "--read-back")
+    code, recovered = http_cli("graph", "request", "--input", request_file, "--read-back")
     assert code == 0 and recovered["data"]["read_back"]["records"][0]["submitted_fields"] == ["description"]
     cached = _post(api, "knowledge/request", request_key=changed["data"]["request_key"])
     assert "增量维护" not in json.dumps(cached, ensure_ascii=False) and "display" not in json.dumps(cached)
@@ -593,7 +671,7 @@ def test_cli_evidence_file_rejects_source_change_without_partial_write(api, know
     knowledge_base.drain()
 
     request_file = tmp_path / "request.json"
-    code, result = http_cli("wiki", "object", "add", "--kind", "concept", "--title", "应回滚",
+    code, result = http_cli("graph", "object", "add", "--kind", "concept", "--title", "应回滚",
                             "--evidence-file", evidence, "--request-file", request_file)
     assert code == 1 and result["error"]["code"] == "SOURCE_CHANGED"
     assert _post(api, "knowledge/list")["total"] == 0
@@ -603,7 +681,7 @@ def test_cli_evidence_file_rejects_source_change_without_partial_write(api, know
 
 
 def test_cli_new_request_can_recreate_deleted_object_without_reusing_old_receipt(api, http_cli, tmp_path):
-    args = ("wiki", "object", "add", "--kind", "concept", "--title", "同样内容")
+    args = ("graph", "object", "add", "--kind", "concept", "--title", "同样内容")
     first_file = tmp_path / "first.json"
     code, first = http_cli(*args, "--request-file", first_file)
     assert code == 0
@@ -611,7 +689,7 @@ def test_cli_new_request_can_recreate_deleted_object_without_reusing_old_receipt
     preview = _post(api, "knowledge/delete", kind="object", id=first_id, expected_revision=1, dry_run=True)
     _post(api, "knowledge/delete", kind="object", id=first_id, expected_revision=1,
           impact_token=preview["impact_token"], request_key="delete-first", dry_run=False, confirmed=True)
-    code, deleted = http_cli("wiki", "request", "delete-first", "--read-back")
+    code, deleted = http_cli("graph", "request", "delete-first", "--read-back")
     assert code == 0 and deleted["data"]["read_back"]["records"] == [
         {"kind": "object", "id": first_id, "deleted": True}]
 
@@ -620,6 +698,27 @@ def test_cli_new_request_can_recreate_deleted_object_without_reusing_old_receipt
     assert second["data"]["request_key"] != first["data"]["request_key"]
     assert second["data"]["read_back"]["records"][0]["has_evidence"] is False
     assert _post(api, "knowledge/list")["total"] == 1
-    code, replay = http_cli("wiki", "apply", "--input", first_file, "--read-back")
+    code, replay = http_cli("graph", "apply", "--input", first_file, "--read-back")
     assert code == 1 and replay["error"]["code"] == "READ_BACK_INCOMPLETE"
     assert replay["data"]["committed"] is True and _post(api, "knowledge/list")["total"] == 1
+
+
+@pytest.mark.parametrize("kind", ["page", "evidence"])
+def test_cli_wiki_delete_receipt_reads_back_deleted_actions(api, http_cli, kind):
+    made = _post(api, "wiki/apply", request_key=str(uuid4()), reason="删除读回回归",
+                 pages=[{"ref": "a", "kind": "topic", "title": "待删页", "body": "正文"}],
+                 evidence=[{"page": {"ref": "a"}, "source_kind": "user", "quote": "待删证据"}])
+    page_id = made["pages"][0]["id"]
+    record_id = page_id if kind == "page" else made["evidence"][0]["id"]
+    record = _post(api, "wiki/get", kind="page", id=page_id)["record"]
+    payload = {"kind": kind, "id": record_id, "expected_content_hash": record["content_hash"]}
+    if kind == "page":
+        payload["expected_revision"] = record["revision"]
+    preview = _post(api, "wiki/delete", **payload)
+    key = str(uuid4())
+    deleted = _post(api, "wiki/delete", **payload, request_key=key,
+                    impact_token=preview["impact_token"], dry_run=False, confirmed=True)
+    assert deleted["committed"]
+    code, result = http_cli("wiki", "request", key, "--read-back")
+    assert code == 0 and result["data"]["read_back"]["complete"]
+    assert {"kind": kind, "id": record_id, "deleted": True} in result["data"]["read_back"]["records"]

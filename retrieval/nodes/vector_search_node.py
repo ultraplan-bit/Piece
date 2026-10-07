@@ -60,12 +60,12 @@ def vector_search_node(state: State) -> dict:
                 placeholders = ",".join("?" * len(file_ids))
                 query_sql = f"""
                     SELECT
-                        c.doc_title,
+                        c.id AS chunk_id, c.doc_title,
                         1 - (vec_distance_cosine(v.embedding, ?) / 2) AS similarity
                     FROM vec_chunks v
                     JOIN chunks c ON v.chunk_id = c.id
                     WHERE c.file_id IN ({placeholders})
-                    ORDER BY vec_distance_cosine(v.embedding, ?)
+                    ORDER BY vec_distance_cosine(v.embedding, ?), c.id
                     LIMIT ?
                 """
                 params = [query_blob] + file_ids + [query_blob, config.vector_top_k]
@@ -73,11 +73,11 @@ def vector_search_node(state: State) -> dict:
                 # 无文件过滤，全局检索
                 query_sql = """
                     SELECT
-                        c.doc_title,
+                        c.id AS chunk_id, c.doc_title,
                         1 - (vec_distance_cosine(v.embedding, ?) / 2) AS similarity
                     FROM vec_chunks v
                     JOIN chunks c ON v.chunk_id = c.id
-                    ORDER BY vec_distance_cosine(v.embedding, ?)
+                    ORDER BY vec_distance_cosine(v.embedding, ?), c.id
                     LIMIT ?
                 """
                 params = [query_blob, query_blob, config.vector_top_k]
@@ -87,7 +87,7 @@ def vector_search_node(state: State) -> dict:
 
             # 转换为SearchResult列表
             vector_results: List[SearchResult] = [
-                {"doc_title": row[0], "score": float(row[1])}
+                {"chunk_id": row[0], "doc_title": row[1], "score": float(row[2])}
                 for row in rows
             ]
 

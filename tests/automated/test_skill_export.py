@@ -276,13 +276,13 @@ def test_render_skill_injects_prefix_and_header(skills_root: Path):
     assert "\r" not in rendered  # LF 输出
 
 
-def test_wiki_sample_batches_validate_and_roundtrip(knowledge_base):
+def test_graph_sample_batches_validate_and_roundtrip(knowledge_base):
     import json
     import re
     from indexing.services import knowledge_service as knowledge, file_service, chunk_service
 
     # 四个批次示例（含仅补证据）都必须可执行且可读回。
-    apply_md = skills_dir() / "piece-wiki" / "references" / "apply.md"
+    apply_md = skills_dir() / "piece-graph" / "references" / "apply.md"
     content = apply_md.read_text(encoding="utf-8")
     assert "<PIECE>" in content
     batches = [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", content, re.S)]
@@ -325,6 +325,57 @@ def test_wiki_sample_batches_validate_and_roundtrip(knowledge_base):
     assert knowledge.get_record(kind="relation", id=rid)["record"]["revision"] == 1
     for evidence in added["evidence"]:
         assert knowledge.get_record(kind="evidence", id=evidence["id"])["record"]["location_status"] == "current"
+
+
+def test_wiki_sample_batches_validate_and_roundtrip(knowledge_base):
+    import json
+    import re
+    from indexing.services import wiki_service as wiki, file_service, chunk_service
+    from indexing.services import knowledge_common
+
+    # 四个批次示例（含仅补证据）都必须可执行且可读回。
+    apply_md = skills_dir() / "piece-wiki" / "references" / "apply.md"
+    content = apply_md.read_text(encoding="utf-8")
+    assert "<PIECE>" in content
+    batches = [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", content, re.S)]
+    assert len(batches) == 4
+    first = wiki.apply({**batches[0], "request_key": "wiki-create"})
+    pid = first["refs"]["concept"]["id"]
+    page = wiki.get_record(kind="page", id=pid)["record"]
+    update = batches[1]
+    update["pages"][0].update(id=pid, expected_revision=page["revision"],
+                              expected_content_hash=page["content_hash"])
+    wiki.apply({**update, "request_key": "wiki-update"})
+    assert wiki.get_record(kind="page", id=pid)["record"]["revision"] == 2
+
+    # 新建页面并附本库证据。
+    source_batch = batches[2]
+    fid = file_service.create_empty_file("wiki示例来源")["file_id"]
+    chunk_service.create_chunk_add_task(fid, "wiki示例来源", source_batch["evidence"][0]["quote"])
+    knowledge_base.drain()
+    cid = file_service.get_chunks_by_file_id(fid)[0]["id"]
+    source_batch["evidence"][0].update(source_library_id=first["library_id"],
+                                       source_file_id=fid, source_chunk_id=cid)
+    created = wiki.apply({**source_batch, "request_key": "wiki-page-evidence"})
+    new_page = wiki.get_record(kind="page", id=created["refs"]["p"]["id"])
+    assert new_page["has_evidence"] and new_page["evidence"]["items"][0]["location_status"] == "current"
+
+    # 仅补证据：pages 只带并发条件，页面 revision 不变。
+    only = batches[3]
+    page_now = wiki.get_record(kind="page", id=pid)["record"]
+    only["pages"][0].update(id=pid, expected_revision=page_now["revision"],
+                            expected_content_hash=page_now["content_hash"])
+    only["evidence"][0]["page"] = {"id": pid}
+    source = chunk_service.get_chunk_by_id(cid)
+    assert source is not None
+    for evidence in only["evidence"]:
+        evidence.update(source_library_id=first["library_id"], source_file_id=fid, source_chunk_id=cid,
+                        expected_content_hash=knowledge_common.content_hash(source["chunk_text"]))
+    added = wiki.apply({**only, "request_key": "wiki-evidence-only"})
+    # 仅补证据：页面条目没有内容改动字段，但证据写入页面文件，revision 会推进。
+    assert added["pages"] and added["pages"][0]["submitted_fields"] == []
+    assert wiki.get_record(kind="page", id=pid)["record"]["revision"] == page_now["revision"] + 1
+    assert wiki.get_record(kind="page", id=pid)["has_evidence"]
 
 
 def test_wiki_gui_discovery_preview_and_export(tmp_path, monkeypatch):

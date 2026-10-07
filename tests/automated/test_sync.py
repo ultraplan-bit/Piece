@@ -62,7 +62,7 @@ def sync(knowledge_base, monkeypatch):
         "username": "test", "password": "private-password"}})
     service = SyncService()
     client = MemoryDav()
-    monkeypatch.setattr(service, "_get_client", lambda: client)
+    monkeypatch.setattr("indexing.services.sync_service.WebDAV4Client", lambda *args, **kwargs: client)
     root = knowledge_base.path / "files"
     (root / "originals").mkdir(parents=True)
     (root / "working").mkdir()

@@ -68,7 +68,7 @@ def extract_chunk(chunk_id, lines=None, grep=None, context=0, max_matches=20, re
     定位（行号或匹配）可以宽松，但返回的 quote 始终是正文的精确子串，仍受
     apply 的逐字校验约束；服务不替 Agent 判断引文是否支持断言。
     """
-    from .knowledge_service import content_hash, library_id, normalize_newlines
+    from .knowledge_common import content_hash, library_id, normalize_newlines
     chunk = chunk_service.get_chunk_by_id(chunk_id)
     if not chunk:
         raise BusinessError("NOT_FOUND", "卡片不存在")
@@ -105,12 +105,16 @@ def extract_chunk(chunk_id, lines=None, grep=None, context=0, max_matches=20, re
 def delete_files(file_ids, dry_run=False, confirmed=False):
     ids = list(dict.fromkeys(file_ids))
     files = [file_info(file_id) for file_id in ids]
-    from .knowledge_service import file_reference_count
+    from .knowledge_service import file_reference_count as graph_reference_count
+    from .wiki_service import file_reference_count as wiki_reference_count
+    graph_count = sum(graph_reference_count(file_id) for file_id in ids)
+    wiki_count = sum(wiki_reference_count(file_id) for file_id in ids)
     impact = {"file_ids": ids, "filenames": [f["filename"] for f in files],
               "chunks_count": sum(f["chunks_count"] for f in files), "deletes_original_copies": True,
-              "knowledge_evidence_count": sum(file_reference_count(file_id) for file_id in ids),
+              "knowledge_evidence_count": graph_count + wiki_count,
+              "graph_evidence_count": graph_count, "wiki_evidence_count": wiki_count,
               "retains_knowledge_snapshots": True,
-              "knowledge_warning": "知识对象和引用快照将保留，来源将标记为 missing；彻底移除引用须显式删除相关证据和知识内容。"}
+              "knowledge_warning": "Wiki 页面、图实体和各自引用快照将保留，来源将标记为 missing；彻底移除引用须分别显式删除相关证据和知识内容。"}
     if dry_run:
         return {**impact, "dry_run": True}
     if not confirmed:

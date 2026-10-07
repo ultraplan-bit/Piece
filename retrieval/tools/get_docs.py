@@ -28,12 +28,13 @@ def _load_collections(cursor, file_ids: List[int]) -> Dict[int, List[str]]:
     return mapping
 
 
-def get_docs(doc_titles: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+def get_docs(doc_titles: Optional[List[str]] = None, *, chunk_ids: Optional[List[int]] = None) -> Dict[str, Optional[Dict[str, Any]]]:
     """
     根据doc_title列表获取文档内容及元数据（使用连接池）
 
     Args:
-        doc_titles: doc_title列表（如["项目手册_快速开始", "接口文档_鉴权"]）
+        doc_titles: 兼容旧标题查询；同名时返回 ambiguous/candidates，不选择任意一张。
+        chunk_ids: 精确卡片 ID，与 doc_titles 二选一；返回字典以字符串 ID 为键。
 
     Returns:
         doc_title到文档详情的字典映射
@@ -63,13 +64,17 @@ def get_docs(doc_titles: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
         file_path 供服务端解析正文中的相对图片引用，original_file_path 供
         PDF 原页渲染回退，两者都是本机路径，返回给 MCP 客户端前由调用方剔除
     """
-    if not doc_titles:
+    if chunk_ids is not None and doc_titles:
+        raise ValueError("doc_titles 与 chunk_ids 只能提供一项")
+    selectors = chunk_ids if chunk_ids is not None else doc_titles
+    if not selectors:
         return {}
+    if chunk_ids is not None and any(type(chunk_id) is not int or chunk_id < 1 for chunk_id in chunk_ids):
+        raise ValueError("chunk_ids 必须为正整数列表")
 
-    # 使用连接池
     with get_db_cursor() as cursor:
-        # 构建占位符
-        placeholders = ",".join(["?" for _ in doc_titles])
+        column = "c.id" if chunk_ids is not None else "c.doc_title"
+        placeholders = ",".join("?" for _ in selectors)
 
         # 批量查询：统计切片在所属文件中的真实位置
         # （窗口函数只能统计结果集内的行，命中多个切片时会给出错误的总数和序号）
@@ -94,18 +99,19 @@ def get_docs(doc_titles: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
                 f.original_file_path
             FROM chunks c
             JOIN files f ON c.file_id = f.id
-            WHERE c.doc_title IN ({placeholders})
+            WHERE {column} IN ({placeholders})
+            ORDER BY c.id
         """
 
-        cursor.execute(query, doc_titles)
+        cursor.execute(query, selectors)
         rows = cursor.fetchall()
 
         collections_by_file = _load_collections(
             cursor, list({row[1] for row in rows})
         )
 
-        # 构建doc_title到文档详情的映射
-        result = {}
+        # 同名结果先分组，禁止字典赋值静默覆盖另一张卡片。
+        matches = {}
         for row in rows:
             doc: Dict[str, Any] = {
                 "chunk_id": row[0],
@@ -134,11 +140,20 @@ def get_docs(doc_titles: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
                 if isinstance(properties, dict) and properties:
                     doc["properties"] = properties
 
-            result[row[2]] = doc  # row[2] 是 doc_title
+            key = str(row[0]) if chunk_ids is not None else row[2]
+            matches.setdefault(key, []).append(doc)
 
-        # 对于未找到的doc_title，设置为None
-        for title in doc_titles:
-            if title not in result:
-                result[title] = None
-
+        result = {}
+        for selector in selectors:
+            key = str(selector)
+            docs = matches.get(key, [])
+            if len(docs) <= 1:
+                result[key] = docs[0] if docs else None
+            else:
+                result[key] = {
+                    "doc_title": key, "ambiguous": True,
+                    "candidates": [{field: doc.get(field) for field in
+                                    ("chunk_id", "file_id", "filename", "doc_title", "heading_path")}
+                                   for doc in docs],
+                }
         return result

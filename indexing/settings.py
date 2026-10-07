@@ -262,6 +262,10 @@ class AppSettings(BaseModel):
         """获取文件存储路径"""
         return self.get_data_path() / "files"
 
+    def get_sync_target(self) -> tuple[Path, str, str]:
+        """同步历史属于这一对本地目录与远端账户，不随凭据轮换失效。"""
+        return self.get_data_path().resolve(), self.webdav.hostname, self.webdav.username
+
 
 def _get_config_file_path() -> Path:
     """获取配置文件路径（首次启动时使用默认路径）"""
@@ -293,6 +297,10 @@ def save_settings(settings: AppSettings, *, update_cache: bool = True) -> bool:
     path = _get_config_file_path()
     temporary = None
     try:
+        if path.exists():
+            previous = AppSettings.model_validate(json.loads(path.read_text(encoding="utf-8")))
+            if previous.get_sync_target() != settings.get_sync_target():
+                settings.webdav.last_sync_time = None
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, name = tempfile.mkstemp(prefix=".config-", dir=path.parent)
         temporary = Path(name)
@@ -306,7 +314,7 @@ def save_settings(settings: AppSettings, *, update_cache: bool = True) -> bool:
             global _settings
             _settings = settings
         return True
-    except OSError:
+    except (OSError, ValueError):
         logger.error("[Settings] 配置保存失败，原配置未替换")
         return False
     finally:

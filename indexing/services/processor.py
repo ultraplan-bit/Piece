@@ -589,22 +589,32 @@ async def _process_regular_file(
             encoding="utf-8",
         )
 
-    # Markdown 开头的 YAML frontmatter 存为文件属性，并从正文剥离，
-    # 否则这段元数据会混进第一个切片污染检索
-    metadata, content = await run_sync(parse_frontmatter, content)
-    # 属性随成功发布的索引一起切换，失败不能提前覆盖现有属性。
-    if file_extension == ".md":
-        # Obsidian 笔记的 %% 注释和 dataview 查询块不是正文，不进切片
-        content = strip_obsidian_noise(content)
+    chunks = None
+    metadata = None
+    if original_file_path is None:
+        # 只对全文仍等于当前卡片副本的 working 保留手工标题、边界和来源路径。
+        # 外部改稿必须重新解析，不能仅凭 mtime/文件名判断。
+        file_info = await run_sync(file_service.get_file_by_id, file_id)
+        current_chunks = await run_sync(file_service.get_chunks_by_file_id, file_id)
+        if file_info and current_chunks and content == chunk_service.render_working_file(file_info, current_chunks):
+            chunks = current_chunks
+    if chunks is None:
+        # Markdown 开头的 YAML frontmatter 存为文件属性，并从正文剥离，
+        # 否则这段元数据会混进第一个切片污染检索
+        metadata, content = await run_sync(parse_frontmatter, content)
+        # 属性随成功发布的索引一起切换，失败不能提前覆盖现有属性。
+        if file_extension == ".md":
+            # Obsidian 笔记的 %% 注释和 dataview 查询块不是正文，不进切片
+            content = strip_obsidian_noise(content)
 
-    await run_sync(
-        working_file_path.write_text,
-        content,
-        encoding="utf-8",
-    )
+        await run_sync(
+            working_file_path.write_text,
+            content,
+            encoding="utf-8",
+        )
 
-    chunker = ChunkerFactory.get_chunker(file_extension)
-    chunks = await run_sync(chunker.chunk, content, base_name)
+        chunker = ChunkerFactory.get_chunker(file_extension)
+        chunks = await run_sync(chunker.chunk, content, base_name)
     del content
     if not chunks:
         raise ValueError("无有效分块")

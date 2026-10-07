@@ -3,8 +3,9 @@
 from nicegui import ui
 
 from app.i18n import t
-from app.ui.views.knowledge_view import KnowledgeWorkbench
-from app.ui.views.knowledge_presenter import local_source
+from app.ui.views.wiki_view import WikiWorkbench
+from app.ui.views.graph_view import GraphWorkbench
+from app.ui.views.knowledge_common import local_source
 
 from indexing.settings import get_settings
 from app.ui.styles import inject_theme_css, init_theme, apply_theme
@@ -85,8 +86,8 @@ def register_pages(port: int = 8689):
         file_handlers.set_chunk_handlers(chunk_handlers)
 
         async def switch_view(view):
-            if current_view["value"] == "knowledge":
-                await knowledge.remember_positions()
+            if current_view["value"] == "graph":
+                await graph.remember_positions()
             current_view["value"] = view
             adapt_navigation()
             selected_setting["value"] = None
@@ -122,10 +123,9 @@ def register_pages(port: int = 8689):
         init_theme(dark_mode, settings.appearance.theme)
         inject_theme_css()
 
-        async def open_knowledge_source(evidence):
-            from indexing.services import knowledge_service
+        async def open_knowledge_source(workbench, service, return_view, evidence):
             from indexing.services.errors import BusinessError
-            fresh = await knowledge.call(knowledge_service.get_record, kind="evidence", id=evidence["id"])
+            fresh = await workbench.call(service.get_record, kind="evidence", id=evidence["id"])
             if not fresh:
                 return
             destination = local_source(fresh["record"], fresh["library_id"])
@@ -133,6 +133,7 @@ def register_pages(port: int = 8689):
                 ui.notify(t("knowledge.source_unavailable"), type="warning")
                 return
             state["knowledge_return"] = True
+            state["knowledge_return_view"] = return_view
             await switch_view("files")
             try:
                 await file_handlers.load_chunks(destination[0], chunk_id=destination[1])
@@ -146,11 +147,23 @@ def register_pages(port: int = 8689):
             if page:
                 await chunk_handlers.handle_view_source_page(page)
 
-        knowledge = KnowledgeWorkbench(open_source=open_knowledge_source,
-                                       show_knowledge=lambda: switch_view("knowledge"),
-                                       dark=lambda: dark_mode.value)
-        ui_refs["knowledge_references"] = knowledge.file_references
-        ui_refs["return_knowledge"] = lambda: switch_view("knowledge")
+        async def open_wiki_source(evidence):
+            from indexing.services import wiki_service
+            await open_knowledge_source(wiki, wiki_service, "wiki", evidence)
+
+        async def open_graph_source(evidence):
+            from indexing.services import knowledge_service
+            await open_knowledge_source(graph, knowledge_service, "graph", evidence)
+
+        wiki = WikiWorkbench(open_source=open_wiki_source,
+                             show_view=lambda: switch_view("wiki"),
+                             dark=lambda: dark_mode.value)
+        graph = GraphWorkbench(open_source=open_graph_source,
+                               show_view=lambda: switch_view("graph"),
+                               dark=lambda: dark_mode.value)
+        ui_refs["wiki_references"] = wiki.file_references
+        ui_refs["graph_references"] = graph.file_references
+        ui_refs["return_knowledge"] = lambda: switch_view(state.get("knowledge_return_view") or "wiki")
 
         def remember_width(key, value):
             if value > 0:
@@ -177,7 +190,8 @@ def register_pages(port: int = 8689):
                 sidebar_nav = render_sidebar(
                     current_view=current_view,
                     switch_to_files=lambda: switch_view("files"),
-                    switch_to_knowledge=lambda: switch_view("knowledge"),
+                    switch_to_wiki=lambda: switch_view("wiki"),
+                    switch_to_graph=lambda: switch_view("graph"),
                     switch_to_recall_test=lambda: switch_view("recall_test"),
                     switch_to_cloud_sync=lambda: switch_view("cloud_sync"),
                     switch_to_mcp_config=lambda: switch_view("mcp_config"),
@@ -197,8 +211,10 @@ def register_pages(port: int = 8689):
                             view = current_view["value"]
                             if view == "files":
                                 render_files_middle(state=state, ui_refs=ui_refs, file_handlers=file_handlers)
-                            elif view == "knowledge":
-                                knowledge.render_middle()
+                            elif view == "wiki":
+                                wiki.render_middle()
+                            elif view == "graph":
+                                graph.render_middle()
                             elif view == "recall_test":
                                 render_recall_test_middle(recall_state=recall_state, ui_refs=ui_refs)
                             elif view == "cloud_sync":
@@ -219,7 +235,7 @@ def register_pages(port: int = 8689):
                             view = current_view["value"]
                             if view == "files":
                                 render_files_right(state=state, ui_refs=ui_refs, chunk_handlers=chunk_handlers, file_handlers=file_handlers)
-                            elif view == "knowledge":
+                            elif view in ("wiki", "graph"):
                                 with ui.column().classes("w-full h-full gap-0"):
                                     with ui.row().classes("px-3 py-1 gap-1"):
                                         ui.button(t("knowledge.navigation"), on_click=toggle_navigation).props("flat dense no-caps")
@@ -227,7 +243,7 @@ def register_pages(port: int = 8689):
                                         ui.button(t("knowledge.reading"), on_click=toggle_reading).props("flat dense no-caps")
                                         if state.get("selected_file_id"):
                                             ui.button(t("knowledge.return_file"), on_click=lambda: switch_view("files")).props("flat dense no-caps")
-                                    knowledge.render_right()
+                                    (wiki if view == "wiki" else graph).render_right()
                             elif view == "recall_test":
                                 render_recall_test_right(recall_state=recall_state, ui_refs=ui_refs)
                             elif view == "cloud_sync":
@@ -253,7 +269,7 @@ def register_pages(port: int = 8689):
 
         def adapt_navigation():
             previous = state["navigation_before_narrow"]
-            if current_view["value"] == "knowledge" and state["narrow"]:
+            if current_view["value"] in ("wiki", "graph") and state["narrow"]:
                 if previous is None:
                     state["navigation_before_narrow"] = navigation_splitter.value
                     navigation_splitter.value = 0

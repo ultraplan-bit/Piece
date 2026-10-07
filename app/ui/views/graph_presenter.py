@@ -1,79 +1,15 @@
-"""知识工作台的纯展示逻辑；不导入 GUI 或执行来源链接。"""
+"""知识图谱工作台的纯展示逻辑；不导入 GUI、不执行来源链接，不涉及 Wiki 正文。"""
 from copy import deepcopy
-from html import escape
-from html.parser import HTMLParser
 import math
-from urllib.parse import urlsplit
-from uuid import UUID, uuid4
 
-KINDS = ("concept", "entity", "topic", "synthesis", "source_summary")
+# 图谱节点只包含 concept / entity，与 Wiki 页面类型分开。
+KINDS = ("concept", "entity")
 STATUSES = ("active", "disputed", "outdated")
 PREDICATES = ("is_a", "part_of", "depends_on", "applies_to", "supports", "contradicts", "related_to")
 BASES = ("explicit", "synthesis", "inference", "user_statement")
-# 三个经 all-pairs 验证的色组，五种类型由固定色组 + 独特形状共同编码。
-TYPE_MARKS = {"concept": (0, "circle"), "entity": (0, "rect"), "topic": (2, "diamond"),
-              "synthesis": (1, "triangle"), "source_summary": (1, "roundRect")}
-PALETTES = {False: ("#2a78d6", "#eb6834", "#1baf7a"), True: ("#3987e5", "#d95926", "#199e70")}
-
-
-def safe_destination(value):
-    if not isinstance(value, str) or any(ord(c) <= 32 or ord(c) == 127 for c in value) or "\\" in value:
-        return None
-    try:
-        parsed = urlsplit(value)
-        if parsed.scheme == "piece" and parsed.netloc == "knowledge" and not parsed.query and not parsed.fragment:
-            ident = str(UUID(parsed.path[1:]))
-            if parsed.path[1:].lower() == ident:
-                return ("knowledge", ident)
-        if parsed.scheme in ("http", "https") and parsed.hostname and not parsed.username and not parsed.password:
-            parsed.port
-            return ("external", value)
-    except (ValueError, TypeError):
-        pass
-    return None
-
-
-class _SafeKnowledgeHTML(HTMLParser):
-    tags = set("p br hr h1 h2 h3 h4 h5 h6 em strong del blockquote ul ol li pre code table thead tbody tr th td a span div math semantics mrow mi mn mo mtext mspace mfrac msqrt mroot msup msub msubsup munder mover munderover mtable mtr mtd annotation".split())
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag not in self.tags:
-            return
-        attributes = ""
-        if tag == "a":
-            destination = safe_destination(dict(attrs).get("href"))
-            if destination:
-                kind, value = destination
-                if kind == "knowledge":
-                    attributes = f' href="#knowledge/{value}" data-knowledge-id="{value}"'
-                else:
-                    attributes = f' href="{escape(value, quote=True)}" target="_blank" rel="noopener noreferrer"'
-        self.parts.append(f"<{tag}{attributes}>")
-
-    def handle_endtag(self, tag):
-        if tag in self.tags:
-            self.parts.append(f"</{tag}>")
-
-    def handle_data(self, data):
-        self.parts.append(escape(data))
-
-
-def safe_knowledge_html(rendered):
-    parser = _SafeKnowledgeHTML()
-    parser.feed(rendered)
-    return "".join(parser.parts)
-
-
-def local_source(evidence, library_id):
-    if (evidence.get("source_kind") == "piece" and evidence.get("source_library_id") == library_id
-            and evidence.get("location_status") in ("current", "changed")
-            and type(evidence.get("source_file_id")) is int and type(evidence.get("source_chunk_id")) is int):
-        return evidence["source_file_id"], evidence["source_chunk_id"]
-    return None
+# 两种类型用不同色组 + 独特形状，避免只靠颜色区分。
+TYPE_MARKS = {"concept": (0, "circle"), "entity": (1, "rect")}
+PALETTES = {False: ("#2a78d6", "#eb6834"), True: ("#3987e5", "#d95926")}
 
 
 def graph_options(graph, *, dark=False, selected=None, positions=None, label=lambda value: value):
@@ -98,13 +34,11 @@ def graph_options(graph, *, dark=False, selected=None, positions=None, label=lam
         pair = tuple(sorted((edge["source_id"], edge["target_id"])))
         ordinal = pairs.get(pair, 0)
         pairs[pair] = ordinal + 1
-        edge_name = label("link" if edge["kind"] == "link" else edge["predicate"])
+        edge_name = label(edge.get("predicate") or "relation")
         arrow = " ↔ " if edge.get("symmetric") else " → "
-        edges.append({"id": edge["id"], "edge_kind": edge["kind"], "source": edge["source_id"],
-                      "target": edge["target_id"], "name": edge_name,
+        edges.append({"id": edge["id"], "source": edge["source_id"], "target": edge["target_id"], "name": edge_name,
                       "symbol": ["none", "none" if edge.get("symmetric") else "arrow"],
-                      "lineStyle": {"width": 1.5, "opacity": 0.55, "curveness": 0.12 + ordinal * 0.12,
-                                    "type": "dashed" if edge["kind"] == "link" else "solid"},
+                      "lineStyle": {"width": 1.5, "opacity": 0.55, "curveness": 0.12 + ordinal * 0.12, "type": "solid"},
                       "tooltip_text": names[edge["source_id"]] + arrow + names[edge["target_id"]] + " · " + edge_name})
     return {"backgroundColor": surface, "animation": False,
             # HTML tooltip 支持点击穿透；只返回 textContent 节点，模型文本不能成为 HTML。
@@ -144,15 +78,3 @@ def merge_graph(current, incoming):
             edges.add(edge["id"])
             result["edges"].append(edge)
     return result
-
-
-class PendingWrite:
-    """提交不可变副本；未知结果只能查原键/原样重试。"""
-    def __init__(self, payload):
-        self.payload = deepcopy(payload)
-        self.payload["request_key"] = str(uuid4())
-        self.uncertain = False
-
-    @property
-    def key(self):
-        return self.payload["request_key"]

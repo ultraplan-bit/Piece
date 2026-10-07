@@ -35,21 +35,19 @@ def output_node(state: State) -> State:
     # 取Top-K结果
     top_k_results = fused_results[:state.get("limit", config.final_top_k)]
 
-    # 提取关键词列表（doc_title）
-    final_keywords: List[str] = [result["doc_title"] for result in top_k_results]
+    # 旧关键词接口仍返回去重标题；身份和每张卡片的分数由 candidates 保留。
+    final_keywords: List[str] = list(dict.fromkeys(result["doc_title"] for result in top_k_results))
 
-    # 生成置信度分数字典（归一化到 0-1 范围，裁剪到 4 位小数）
-    # RRF 理论最大值 = 1 / (k + 1)，归一化后分数更直观
+    # 同名标题在兼容分数字典中取最高分，不能被后面的低分卡片覆盖。
     max_rrf = 1.0 / (config.rrf_k + 1)
-    confidence_scores: Dict[str, float] = {
-        result["doc_title"]: round(result["rrf_score"] / max_rrf, 4)
-        for result in top_k_results
-    }
+    confidence_scores: Dict[str, float] = {}
+    for result in top_k_results:
+        confidence_scores.setdefault(result["doc_title"], round(result["rrf_score"] / max_rrf, 4))
 
     # 生成精简的统计信息（仅保留对 AI 决策有用的字段）
     stats: Dict[str, Any] = {
         "total_fused_results": len(fused_results),
-        "final_top_k": len(final_keywords),
+        "final_top_k": len(top_k_results),
     }
 
     # 调试信息保留在 state 中，由 server.py 通过 ctx.info() 输出

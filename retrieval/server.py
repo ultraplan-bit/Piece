@@ -23,6 +23,8 @@ from indexing.services.errors import BusinessError
 from indexing.settings import get_mcp_config
 from indexing import knowledge_models as km
 from indexing.services import knowledge_service as knowledge
+from indexing import wiki_models as wm
+from indexing.services import wiki_service as wiki
 
 
 # 创建FastMCP服务实例
@@ -31,7 +33,10 @@ from indexing.services import knowledge_service as knowledge
 mcp = FastMCP(
     name="piece-kb",
     instructions="""Piece searches user's personal documents. Call resolve-keywords to find relevant documents, then get-docs to retrieve content. Use get-source-page with a file_id and 1-based page_number to inspect a full source page when OCR, tables, formulas, or layout need verification.
-Knowledge pages are separate from document search: use knowledge-list/search, then knowledge-get for body and paginated evidence, knowledge-graph for bounded neighbors, knowledge-references for source backlinks, knowledge-lint for read-only structural checks, knowledge-history/request for revisions and committed outcomes. These tools take a params JSON object, use UUID knowledge IDs (not integer file/chunk IDs), and never call models or modify data. library_id is the persistent source-library UUID, not the service connection identity. Evidence location_status is current/changed/missing/unresolved/unverified; even current does not verify a claim. Read sources before drawing conclusions; duplicate names do not imply identical objects. To turn a source passage into exact evidence, call extract-quote with a chunk_id and lines or grep instead of copying long LaTeX/HTML text by hand. Knowledge mutations are provided by the index service.""",
+Two knowledge features are separate from document search and from each other; both never call models or modify data.
+Knowledge graph: knowledge-list/search, knowledge-get for an entity/relation/evidence (entities have no body), knowledge-graph for bounded neighbors, knowledge-references for source backlinks, knowledge-lint for read-only structural checks, knowledge-history/request for revisions and committed outcomes.
+Wiki pages: wiki-list/search, wiki-get for a page body plus paginated evidence, page links and backlinks, wiki-references for source backlinks, wiki-lint for read-only checks, wiki-history/request for revisions and committed outcomes. Wiki pages are Markdown and independent of graph entities; page links are navigation, not semantic claims.
+All these tools take a params JSON object, use UUID IDs (not integer file/chunk IDs). library_id is the persistent source-library UUID, not the service connection identity. Evidence location_status is current/changed/missing/unresolved/unverified; even current does not verify a claim. Read sources before drawing conclusions; duplicate names do not imply identical pages/entities. To turn a source passage into exact evidence, call extract-quote with a chunk_id and lines or grep instead of copying long LaTeX/HTML text by hand. Knowledge and Wiki mutations are provided by the index service.""",
     strict_input_validation=False,
 )
 
@@ -68,7 +73,7 @@ async def list_collections_tool(ctx: Context) -> dict:
 
 @mcp.tool(
     name="resolve-keywords",
-    description="Resolves queries to relevant document keywords (doc_title). Returns up to 20 keyword candidates with confidence scores. IMPORTANT: When user mentions a specific book, document, or file name (e.g., 'find in the Python book', 'from my ML notes'), you SHOULD use the filenames parameter to narrow search scope for more accurate results. When the user names a topic area or library section (e.g., 'in my papers', 'from the work notes'), use the collections parameter instead - call list-collections first if you are unsure which collections exist.",
+    description="Resolves queries to relevant document keywords (doc_title). Returns up to 20 ranked chunk candidates (chunk_id, doc_title, file_id, filename, score), plus legacy keywords and confidence_scores grouped by title. Prefer candidates[].chunk_id with get-docs; identical titles are different cards. IMPORTANT: When user mentions a specific book, document, or file name (e.g., 'find in the Python book', 'from my ML notes'), you SHOULD use the filenames parameter to narrow search scope for more accurate results. When the user names a topic area or library section (e.g., 'in my papers', 'from the work notes'), use the collections parameter instead - call list-collections first if you are unsure which collections exist.",
     tags={"retrieval", "keywords"},
 )
 async def resolve_keywords_tool(
@@ -87,7 +92,8 @@ async def resolve_keywords_tool(
     max_results: Annotated[
         int,
         Field(
-            description="Maximum number of keywords to return (default: 20, range: 1-50)"
+            ge=1, le=50,
+            description="Maximum number of chunk candidates to return (default: 20, range: 1-50)"
         ),
     ] = 20,
     include_descendants: Annotated[bool, Field(description="Include descendant collections in the read scope (default true); false means direct membership only.")] = True,
@@ -104,15 +110,10 @@ async def resolve_keywords_tool(
     try:
         # 调用核心工作流（传递可选的文件名/集合过滤）
         result = await resolve_database_keywords(
-            query, filenames=filenames, collections=collections, include_descendants=include_descendants
+            query, filenames=filenames, collections=collections, include_descendants=include_descendants, limit=max_results
         )
 
         keywords = result.get("keywords", [])
-        # 如果需要，可以根据max_results截断结果
-        if max_results and max_results < len(keywords):
-            keywords = keywords[:max_results]
-            result["keywords"] = keywords
-            await ctx.info(f"[Tool 1] Truncated to max_results={max_results}")
 
         await ctx.info(f"[Tool 1] Resolved {len(keywords)} keywords")
 
@@ -142,7 +143,7 @@ async def resolve_keywords_tool(
 
 @mcp.tool(
     name="get-docs",
-    description="Retrieves full document content and metadata for specified doc_titles (up to 3). Returns chunk_id, file_id, filename, chunk_text, heading_path (where the chunk sits in the document outline), total_chunks_in_file, chunk_index_in_file, plus collections and properties (frontmatter fields such as author/date/source) when available - cite those when the user asks where an answer came from. Input exact doc_title strings from resolve-keywords results. Set include_images=true when the content references figures/charts you need to actually see - the referenced images are returned as inline image data. Image batches follow the user's per-call limit (default 6). If next_image_offset is not null, retrieve more images with include_images=true and image_offset=next_image_offset, keeping doc_titles in the same order and max_docs unchanged; null means no images remain. For full-page source verification, use get-source-page with file_id and page_number.",
+    description="Retrieves full content and metadata for up to 3 chunk_ids (preferred) or legacy doc_titles. For chunk_ids, documents is keyed by string ID. For titles, unique matches keep title keys; duplicate titles are reported in ambiguous with candidate IDs, without choosing arbitrary content. Returns chunk_id, file_id, filename, chunk_text, heading_path (where the chunk sits in the document outline), total_chunks_in_file, chunk_index_in_file, plus collections and properties (frontmatter fields such as author/date/source) when available - cite those when the user asks where an answer came from. Input exact chunk_ids from resolve-keywords candidates; doc_titles remains supported for unambiguous titles. Set include_images=true when the content references figures/charts you need to actually see - the referenced images are returned as inline image data. Image batches follow the user's per-call limit (default 6). If next_image_offset is not null, retrieve more images with include_images=true and image_offset=next_image_offset, keeping doc_titles or chunk_ids in the same order and max_docs unchanged; null means no images remain. For full-page source verification, use get-source-page with file_id and page_number.",
     tags={"docs", "retrieval"},
     # 返回类型含 ToolResult 时 FastMCP 不再自动推导 schema，这里显式补回原有声明
     output_schema={"type": "object", "additionalProperties": True},
@@ -150,8 +151,8 @@ async def resolve_keywords_tool(
 async def get_docs_tool(
     ctx: Context,
     doc_titles: Annotated[
-        Union[List[str], str], Field(description="List of doc_titles to retrieve (max 3), supports list or JSON string")
-    ],
+        Optional[Union[List[str], str]], Field(description="Legacy doc_titles (max 3), list or JSON string; omit when using chunk_ids. Duplicate titles require retry by ID.")
+    ] = None,
     include_metadata: Annotated[
         bool,
         Field(description="Include document metadata in response (default: false)"),
@@ -175,6 +176,10 @@ async def get_docs_tool(
             description="Number of usable images to skip across all requested documents (default: 0). Only used when images are included. To continue, pass the returned next_image_offset with the same doc_titles/order and max_docs.",
         ),
     ] = 0,
+    chunk_ids: Annotated[
+        Optional[List[Annotated[int, Field(ge=1)]]],
+        Field(description="Exact chunk IDs from resolve-keywords candidates (max 3), mutually exclusive with doc_titles. Keep IDs/order unchanged for image pagination."),
+    ] = None,
 ) -> Union[dict, ToolResult]:
     # 处理字符串形式的列表（某些模型会传递 '["title1","title2"]' 而不是 ["title1","title2"]）
     if isinstance(doc_titles, str):
@@ -188,13 +193,15 @@ async def get_docs_tool(
                 "error": f"Invalid doc_titles format. Expected JSON array like [\"title1\", \"title2\"], got: {repr(doc_titles)}"
             }
 
-    # 限制最多3个doc_title
+    if chunk_ids is not None and doc_titles:
+        raise ToolError("Provide either chunk_ids or doc_titles, not both")
+    selectors = chunk_ids if chunk_ids is not None else (doc_titles or [])
+    # 两种选择方式共用原有的每次 3 张卡片上限。
     limit = min(max_docs, 3) if max_docs else 3
-    if len(doc_titles) > limit:
-        await ctx.warning(
-            f"[Tool 2] Truncated {len(doc_titles)} doc_titles to top {limit}"
-        )
-        doc_titles = doc_titles[:limit]
+    if len(selectors) > limit:
+        await ctx.warning(f"[Tool 2] Truncated {len(selectors)} documents to top {limit}")
+        selectors = selectors[:limit]
+    keys = [str(selector) for selector in selectors]
 
     # 未显式传参时取用户在设置页选择的默认值
     mcp_config = get_mcp_config()
@@ -202,24 +209,28 @@ async def get_docs_tool(
         include_images = mcp_config.include_images_default
 
     await ctx.info(
-        f"[Tool 2] Retrieving {len(doc_titles)} documents, "
+        f"[Tool 2] Retrieving {len(selectors)} documents, "
         f"include_metadata: {include_metadata}, include_images: {include_images}"
     )
 
     try:
         # 数据库读取是同步 I/O，不能阻塞与 UI、索引 MCP 共享的事件循环。
-        docs_mapping = await run_sync(get_docs, doc_titles)
+        if chunk_ids is not None:
+            docs_mapping = await run_sync(get_docs, chunk_ids=selectors)
+        else:
+            docs_mapping = await run_sync(get_docs, selectors)
 
-        # 分离找到的和未找到的
         documents = {}
         not_found = []
-
-        for title in doc_titles:
-            doc_info = docs_mapping.get(title)
-            if doc_info is not None:
-                documents[title] = doc_info
+        ambiguous = {}
+        for key in keys:
+            doc_info = docs_mapping.get(key)
+            if doc_info is None:
+                not_found.append(key)
+            elif doc_info.get("ambiguous"):
+                ambiguous[key] = doc_info["candidates"]
             else:
-                not_found.append(title)
+                documents[key] = doc_info
 
         await ctx.info(
             f"[Tool 2] Completed - Found: {len(documents)}, Not found: {len(not_found)}"
@@ -245,11 +256,13 @@ async def get_docs_tool(
             doc.pop("original_file_path", None)
 
         result = {"documents": documents, "not_found": not_found}
+        if ambiguous:
+            result["ambiguous"] = ambiguous
 
         # 如果需要元数据，可以在这里添加
         if include_metadata:
             result["metadata"] = {
-                "total_requested": len(doc_titles),
+                "total_requested": len(selectors),
                 "total_found": len(documents),
                 "total_not_found": len(not_found),
             }
@@ -261,7 +274,7 @@ async def get_docs_tool(
 
         # 图片清单同时写入结构化结果，供不渲染 image content 的客户端降级使用
         result["images"] = [
-            {"doc_title": img["doc_title"], "ref": img["ref"]} for img in images
+            {key: img[key] for key in ("doc_title", "chunk_id", "ref") if key in img} for img in images
         ]
         result["next_image_offset"] = (
             image_offset + len(images) if skipped_images else None
@@ -273,7 +286,8 @@ async def get_docs_tool(
         # 否则多篇文档一起返回时无法分辨图片出自哪个切片
         content: list[Union[str, Image]] = [json.dumps(result, ensure_ascii=False)]
         for img in images:
-            content.append(f"[image] {img['doc_title']} -> {img['ref']}")
+            label = f"{img['doc_title']} (chunk_id={img['chunk_id']})" if "chunk_id" in img else img["doc_title"]
+            content.append(f"[image] {label} -> {img['ref']}")
             content.append(Image(path=img["path"]))
 
         return ToolResult(content=content, structured_content=result)
@@ -348,27 +362,27 @@ async def knowledge_list(params: km.ListInput) -> dict:
     """List knowledge objects, not document chunks. params: optional kind/status, limit 1..100 (default 50), offset >=0.
 
     Returns library_id and objects [{id,kind,title,summary,status,revision,created_at,updated_at}], total/limit/offset.
-    Same-name objects are distinct; read details and evidence to disambiguate. No full bodies here.
+    Same-name objects are distinct; read title/summary and evidence to disambiguate. Graph entities carry no body.
     """
     return await _knowledge_read(knowledge.list_objects, params)
 
 
 @mcp.tool(name="knowledge-search", annotations=_KNOWLEDGE_READ)
 async def knowledge_search(params: km.SearchInput) -> dict:
-    """Search names/aliases and Chinese-tokenized title/summary/body without embedding calls.
+    """Search entity names/aliases and Chinese-tokenized title/summary without embedding calls.
 
     params: required query (plain text, not SQL/FTS syntax), optional kind/status, limit/offset as knowledge-list.
-    Returns library_id, objects, total/limit/offset. Use knowledge-get for bodies and sources; do not merge by name.
+    Returns library_id, objects, total/limit/offset. Graph entities have no body; use knowledge-get for details and sources; do not merge by name.
     """
     return await _knowledge_read(knowledge.search_objects, params)
 
 
 @mcp.tool(name="knowledge-get", annotations=_KNOWLEDGE_READ)
 async def knowledge_get(params: km.GetInput) -> dict:
-    """Read a knowledge record: params.kind=object/relation/evidence/link, id=UUID; limit/offset paginate evidence.
+    """Read a knowledge record: params.kind=object/relation/evidence, id=UUID; limit/offset paginate evidence.
 
-    Returns library_id, kind, record (including object body/aliases or relation endpoints/predicate/basis/qualifier).
-    Objects/relations also include has_evidence and evidence {items,total,limit,offset}; evidence location_status is
+    Returns library_id, kind, record (entity summary/aliases or relation endpoints/predicate/basis/qualifier).
+    Entities/relations also include has_evidence and evidence {items,total,limit,offset}; evidence location_status is
     current/changed/missing/unresolved/unverified, never fact verification. No evidence means unsupported, not false.
     Piece evidence carries file/chunk IDs and server-derived page_number; use get-source-page for available original pages.
     """
@@ -377,11 +391,11 @@ async def knowledge_get(params: km.GetInput) -> dict:
 
 @mcp.tool(name="knowledge-graph", annotations=_KNOWLEDGE_READ)
 async def knowledge_graph(params: km.GraphInput) -> dict:
-    """Get bounded neighbors of params.root_id (object UUID). depth=1 or 2; edge_types=[link,relation] by default.
+    """Get bounded neighbors of params.root_id (entity UUID). depth=1 or 2; edge_types is only [relation].
 
     Optional predicates/statuses filter semantic relations; [] means none. max_nodes<=100, max_edges<=300.
     Returns nodes, edges with complete endpoints, truncated and budgets. No bodies/quotes; not full-graph statistics.
-    related_to/contradicts are symmetric; other predicates are directed. Page links are mentions, not semantic claims.
+    related_to/contradicts are symmetric; other predicates are directed. Page links live in the separate Wiki feature.
     """
     return await _knowledge_read(knowledge.graph, params)
 
@@ -401,8 +415,8 @@ async def knowledge_lint(params: km.LintInput) -> dict:
     """Read-only structural checks; params.object_ids optionally limits UUID scope ([] checks none), limit/offset paginate objects.
 
     Returns issues, checked_objects, total_objects, truncated, read_only=true, semantic_review=false.
-    Checks missing evidence, isolated objects, body/explicit links, changed/missing sources, ambiguous names/aliases.
-    No network, automatic fixes, merging or semantic truth judgement. Read candidate bodies and evidence before proposing edits.
+    Checks missing evidence, isolated objects, changed/missing sources and ambiguous names/aliases.
+    No network, automatic fixes, merging or semantic truth judgement. Read candidate entities and evidence before proposing edits.
     """
     return await _knowledge_read(knowledge.lint, params)
 
@@ -413,7 +427,7 @@ async def knowledge_history(params: km.HistoryInput) -> dict:
 
     Returns history [{before,after,before_revision,after_revision,reason,batch_id,actor,...}], total/limit/offset.
     Read-only; corrections require a new revision using the current expected_revision, not rollback.
-    Deleting an object/relation clears its online body history; backups are outside online deletion.
+    Deleting an object/relation clears its online history; backups are outside online deletion.
     """
     return await _knowledge_read(knowledge.history, params)
 
@@ -426,3 +440,75 @@ async def knowledge_request(params: km.RequestInput) -> dict:
     payload and key on the same library. Returned IDs may since have been deleted; verify with knowledge-get.
     """
     return await _knowledge_read(knowledge.request_result, params)
+
+
+@mcp.tool(name="wiki-list", annotations=_KNOWLEDGE_READ)
+async def wiki_list(params: wm.ListInput) -> dict:
+    """List Wiki pages, not graph entities or document chunks. params: optional kind/status, limit 1..100 (default 50), offset >=0.
+
+    Returns library_id and pages [{id,kind,title,summary,status,revision,content_hash,index_status}], total/limit/offset.
+    Same-name pages are distinct; read the body and evidence to disambiguate. No full bodies here.
+    """
+    return await _knowledge_read(wiki.list_pages, params)
+
+
+@mcp.tool(name="wiki-search", annotations=_KNOWLEDGE_READ)
+async def wiki_search(params: wm.SearchInput) -> dict:
+    """Search Wiki page titles/aliases and body/index without embedding calls.
+
+    params: required query (plain text), optional kind/status, limit/offset as wiki-list.
+    Returns library_id, pages, total/limit/offset. Use wiki-get for bodies, evidence and page links; do not merge by name.
+    """
+    return await _knowledge_read(wiki.search_pages, params)
+
+
+@mcp.tool(name="wiki-get", annotations=_KNOWLEDGE_READ)
+async def wiki_get(params: wm.GetInput) -> dict:
+    """Read a Wiki record: params.kind=page/evidence, id=UUID; limit/offset paginate evidence.
+
+    Returns library_id, kind, record (page includes title/summary/body/aliases/status/revision/content_hash/path/index_status).
+    Pages also include evidence {items,total,limit,offset}, page links and backlinks; evidence location_status is
+    current/changed/missing/unresolved/unverified, never fact verification. A page has no graph identity.
+    """
+    return await _knowledge_read(wiki.get_record, params)
+
+
+@mcp.tool(name="wiki-references", annotations=_KNOWLEDGE_READ)
+async def wiki_references(params: wm.ReferencesInput) -> dict:
+    """Find source backlinks to Wiki pages: params.source_library_id=library UUID, source_file_id=integer, optional limit/offset.
+
+    Returns evidence with owner page id/title and location_status, total/limit/offset. Use both library and file ID.
+    """
+    return await _knowledge_read(wiki.references, params)
+
+
+@mcp.tool(name="wiki-lint", annotations=_KNOWLEDGE_READ)
+async def wiki_lint(params: wm.LintInput) -> dict:
+    """Read-only structural checks on Wiki pages; params.page_ids optionally limits UUID scope ([] checks none).
+
+    Returns issues, checked_pages, total_pages, truncated, read_only=true, semantic_review=false.
+    Checks missing evidence, broken/through page links, changed/missing sources and ambiguous names.
+    No network, automatic fixes or semantic truth judgement; read candidate pages before proposing edits.
+    """
+    return await _knowledge_read(wiki.lint, params)
+
+
+@mcp.tool(name="wiki-history", annotations=_KNOWLEDGE_READ)
+async def wiki_history(params: wm.HistoryInput) -> dict:
+    """Read Wiki page revisions: params.kind=page, id=UUID, optional limit/offset.
+
+    Returns history [{before,after,before_revision,after_revision,reason,batch_id,actor,...}], total/limit/offset.
+    Read-only; corrections require a new revision using current expected_revision/expected_content_hash, not rollback.
+    Wiki page deletion retains online history, so history stays readable after a page is deleted.
+    """
+    return await _knowledge_read(wiki.history, params)
+
+
+@mcp.tool(name="wiki-request", annotations=_KNOWLEDGE_READ)
+async def wiki_request(params: wm.RequestInput) -> dict:
+    """Recover a committed Wiki apply/delete result using params.request_key after a timeout or lost response.
+
+    Returns original IDs/revisions/counts and partial/index_status, not input bodies. NOT_FOUND does not prove failure:
+    retry only the identical payload and key on the same library, then verify with wiki-get.
+    """
+    return await _knowledge_read(wiki.request_result, params)

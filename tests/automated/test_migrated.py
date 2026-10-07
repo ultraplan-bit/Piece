@@ -252,7 +252,7 @@ def test_partial_acceptance_injected_in_shared_business(knowledge_base, monkeypa
 ])
 def test_chunk_edit_preserves_source_location(knowledge_base, file_type, segments, source_page):
     from indexing.repositories import ChunkRepository
-    from indexing.services.chunking.utils import build_chunk, heading_path_from_doc_title
+    from indexing.services.chunking.utils import build_chunk
     from indexing.services.page_render import page_number_from_heading
     from indexing.utils import serialize_float32
     file_id = file_service.create_empty_file("报告")["file_id"]
@@ -266,7 +266,7 @@ def test_chunk_edit_preserves_source_location(knowledge_base, file_type, segment
     chunk_id = ChunkRepository().insert(file_id, embedding=serialize_float32([0.0, 0.0]), **original)
     for title, leaf in [("修改后的标题", "修改后的标题"), ("新名称_第99页", "第99页")]:
         updated = chunk_service.update_chunk_title(chunk_id, title)
-        expected = original if source_page else heading_path_from_doc_title(title)
+        expected = original
         assert updated["doc_title"] == title and updated["heading_path"] == expected["heading_path"]
         if source_page:
             assert page_number_from_heading(updated["heading_path"]) == source_page

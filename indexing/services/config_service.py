@@ -156,13 +156,11 @@ def update_config(patch, offline=False):
             locks.enter_context(database_lock(saved.get_db_path()))
             if updated.get_db_path().resolve() != saved.get_db_path().resolve():
                 locks.enter_context(database_lock(updated.get_db_path()))
-        changed = [key for key in updated.model_dump() if getattr(saved, key) != getattr(updated, key)]
         restart = [key for key in _RESTART_GROUPS if getattr(current, key) != getattr(updated, key)]
         if "mcp" in restart and (current.mcp.port == updated.mcp.port
                 and current.mcp.auth_enabled == updated.mcp.auth_enabled
                 and all(current.mcp.get_api_key(service) == updated.mcp.get_api_key(service) for service in ("retrieval", "index"))):
             restart.remove("mcp")
-        reindex = [key for key in changed if key in {"embedding", "ocr", "office"}]
         model_changed = _check_model_change(current, updated)
         if not offline and model_changed:
             from .task_service import get_active_tasks
@@ -181,6 +179,9 @@ def update_config(patch, offline=False):
         except sqlite3.Error:
             save_settings(saved, update_cache=False)
             raise BusinessError("CONFIG_SAVE_FAILED", "向量维度校验失败，已保留原配置") from None
+        # 保存层可能因同步目标变化清空历史，返回值也要包含这一变更。
+        changed = [key for key in updated.model_dump() if getattr(saved, key) != getattr(updated, key)]
+        reindex = [key for key in changed if key in {"embedding", "ocr", "office"}]
         if offline:
             settings_module._settings = updated
         else:
@@ -194,6 +195,16 @@ def update_config(patch, offline=False):
         return {"config": redact(updated.model_dump()), "changed": changed,
                 "effective_immediately": [key for key in changed if key not in restart],
                 "requires_restart": restart, "requires_reindex": reindex}
+
+
+@serialized_mutation
+def record_sync_success(snapshot, timestamp):
+    """校验和写回共用配置变更锁，旧任务不能为替代目标建立同步历史。"""
+    target = snapshot.get_sync_target()
+    if _read_config().get_sync_target() != target or get_settings().get_sync_target() != target:
+        return False
+    update_config({"webdav": {"last_sync_time": timestamp}})
+    return True
 
 
 async def test_config(component):
@@ -215,6 +226,9 @@ async def test_config(component):
         if settings.ocr.provider == "vlm":
             from .vlm_client import test_vlm_connection
             ok, message = await run_sync(test_vlm_connection, settings.ocr.vlm_base_url, settings.ocr.vlm_api_key, settings.ocr.vlm_model)
+        elif settings.ocr.provider == "mineru":
+            from .mineru_client import test_mineru_connection
+            ok, message = await run_sync(test_mineru_connection, settings.ocr.mineru_token, settings.ocr.mineru_model_version)
         else:
             from .ocr_client import test_ocr_connection
             ok, message = await run_sync(test_ocr_connection, settings.ocr.base_url, settings.ocr.api_key, settings.ocr.model)

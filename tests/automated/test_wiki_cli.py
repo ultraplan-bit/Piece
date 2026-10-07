@@ -175,23 +175,20 @@ def test_extract_out_lossless_round_trip_multiline_quote(endpoint, capsys, tmp_p
 # ---------------------------------------------------------------------------
 
 def test_object_add_submits_object_and_evidence_atomically(endpoint, capsys, tmp_path):
-    body = tmp_path / "正文.md"
-    # 用字节写 LF，避免平台换行翻译；CLI 逐字读取须无损。
-    body.write_bytes("正文第一行\n正文第二行".encode("utf-8"))
     ev1 = _evidence_file(tmp_path, name="e1.json")
     ev2 = _evidence_file(tmp_path, {**EVIDENCE, "source_chunk_id": 10,
                                     "quote": "另一端引文 <b>加粗</b>"}, name="e2.json")
     request_file = tmp_path / "request.json"
-    invoke(endpoint, capsys, "wiki", "object", "add",
+    invoke(endpoint, capsys, "graph", "object", "add",
            "--kind", "concept", "--title", "增量维护", "--summary", "只提交必要增量",
-           "--body-file", str(body), "--alias", "增量修订", "--alias", "增量更新",
+           "--alias", "增量修订", "--alias", "增量更新",
            "--status", "disputed", "--evidence-file", str(ev1), "--evidence-file", str(ev2),
            "--stance", "context", "--request-file", str(request_file), "--reason", "记录用户要求")
     assert len(_apply_calls(endpoint)) == 1, "对象与证据必须在同一次 apply 提交"
     payload = _apply_calls(endpoint)[0]["payload"]
     assert payload["objects"] == [{
         "ref": "item", "kind": "concept", "title": "增量维护", "summary": "只提交必要增量",
-        "body": "正文第一行\n正文第二行", "aliases": ["增量修订", "增量更新"], "status": "disputed"}]
+        "aliases": ["增量修订", "增量更新"], "status": "disputed"}]
     assert payload["evidence"] == [
         {**EVIDENCE, "object": {"ref": "item"}, "stance": "context"},
         {**EVIDENCE, "source_chunk_id": 10, "quote": "另一端引文 <b>加粗</b>",
@@ -202,7 +199,7 @@ def test_object_add_submits_object_and_evidence_atomically(endpoint, capsys, tmp
 
 def test_object_add_minimal_fixes_item_ref(endpoint, capsys, tmp_path):
     rf = tmp_path / "request.json"
-    invoke(endpoint, capsys, "wiki", "object", "add", "--kind", "entity", "--title", "实体",
+    invoke(endpoint, capsys, "graph", "object", "add", "--kind", "entity", "--title", "实体",
            "--evidence-file", str(_evidence_file(tmp_path)), "--request-file", str(rf), "--reason", "新增")
     obj = _apply_calls(endpoint)[0]["payload"]["objects"][0]
     assert obj["ref"] == "item" and obj["kind"] == "entity" and obj["title"] == "实体"
@@ -211,7 +208,7 @@ def test_object_add_minimal_fixes_item_ref(endpoint, capsys, tmp_path):
 
 def test_object_update_sends_only_changed_fields_with_id_owner(endpoint, capsys, tmp_path):
     rf = tmp_path / "request.json"
-    invoke(endpoint, capsys, "wiki", "object", "update", OBJECT_UUID,
+    invoke(endpoint, capsys, "graph", "object", "update", OBJECT_UUID,
            "--expected-revision", "3", "--title", "新标题", "--evidence-file", str(_evidence_file(tmp_path)),
            "--request-file", str(rf), "--reason", "局部修订")
     payload = _apply_calls(endpoint)[0]["payload"]
@@ -222,7 +219,7 @@ def test_object_update_sends_only_changed_fields_with_id_owner(endpoint, capsys,
 
 def test_object_update_requires_at_least_one_field(endpoint, capsys, tmp_path):
     rf = tmp_path / "request.json"
-    code, result, _ = invoke(endpoint, capsys, "wiki", "object", "update", OBJECT_UUID,
+    code, result, _ = invoke(endpoint, capsys, "graph", "object", "update", OBJECT_UUID,
                              "--expected-revision", "3", "--request-file", str(rf), "--reason", "空更新")
     assert code == 2 and not result["success"]
     assert _apply_calls(endpoint) == []
@@ -230,7 +227,7 @@ def test_object_update_requires_at_least_one_field(endpoint, capsys, tmp_path):
 
 def test_relation_add_sends_endpoints_and_relation_owner(endpoint, capsys, tmp_path):
     rf = tmp_path / "request.json"
-    invoke(endpoint, capsys, "wiki", "relation", "add",
+    invoke(endpoint, capsys, "graph", "relation", "add",
            "--source", SOURCE_UUID, "--predicate", "depends_on", "--target", TARGET_UUID,
            "--description", "增量修订依赖稳定身份", "--basis", "explicit",
            "--evidence-file", str(_evidence_file(tmp_path)), "--stance", "supports",
@@ -245,7 +242,7 @@ def test_relation_add_sends_endpoints_and_relation_owner(endpoint, capsys, tmp_p
 
 def test_relation_update_partial_and_id_owner(endpoint, capsys, tmp_path):
     rf = tmp_path / "request.json"
-    invoke(endpoint, capsys, "wiki", "relation", "update", RELATION_UUID,
+    invoke(endpoint, capsys, "graph", "relation", "update", RELATION_UUID,
            "--expected-revision", "2", "--predicate", "supports",
            "--evidence-file", str(_evidence_file(tmp_path)), "--stance", "contradicts",
            "--request-file", str(rf), "--reason", "修订关系")
@@ -258,14 +255,14 @@ def test_relation_update_partial_and_id_owner(endpoint, capsys, tmp_path):
 @pytest.mark.parametrize("stance", ["supports", "contradicts", "context"])
 def test_stance_accepts_three_kinds(endpoint, capsys, tmp_path, stance):
     rf = tmp_path / f"request-{stance}.json"
-    invoke(endpoint, capsys, "wiki", "object", "add", "--kind", "entity", "--title", "实体",
+    invoke(endpoint, capsys, "graph", "object", "add", "--kind", "entity", "--title", "实体",
            "--evidence-file", str(_evidence_file(tmp_path, name=f"{stance}.json")),
            "--stance", stance, "--request-file", str(rf), "--reason", "标注立场")
     assert _apply_calls(endpoint)[0]["payload"]["evidence"][0]["stance"] == stance
 
 
 def test_stance_rejects_unknown_value(endpoint, capsys, tmp_path):
-    code, result, _ = invoke(endpoint, capsys, "wiki", "object", "add", "--kind", "entity",
+    code, result, _ = invoke(endpoint, capsys, "graph", "object", "add", "--kind", "entity",
                              "--title", "实体", "--evidence-file", str(_evidence_file(tmp_path)),
                              "--stance", "guessing", "--request-file", str(tmp_path / "r.json"),
                              "--reason", "非法立场")
@@ -273,7 +270,7 @@ def test_stance_rejects_unknown_value(endpoint, capsys, tmp_path):
 
 
 def test_high_level_write_requires_request_file(endpoint, capsys, tmp_path):
-    code, result, _ = invoke(endpoint, capsys, "wiki", "object", "add", "--kind", "entity",
+    code, result, _ = invoke(endpoint, capsys, "graph", "object", "add", "--kind", "entity",
                              "--title", "实体", "--evidence-file", str(_evidence_file(tmp_path)),
                              "--reason", "缺少请求文件")
     assert code == 2 and _apply_calls(endpoint) == []
@@ -284,7 +281,7 @@ def test_high_level_write_requires_request_file(endpoint, capsys, tmp_path):
 # ---------------------------------------------------------------------------
 
 def _add(tmp_path, request_file, title="概念", **extra):
-    args = ["wiki", "object", "add", "--kind", "concept", "--title", title,
+    args = ["graph", "object", "add", "--kind", "concept", "--title", title,
             "--evidence-file", str(_evidence_file(tmp_path)), "--request-file", str(request_file),
             "--reason", "保存"]
     for key, value in extra.items():
@@ -392,7 +389,7 @@ def test_apply_input_reads_request_file_wrapper_and_reads_back(endpoint, capsys,
     invoke(endpoint, capsys, *_add(tmp_path, rf))
     wrapper = json.loads(rf.read_text(encoding="utf-8"))
     endpoint.calls.clear()
-    code, result, _ = invoke(endpoint, capsys, "wiki", "apply", "--input", str(rf), "--read-back")
+    code, result, _ = invoke(endpoint, capsys, "graph", "apply", "--input", str(rf), "--read-back")
     assert code == 0 and result["success"]
     assert _apply_calls(endpoint)[0]["payload"] == wrapper["request"], "原样重放请求文件中的批次"
     assert result["data"]["read_back"]["complete"] is True
@@ -447,7 +444,7 @@ def test_read_back_over_limit_reports_incomplete(endpoint, capsys, tmp_path):
                        "target": {"ref": "o1"}, "description": "有界读回", "basis": "explicit"}],
     }
     source = _write_json(tmp_path / "batch.json", batch)
-    code, result, _ = invoke(endpoint, capsys, "wiki", "apply", "--input", str(source), "--read-back")
+    code, result, _ = invoke(endpoint, capsys, "graph", "apply", "--input", str(source), "--read-back")
     assert code == 1 and result["error"]["code"] == "READ_BACK_INCOMPLETE"
     assert result["data"]["committed"] is True
 
@@ -459,11 +456,11 @@ def test_wiki_request_read_back_is_read_only(endpoint, capsys):
         "relations": [], "links": [], "evidence": [], "library_id": LIBRARY_UUID,
         "counts": {"created": 1, "updated": 0, "reused": 0}})
     endpoint.routes["/api/v1/knowledge/get"] = _get_route(revision=1)
-    code, result, _ = invoke(endpoint, capsys, "wiki", "request", "stable-key", "--read-back")
+    code, result, _ = invoke(endpoint, capsys, "graph", "request", "stable-key", "--read-back")
     assert code == 0 and result["success"]
     request_call = next(call for call in endpoint.calls if call["path"] == "/api/v1/knowledge/request")
     assert request_call["payload"] == {"request_key": "stable-key"}
-    assert _apply_calls(endpoint) == [], "wiki request 只读，不得提交"
+    assert _apply_calls(endpoint) == [], "graph request 只读，不得提交"
     assert result["data"]["read_back"]["complete"] is True
     assert "submitted_fields" not in result["data"]["read_back"]["records"][0]  # 旧回执不能推断提交字段。
 
@@ -472,7 +469,7 @@ def test_apply_without_read_back_keeps_legacy_shape(endpoint, capsys, tmp_path):
     endpoint.routes["/api/v1/knowledge/apply"] = _fake_apply
     source = _write_json(tmp_path / "batch.json", {
         "reason": "旧行为", "objects": [{"ref": "a", "kind": "entity", "title": "实体"}]})
-    code, result, _ = invoke(endpoint, capsys, "wiki", "apply", "--input", str(source), "--request-id", "legacy")
+    code, result, _ = invoke(endpoint, capsys, "graph", "apply", "--input", str(source), "--request-id", "legacy")
     assert code == 0 and result["success"]
     assert "read_back" not in result["data"]
     assert _get_calls(endpoint) == []
@@ -501,12 +498,12 @@ def test_quote_mismatch_offers_readonly_chunk_get(endpoint, capsys, tmp_path):
 def test_version_conflict_offers_wiki_get(endpoint, capsys, tmp_path):
     endpoint.routes["/api/v1/knowledge/apply"] = lambda *a: failure(
         "VERSION_CONFLICT", {"section": "objects", "index": 0, "id": OBJECT_UUID, "current_revision": 4})
-    code, result, _ = invoke(endpoint, capsys, "wiki", "object", "update", OBJECT_UUID,
+    code, result, _ = invoke(endpoint, capsys, "graph", "object", "update", OBJECT_UUID,
                              "--expected-revision", "1", "--title", "冲突标题",
                              "--request-file", str(tmp_path / "request.json"), "--reason", "冲突")
     assert code == 1 and not result["success"]
     argv = result["data"]["next_argv"]
-    assert "wiki" in argv and "get" in argv and OBJECT_UUID in argv
+    assert "graph" in argv and "get" in argv and OBJECT_UUID in argv
     assert _option_value(argv, "--port") == str(endpoint.port)
     assert len(_apply_calls(endpoint)) == 1
 
@@ -523,13 +520,13 @@ def test_lost_response_points_at_request_read_back_without_new_key(endpoint, cap
     assert code == 3
     key = result["data"]["request_key"]
     # 现有 data.recovery 结构保持不变。
-    assert result["data"]["recovery"] == {"command": "piece wiki request", "request_id": key,
+    assert result["data"]["recovery"] == {"command": "piece graph request", "request_id": key,
         "same_target_required": True, "do_not_resubmit": False, "retry_identical_only": True}
     argv = result["data"]["next_argv"]
-    assert "wiki" in argv and "request" in argv and "--read-back" in argv
+    assert "graph" in argv and "request" in argv and "--read-back" in argv
     assert Path(_option_value(argv, "--input")) == tmp_path / "request.json"
     assert key not in argv  # 从文件读键，不要求模型复制不透明值。
-    assert "wiki request" in result["data"]["next_command"] and "--read-back" in result["data"]["next_command"]
+    assert "graph request" in result["data"]["next_command"] and "--read-back" in result["data"]["next_command"]
     assert len(_apply_calls(endpoint)) == 1, "用原键只读恢复，不生成新键重提"
 
 
@@ -559,7 +556,7 @@ def test_incomplete_evidence_file_cannot_bypass_source_checks(endpoint, capsys, 
     evidence = {key: value for key, value in EVIDENCE.items() if key != missing}
     source = _evidence_file(tmp_path, evidence)
     request_file = tmp_path / "request.json"
-    code, result, _ = invoke(endpoint, capsys, "wiki", "object", "add", "--kind", "concept", "--title", "知识",
+    code, result, _ = invoke(endpoint, capsys, "graph", "object", "add", "--kind", "concept", "--title", "知识",
                              "--evidence-file", str(source), "--request-file", str(request_file))
     assert code == 2 and result["error"]["code"] == "INVALID_ARGUMENT"
     assert not request_file.exists() and not _apply_calls(endpoint)
@@ -572,7 +569,7 @@ def test_recovery_treats_request_key_as_one_literal_argument(endpoint, capsys, t
     source = _write_json(tmp_path / "batch.json", {
         "reason": "转义", "objects": [{"ref": "a", "kind": "concept", "title": "知识"}]})
     endpoint.routes["/api/v1/knowledge/apply"] = lambda *args: failure("REQUEST_CONFLICT")
-    code, result, _ = invoke(endpoint, capsys, "wiki", "apply", "--input", str(source), "--request-id", key)
+    code, result, _ = invoke(endpoint, capsys, "graph", "apply", "--input", str(source), "--request-id", key)
     assert code == 1
     argv = result["data"]["next_argv"]
     assert argv[argv.index("request") + 1] == key
@@ -585,7 +582,7 @@ def test_request_from_file_looks_up_saved_key_without_submission(endpoint, capsy
     receipt = _fake_apply(None, request)
     endpoint.routes["/api/v1/knowledge/request"] = lambda *args: receipt
     endpoint.routes["/api/v1/knowledge/get"] = _get_route()
-    code, result, _ = invoke(endpoint, capsys, "wiki", "request", "--input", str(source), "--read-back")
+    code, result, _ = invoke(endpoint, capsys, "graph", "request", "--input", str(source), "--read-back")
     assert code == 0 and result["data"]["read_back"]["complete"]
     query = next(call for call in endpoint.calls if call["path"] == "/api/v1/knowledge/request")
     assert query["payload"] == {"request_key": "saved-key"}
@@ -601,7 +598,7 @@ def test_request_file_query_rejects_ambiguous_or_unbound_inputs(endpoint, capsys
         saved["request"] = {}
     source = _write_json(tmp_path / "request.json", saved)
     args = ([] if case == "neither" else ["--input", str(source)]) + (["other-key"] if case == "both" else [])
-    code, result, _ = invoke(endpoint, capsys, "wiki", "request", *args)
+    code, result, _ = invoke(endpoint, capsys, "graph", "request", *args)
     assert code != 0 and not result["success"]
     assert not endpoint.calls
 
@@ -612,7 +609,7 @@ def test_delete_receipt_read_back_checks_absence_without_redeleting(endpoint, ca
         "committed": True, "dry_run": False, "kind": "object", "id": OBJECT_UUID,
         "impact_token": "a" * 64, "counts": {"object": 1}, "revision": 1})
     endpoint.routes["/api/v1/knowledge/get"] = _get_route() if restored else lambda *args: failure("NOT_FOUND")
-    code, result, _ = invoke(endpoint, capsys, "wiki", "request", "delete-key", "--read-back")
+    code, result, _ = invoke(endpoint, capsys, "graph", "request", "delete-key", "--read-back")
     assert result["data"]["committed"] is True
     assert result["data"]["read_back"]["complete"] is not restored
     if restored:
@@ -626,7 +623,7 @@ def test_delete_receipt_read_back_checks_absence_without_redeleting(endpoint, ca
 @pytest.mark.parametrize("inputs", [["--body-file", "-", "--evidence-file", "-"],
                                      ["--evidence-file", "-", "--evidence-file", "-"]])
 def test_intent_rejects_multiple_stdin_consumers(endpoint, capsys, tmp_path, inputs):
-    code, result, _ = invoke(endpoint, capsys, "wiki", "object", "add", "--kind", "concept", "--title", "知识",
+    code, result, _ = invoke(endpoint, capsys, "graph", "object", "add", "--kind", "concept", "--title", "知识",
                              "--request-file", str(tmp_path / "request.json"), *inputs)
     assert code == 2 and result["error"]["code"] == "INVALID_ARGUMENT"
     assert not endpoint.calls and not (tmp_path / "request.json").exists()

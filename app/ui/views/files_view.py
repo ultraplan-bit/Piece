@@ -565,9 +565,11 @@ def render_files_right(
                     ui.button(icon=icon, on_click=ui_refs.get(key)).props(f'flat dense round size=sm aria-label="{t(label)}"').classes("theme-text-muted").tooltip(t(label))
                 ui.label(t("chunks.title")).classes("text-sm font-medium theme-text")
                 if state.get("knowledge_return") and ui_refs.get("return_knowledge"):
+                    return_view = state.get("knowledge_return_view") or "wiki"
+                    return_label = t("wiki.return" if return_view == "wiki" else "graph.return")
                     ui.button(icon="arrow_back", on_click=ui_refs["return_knowledge"]).props(
-                        f'flat dense round size=sm aria-label="{t("knowledge.return_knowledge")}"'
-                    ).classes("theme-text-muted").tooltip(t("knowledge.return_knowledge"))
+                        f'flat dense round size=sm aria-label="{return_label}"'
+                    ).classes("theme-text-muted").tooltip(return_label)
 
             @ui.refreshable
             def chunk_toolbar_buttons():
@@ -673,9 +675,12 @@ def render_files_right(
                 "w-full theme-panel"
             ).style("border-bottom: 1px solid var(--border-color)"):
                 with ui.column().classes("w-full gap-2 pb-2"):
-                    if ui_refs.get("knowledge_references"):
-                        ui.button(t("knowledge.references"), icon="format_quote",
-                                  on_click=lambda: ui_refs["knowledge_references"](file_id)).props("flat dense no-caps")
+                    if ui_refs.get("wiki_references"):
+                        ui.button(t("knowledge.references_wiki"), icon="menu_book",
+                                  on_click=lambda: ui_refs["wiki_references"](file_id)).props("flat dense no-caps")
+                    if ui_refs.get("graph_references"):
+                        ui.button(t("knowledge.references_graph"), icon="hub",
+                                  on_click=lambda: ui_refs["graph_references"](file_id)).props("flat dense no-caps")
                     # 集合
                     with ui.row().classes("w-full items-center gap-2 flex-wrap"):
                         ui.icon("folder", size="xs").classes("theme-text-muted")

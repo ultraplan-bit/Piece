@@ -6,7 +6,8 @@ from typing_extensions import TypedDict
 
 
 class SearchResult(TypedDict):
-    """检索结果"""
+    """检索结果：标题仅用于展示，身份始终是 chunk_id。"""
+    chunk_id: int
     doc_title: str
     score: float
 

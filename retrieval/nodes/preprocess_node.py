@@ -1,7 +1,7 @@
 """
 查询预处理节点：文本清洗、格式验证、分词、文件名解析、状态初始化
 """
-import jieba
+from indexing.fts import tokenize_fts_text
 import re
 from typing import List, Optional
 from .state import State
@@ -20,7 +20,7 @@ def tokenize_query(query: str) -> list[str]:
         分词后的token列表
     """
     # 使用jieba搜索引擎模式分词（会额外切分长词）
-    tokens = list(jieba.cut_for_search(query))
+    tokens = tokenize_fts_text(query).split()
 
     # 过滤停用词和单字符
     tokens = [

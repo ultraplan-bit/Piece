@@ -129,15 +129,15 @@ def test_collection_tree_parent_move_and_direct_scope_commands(endpoint, capsys)
      {"kind": "entity", "status": "disputed", "limit": 2, "offset": 3}),
     (("search", "中文别名"), "search", {"query": "中文别名", "limit": 50, "offset": 0}),
     (("get", "object", "uuid"), "get", {"kind": "object", "id": "uuid", "limit": 50, "offset": 0}),
-    (("graph", "uuid", "--depth", "2", "--edge-type", "relation", "--predicate", "supports", "--status", "active"), "graph",
-     {"root_id": "uuid", "depth": 2, "edge_types": ["relation"], "predicates": ["supports"], "statuses": ["active"], "max_nodes": 100, "max_edges": 300}),
+    (("graph", "uuid", "--depth", "2", "--predicate", "supports", "--status", "active"), "graph",
+     {"root_id": "uuid", "depth": 2, "predicates": ["supports"], "statuses": ["active"], "max_nodes": 100, "max_edges": 300}),
     (("references", "library", "7"), "references", {"source_library_id": "library", "source_file_id": 7, "limit": 50, "offset": 0}),
     (("lint", "--object-id", "a", "--object-id", "b"), "lint", {"object_ids": ["a", "b"], "limit": 50, "offset": 0}),
     (("history", "relation", "uuid"), "history", {"kind": "relation", "id": "uuid", "limit": 50, "offset": 0}),
     (("request", "stable-key"), "request", {"request_key": "stable-key"}),
 ])
-def test_wiki_read_commands_map_to_http(endpoint, capsys, args, path, payload):
-    code, result, _ = invoke(endpoint, capsys, "wiki", *args)
+def test_graph_read_commands_map_to_http(endpoint, capsys, args, path, payload):
+    code, result, _ = invoke(endpoint, capsys, "graph", *args)
     assert code == 0 and result["success"]
     assert endpoint.calls[-1]["path"] == f"/api/v1/knowledge/{path}"
     assert endpoint.calls[-1]["payload"] == payload
@@ -161,52 +161,52 @@ def test_chunk_extract_requires_one_locator(endpoint, capsys):
         assert code == 2 and endpoint.calls == []
 
 
-def test_wiki_apply_preserves_input_and_rejects_unsafe_arguments(endpoint, capsys, monkeypatch, tmp_path):
-    payload = {"reason": "增量", "objects": [{"id": "uuid", "expected_revision": 1, "body": "", "aliases": []}]}
+def test_graph_apply_preserves_input_and_rejects_unsafe_arguments(endpoint, capsys, monkeypatch, tmp_path):
+    payload = {"reason": "增量", "objects": [{"id": "uuid", "expected_revision": 1, "summary": "", "aliases": []}]}
     source = tmp_path / "batch.json"
     source.write_text(json.dumps(payload), encoding="utf-8")
-    code, _, _ = invoke(endpoint, capsys, "wiki", "apply", "--input", str(source), "--dry-run")
+    code, _, _ = invoke(endpoint, capsys, "graph", "apply", "--input", str(source), "--dry-run")
     assert code == 0 and endpoint.calls[-1]["payload"] == {**payload, "dry_run": True}
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
-    code, _, _ = invoke(endpoint, capsys, "wiki", "apply", "--input", "-", "--request-id", "stable")
+    code, _, _ = invoke(endpoint, capsys, "graph", "apply", "--input", "-", "--request-id", "stable")
     assert code == 0 and endpoint.calls[-1]["payload"] == {**payload, "request_key": "stable"}
     endpoint.calls.clear()
-    code, _, _ = invoke(endpoint, capsys, "wiki", "apply", "--input", str(source))
+    code, _, _ = invoke(endpoint, capsys, "graph", "apply", "--input", str(source))
     assert code == 2
     source.write_text(json.dumps({**payload, "request_key": "original"}), encoding="utf-8")
-    code, _, _ = invoke(endpoint, capsys, "wiki", "apply", "--input", str(source), "--request-id", "different")
+    code, _, _ = invoke(endpoint, capsys, "graph", "apply", "--input", str(source), "--request-id", "different")
     assert code == 2
-    code, _, _ = invoke(endpoint, capsys, "wiki", "apply", "--input", str(source), "--wait")
+    code, _, _ = invoke(endpoint, capsys, "graph", "apply", "--input", str(source), "--wait")
     assert code == 2 and endpoint.calls == []
 
 
-def test_wiki_delete_defaults_preview_and_requires_original_token(endpoint, capsys, monkeypatch):
+def test_graph_delete_defaults_preview_and_requires_original_token(endpoint, capsys, monkeypatch):
     monkeypatch.setattr(sys, "stdin", io.StringIO())
-    code, _, _ = invoke(endpoint, capsys, "wiki", "delete", "evidence", "uuid")
+    code, _, _ = invoke(endpoint, capsys, "graph", "delete", "evidence", "uuid")
     assert code == 0 and endpoint.calls[-1]["payload"] == {"kind": "evidence", "id": "uuid", "dry_run": True}
     endpoint.calls.clear()
     for args in (("--yes",), ("--impact-token", "a" * 64, "--yes"),
                  ("--impact-token", "a" * 64, "--request-id", "delete-key")):
-        code, _, _ = invoke(endpoint, capsys, "wiki", "delete", "evidence", "uuid", *args)
+        code, _, _ = invoke(endpoint, capsys, "graph", "delete", "evidence", "uuid", *args)
         assert code in (1, 2) and endpoint.calls == []
-    code, _, _ = invoke(endpoint, capsys, "wiki", "delete", "object", "uuid", "--expected-revision", "2",
+    code, _, _ = invoke(endpoint, capsys, "graph", "delete", "object", "uuid", "--expected-revision", "2",
                          "--impact-token", "a" * 64, "--request-id", "delete-key", "--yes")
     assert code == 0 and endpoint.calls[-1]["payload"] == {
         "kind": "object", "id": "uuid", "expected_revision": 2, "impact_token": "a" * 64,
         "request_key": "delete-key", "dry_run": False, "confirmed": True}
 
 
-def test_wiki_lost_response_uses_knowledge_request_not_tasks(endpoint, capsys, tmp_path):
+def test_graph_lost_response_uses_knowledge_request_not_tasks(endpoint, capsys, tmp_path):
     source = tmp_path / "batch.json"
     source.write_text(json.dumps({"reason": "保存", "objects": [{"ref": "a", "kind": "entity", "title": "x"}]}), encoding="utf-8")
     def lose_response(handler, payload):
         handler.connection.shutdown(socket.SHUT_RDWR)
         handler.connection.close()
     endpoint.routes["/api/v1/knowledge/apply"] = lose_response
-    code, result, _ = invoke(endpoint, capsys, "wiki", "apply", "--input", str(source), "--request-id", "lost-key")
+    code, result, _ = invoke(endpoint, capsys, "graph", "apply", "--input", str(source), "--request-id", "lost-key")
     assert code == 3 and result["data"]["outcome_unknown"]
     assert result["data"]["request_key"] == "lost-key"
-    assert result["data"]["recovery"] == {"command": "piece wiki request", "request_id": "lost-key",
+    assert result["data"]["recovery"] == {"command": "piece graph request", "request_id": "lost-key",
         "same_target_required": True, "do_not_resubmit": False, "retry_identical_only": True}
     assert len([call for call in endpoint.calls if call["path"].endswith("knowledge/apply")]) == 1
 
@@ -579,7 +579,7 @@ def test_skill_commands_stay_local(endpoint, capsys, tmp_path):
     code = cli.main(["skill", "list", "--data-dir", str(missing_dir), "--port", "1", "--json"])
     result = json.loads(capsys.readouterr().out)
     assert code == 0 and result["success"] is True
-    assert [s["id"] for s in result["data"]["skills"]] == ["piece-index", "piece-search", "piece-wiki"]
+    assert [s["id"] for s in result["data"]["skills"]] == ["piece-graph", "piece-index", "piece-search", "piece-wiki"]
     assert result["data"]["warnings"] and "未找到该目标的配置" in result["data"]["warnings"][0]
     assert not missing_dir.exists()
 
@@ -594,6 +594,7 @@ def test_skill_commands_stay_local(endpoint, capsys, tmp_path):
     result = json.loads(capsys.readouterr().out)
     assert code == 0 and result["success"] is True
     assert result["data"]["exported"] == [
+        str(out_dir / "piece-graph" / "SKILL.md"),
         str(out_dir / "piece-index" / "SKILL.md"),
         str(out_dir / "piece-search" / "SKILL.md"),
         str(out_dir / "piece-wiki" / "SKILL.md"),

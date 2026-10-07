@@ -99,11 +99,13 @@ Do not share the access keys in your configuration. After changing keys or ports
 
 **Option 2: Skill Export**
 
-If your AI can run local commands, you can also export and install workflows from **Skill Export**. Use `piece-search` to find information, `piece-index` to import and organize documents, and `piece-wiki` to save, update, and check knowledge pages and evidence-backed relationships on demand. Export them again after moving the application or changing the data directory.
+If your AI can run local commands, export workflows from **Skill Export**: `piece-search` finds source material, `piece-index` imports and organizes documents, `piece-wiki` compiles and maintains Markdown pages, and `piece-graph` maintains entities, semantic relationships, and evidence. Export them again after moving the application or changing the data directory.
 
-Use **Knowledge** to read, search, and manually maintain knowledge pages. Explore connections through the local graph or relation table, then follow evidence back to source cards and original pages. **Review** provides read-only structural checks. Knowledge pages are also available through the `piece wiki` CLI and the two existing MCP services.
+**Wiki** provides page search, text, references, page links, and history. **Knowledge Graph** provides entities, a relationship table, bounded neighborhoods, and evidence checks. Use the `piece wiki` and `piece graph` CLI commands or the two existing MCP services. Their identities and lifecycles are separate: page links are not semantic relationships, matching names do not create associations, and search results are not merged across features.
 
-Uploading documents does not automatically create knowledge pages, and knowledge operations do not call models or embedding APIs. Deleting source files retains knowledge objects and quote snapshots, with their source locations marked missing. A quote matching the current source is not factual verification.
+Wiki text and metadata are authoritative Markdown files under `wiki/` in the configured `data_path`. SQLite holds rebuildable page indexes and separate audit records. Link pages with `[Title](piece://wiki/PAGE_UUID)`; renaming titles or files does not change identity. After external edits, explicitly run `piece wiki rebuild-index`; it does not rewrite Markdown or call a model.
+
+Uploading documents does not automatically build Wiki pages or a graph. Deleting source files retains pages, entities, and their quote snapshots, with source locations marked missing. A quote matching the current source is not factual verification.
 
 Knowledge evidence requires verbatim quotes, and copying long text with formulas or tables by hand is error-prone. Agents can use `piece chunk extract` to slice an exact substring from a card's text by line range or match, yielding submit-ready evidence directly (available in the CLI and both MCP services: `extract_quote` on the indexing service and `extract-quote` on the retrieval service).
 
@@ -113,12 +115,14 @@ Writes to knowledge pages go through intent commands that read back by default a
 
 ```bash
 piece chunk extract CHUNK_ID --lines 2-3 --out evidence.json
-piece wiki object add --kind concept --title "Incremental maintenance" \
+piece wiki page add --kind concept --title "Incremental maintenance" \
   --summary "Change only what clearly changed" \
   --evidence-file evidence.json --request-file object-request.json
 ```
 
-Use `wiki object update UUID --expected-revision N` for updates and `wiki relation add/update` for relationships. Use a new request file for each new operation; existing objects are identified by UUID, never by title.
+Update pages with `wiki page update UUID --expected-revision N --expected-content-hash HASH`, using the hash from the latest read-back. Do not bypass external-edit conflicts by merely changing the revision. Use `graph object add/update` for entities and `graph relation add/update` for relationships. Use a new request file for each new operation; records are identified by their own UUIDs, never by title.
+
+Graph batches use a SQLite transaction; Wiki batches commit per page and can partially succeed. Check `partial`, `errors`, and `index_status`. If files were saved but indexing failed, keep the files and explicitly rebuild the index rather than regenerating or overwriting the text.
 
 `--request-file` records the full body, evidence, and the generated request key for this operation; an existing path is reused only when both target and content match, and is never overwritten. `--dry-run` only pre-checks but still writes this file, so you can submit it as-is after confirming:
 
@@ -157,7 +161,7 @@ Yes. Closing the management window does not stop the background service. To full
 
 **Where is my data, and how do I back it up?**
 
-The Windows portable package stores data in the `data/` folder beside the application by default. Fully quit Piece before backing up that folder or upgrading. If you changed the storage location, back up that data directory too.
+The Windows portable package stores data in the `data/` folder beside the application by default. Fully quit Piece before backing up that folder or upgrading. If you changed the storage location, back up that data directory too. Include both the `wiki/` Markdown files and SQLite database (graph data, Wiki audit history, and source metadata); a database-only backup is incomplete. Deleting a Wiki page retains its audit history and local `.wiki-recovery-*.bak` recovery copies; include these in backups too. Online deletion is not secure erasure and does not remove local request files or external backups.
 
 **Can I sync between computers?**
 

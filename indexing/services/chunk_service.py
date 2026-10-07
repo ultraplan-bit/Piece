@@ -2,25 +2,26 @@
 
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 
 from ..database import get_db_cursor
 from ..utils import run_sync, serialize_float32
-from ..repositories import ChunkRepository, FileRepository
+from ..repositories import ChunkRepository
 from . import task_service, file_service
 from .task_service import serialized_mutation
 from .errors import BusinessError
-from .chunking.utils import HEADING_SEPARATOR, MAX_HEADING_LEVEL, heading_path_from_doc_title
+from .chunking.utils import HEADING_SEPARATOR, MAX_HEADING_LEVEL, clean_heading, heading_path_from_doc_title
 from .page_render import PAGE_VIEWABLE_FORMATS, page_number_from_heading
 from .rate_limiter import estimate_tokens, get_rate_limiter
 from .embedding_client import get_embeddings_model
 
 logger = logging.getLogger(__name__)
 _chunk_repo = ChunkRepository()
-_file_repo = FileRepository()
 MAX_BATCH_CHUNKS = 50
 MAX_BATCH_CHARACTERS = 200000
+_LEADING_HEADING = re.compile(r"([ \t]{0,3}#{1,6}[ \t]+)([^\r\n]*?)([ \t]+#+[ \t]*|[ \t]*)(?=\r?\n|\Z)")
 
 
 def normalize_chunk(doc_title, chunk_text):
@@ -31,12 +32,49 @@ def normalize_chunk(doc_title, chunk_text):
     return doc_title.strip(), chunk_text.strip()
 
 
-def _title_path(chunk, doc_title):
-    file_info = _file_repo.find_by_id(chunk["file_id"])
-    if (page_number_from_heading(chunk.get("heading_path")) is not None and file_info
-            and f".{file_info.get('original_file_type')}".lower() in PAGE_VIEWABLE_FORMATS):
+def _title_path(chunk):
+    # 来源结构与可编辑显示标题分离，改名不改原页/章节定位。
+    if chunk.get("heading_path"):
         return {"heading_path": chunk["heading_path"], "heading_level": chunk["heading_level"]}
-    return heading_path_from_doc_title(doc_title)
+    return heading_path_from_doc_title(chunk["doc_title"])
+
+
+def _working_chunk_text(chunk):
+    """只在工作副本体现改名，不改数据库正文、证据和对应向量。"""
+    text = chunk["chunk_text"]
+    source_parts = (chunk.get("heading_path") or "").split(HEADING_SEPARATOR)
+    if not source_parts[0] or chunk["doc_title"] == "_".join(source_parts):
+        return text
+    heading = _LEADING_HEADING.match(text)
+    if not heading:
+        return text
+    old_titles = source_parts[1:] or source_parts
+    new_path = heading_path_from_doc_title(chunk["doc_title"])["heading_path"]
+    title = new_path.split(HEADING_SEPARATOR)[-1].lstrip("#").strip() or chunk["doc_title"]
+    if clean_heading(heading[2]) not in {clean_heading(part) for part in old_titles}:
+        # 正文自身的标题（例如原页真实标题）不是旧卡片名，必须保留。
+        return f"## {title}\n\n{text}"
+    return text[:heading.start(2)] + title + text[heading.end(2):]
+
+
+def render_working_file(file_info, chunks):
+    """渲染受控工作副本；重索引也用同一结果核对卡片边界是否仍有效。"""
+    lines = []
+    has_pages = f".{file_info.get('original_file_type')}".lower() in PAGE_VIEWABLE_FORMATS
+    for chunk in chunks:
+        text = _working_chunk_text(chunk)
+        if _LEADING_HEADING.match(text):
+            lines.append(f"{text}\n\n")
+            continue
+        heading_path = chunk["heading_path"]
+        source_title = "_".join((heading_path or "").split(HEADING_SEPARATOR))
+        if chunk["doc_title"] != source_title or (has_pages and page_number_from_heading(heading_path) is not None):
+            heading_path = heading_path_from_doc_title(chunk["doc_title"])["heading_path"]
+        segments = [p for p in (heading_path or "").split(HEADING_SEPARATOR) if p]
+        title = segments[-1].lstrip("#").strip() if segments else chunk["doc_title"]
+        level = max(2, min(int(chunk["heading_level"] or 2), MAX_HEADING_LEVEL))
+        lines.extend((f"{'#' * level} {title}\n\n", f"{text}\n\n"))
+    return "".join(lines)
 
 
 @serialized_mutation
@@ -46,25 +84,12 @@ def rebuild_working_file(file_id):
         return
     path = file_service.managed_path(file_info["file_path"])
     chunks = file_service.get_chunks_by_file_id(file_id) or []
-    lines = []
-    has_pages = f".{file_info.get('original_file_type')}".lower() in PAGE_VIEWABLE_FORMATS
-    for chunk in chunks:
-        text = chunk["chunk_text"]
-        if text.strip().startswith("#"):
-            lines.append(f"{text}\n\n")
-            continue
-        heading_path = chunk["heading_path"]
-        if has_pages and page_number_from_heading(heading_path) is not None:
-            heading_path = heading_path_from_doc_title(chunk["doc_title"])["heading_path"]
-        segments = [p for p in (heading_path or "").split(HEADING_SEPARATOR) if p]
-        title = segments[-1].lstrip("#").strip() if segments else chunk["doc_title"]
-        level = max(2, min(int(chunk["heading_level"] or 2), MAX_HEADING_LEVEL))
-        lines.extend((f"{'#' * level} {title}\n\n", f"{text}\n\n"))
+    content = render_working_file(file_info, chunks)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temp_name = tempfile.mkstemp(prefix=".rebuild-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            output.write("".join(lines))
+            output.write(content)
         os.replace(temp_name, path)
         with get_db_cursor(write=True) as cursor:
             cursor.execute("UPDATE files SET working_dirty = 0 WHERE id = ?", (file_id,))
@@ -133,7 +158,7 @@ def update_chunk_title(chunk_id, doc_title):
         return None
     doc_title, _ = normalize_chunk(doc_title, chunk["chunk_text"])
     task_service.ensure_file_idle(chunk["file_id"])
-    path_info = _title_path(chunk, doc_title)
+    path_info = _title_path(chunk)
     with get_db_cursor(write=True) as cursor:
         cursor.execute("UPDATE chunks SET doc_title = ?, heading_path = ?, heading_level = ? WHERE id = ?",
                        (doc_title, path_info["heading_path"], path_info["heading_level"], chunk_id))
@@ -215,8 +240,8 @@ def _publish_chunk(task, embedding_blob):
                 raise BusinessError("NOT_FOUND", "Chunk 不存在")
             chunk = dict(row)
             title = payload.get("doc_title", chunk["doc_title"])
-            # 页定位只依赖原始 heading_path，不被可编辑标题覆盖。
-            path = _title_path(chunk, title)
+            # 来源结构不被可编辑显示标题覆盖。
+            path = _title_path(chunk)
             cursor.execute("UPDATE chunks SET doc_title = ?, chunk_text = ?, embedding = ?, heading_path = ?, heading_level = ? WHERE id = ?",
                            (title, payload["chunk_text"], embedding_blob, path["heading_path"], path["heading_level"], chunk_id))
             cursor.execute("UPDATE vec_chunks SET embedding = ? WHERE chunk_id = ?", (embedding_blob, chunk_id))

@@ -100,14 +100,14 @@ def collect_chunk_images(
     documents: Dict[str, Dict[str, Any]],
     max_images: int = MAX_IMAGES_PER_CALL,
     image_offset: int = 0,
-) -> tuple[List[Dict[str, str]], int]:
+) -> tuple[List[Dict[str, Any]], int]:
     """按固定顺序分页收集若干文档正文中的插图。
 
     正文没有可用插图时，PDF 会回退到渲染原页——VLM 和本地文本层解析都不落
     图片文件，这类文档只能从原件取图。
 
     Args:
-        documents: doc_title 到文档详情的映射，需包含 chunk_text 和 file_path
+        documents: 标题或字符串 chunk_id 到文档详情的映射，需包含 chunk_text 和 file_path
         max_images: 本批返回图片数量上限，必须大于 0
         image_offset: 跳过的有效图片数量，跨文档累计，从 0 开始
 
@@ -120,9 +120,13 @@ def collect_chunk_images(
     if image_offset < 0:
         raise ValueError("image_offset must be at least 0")
 
-    images: List[Dict[str, str]] = []
+    images: List[Dict[str, Any]] = []
 
-    for doc_title, doc in documents.items():
+    for key, doc in documents.items():
+        doc_title = doc.get("doc_title", key)
+        identity = {"doc_title": doc_title}
+        if doc.get("chunk_id") is not None:
+            identity["chunk_id"] = doc["chunk_id"]
         file_path = doc.get("file_path")
         if not file_path:
             continue
@@ -135,7 +139,7 @@ def collect_chunk_images(
             if path is None or not _is_large_enough(path):
                 continue
             images.append(
-                {"doc_title": doc_title, "ref": ref, "path": str(path)}
+                {**identity, "ref": ref, "path": str(path)}
             )
             collected += 1
 
@@ -147,7 +151,7 @@ def collect_chunk_images(
             continue
         page_path, ref = rendered
         images.append(
-            {"doc_title": doc_title, "ref": ref, "path": str(page_path)}
+            {**identity, "ref": ref, "path": str(page_path)}
         )
 
     # 先确定有效图片与原页回退，再分页，避免被跳过的插图误触发原页回退。

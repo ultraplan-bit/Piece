@@ -5,6 +5,7 @@ BM25检索节点：使用SQLite FTS5对chunk_text字段进行全文检索
 from typing import List
 from .state import State, SearchResult
 from indexing.database import get_db_cursor
+from indexing.fts import quote_fts_term
 from ..config import config
 
 
@@ -47,7 +48,7 @@ def bm25_search_node(state: State) -> dict:
         with get_db_cursor() as cursor:
             # 构建FTS5查询语句
             # 使用OR连接多个词，实现宽松匹配
-            query_str = " OR ".join(tokens)
+            query_str = " OR ".join(quote_fts_term(token) for token in tokens)
 
             # 构建SQL查询
             # 使用FTS5的bm25()函数获取相关性分数
@@ -57,13 +58,13 @@ def bm25_search_node(state: State) -> dict:
                 placeholders = ",".join("?" * len(file_ids))
                 query_sql = f"""
                     SELECT DISTINCT
-                        c.doc_title,
+                        c.id AS chunk_id, c.doc_title,
                         -bm25(chunks_fts) AS bm25_score
                     FROM chunks_fts
                     JOIN chunks c ON chunks_fts.rowid = c.id
                     WHERE chunks_fts MATCH ?
                       AND c.file_id IN ({placeholders})
-                    ORDER BY bm25_score DESC
+                    ORDER BY bm25_score DESC, c.id
                     LIMIT ?
                 """
                 params = [query_str] + file_ids + [config.bm25_top_k]
@@ -71,12 +72,12 @@ def bm25_search_node(state: State) -> dict:
                 # 无文件过滤，全局检索
                 query_sql = """
                     SELECT DISTINCT
-                        c.doc_title,
+                        c.id AS chunk_id, c.doc_title,
                         -bm25(chunks_fts) AS bm25_score
                     FROM chunks_fts
                     JOIN chunks c ON chunks_fts.rowid = c.id
                     WHERE chunks_fts MATCH ?
-                    ORDER BY bm25_score DESC
+                    ORDER BY bm25_score DESC, c.id
                     LIMIT ?
                 """
                 params = [query_str, config.bm25_top_k]
@@ -87,7 +88,7 @@ def bm25_search_node(state: State) -> dict:
 
             # 转换为SearchResult列表
             bm25_results: List[SearchResult] = [
-                {"doc_title": row[0], "score": float(row[1])}
+                {"chunk_id": row[0], "doc_title": row[1], "score": float(row[2])}
                 for row in rows
             ]
 

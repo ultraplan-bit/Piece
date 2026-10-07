@@ -316,7 +316,7 @@ def _split_filenames(raw: str) -> list:
 
 
 async def _run_search(recall_state: dict, ui_refs: dict):
-    """跑一次召回：resolve-keywords 拿标题，再用 get-docs 把正文补齐"""
+    """跑一次召回：按返回的 chunk_id 取回正文，不按同名标题合并。"""
     query = (recall_state.get("query") or "").strip()
     if not query:
         ui.notify(t("recall_test.empty_query"), type="warning")
@@ -338,18 +338,16 @@ async def _run_search(recall_state: dict, ui_refs: dict):
             collections=collections or None,
             include_descendants=recall_state.get("include_descendants", True),
         )
-        keywords = result.get("keywords", [])
-        # 一次把 top-k 的正文全取回来：条数上限 3 是 MCP 工具层的约束，
-        # get_docs 本身不限，预取后展开卡片就不用再跑异步查询
+        candidates = result.get("candidates", [])
+        # MCP 工具层限制每次 3 张；面板按精确 ID 批量预取全部 top-k。
         docs = (
-            await run_sync(get_docs, keywords) if keywords else {}
+            await run_sync(get_docs, chunk_ids=[item["chunk_id"] for item in candidates]) if candidates else {}
         )
         elapsed_ms = int((time.perf_counter() - started) * 1000)
 
         debug_stats = result.get("debug_stats", {})
-        confidence_scores = result.get("confidence_scores", {})
-        routes_by_title = {
-            entry["doc_title"]: [
+        routes_by_id = {
+            entry["chunk_id"]: [
                 field for field in _ROUTE_LABELS if entry.get(field) is not None
             ]
             for entry in debug_stats.get("fused_top_k", [])
@@ -357,12 +355,13 @@ async def _run_search(recall_state: dict, ui_refs: dict):
 
         recall_state["results"] = [
             {
-                "doc_title": title,
-                "score": confidence_scores.get(title, 0.0),
-                "routes": routes_by_title.get(title, []),
-                "doc": docs.get(title),
+                "chunk_id": item["chunk_id"],
+                "doc_title": item["doc_title"],
+                "score": item["score"],
+                "routes": routes_by_id.get(item["chunk_id"], []),
+                "doc": docs.get(str(item["chunk_id"])),
             }
-            for title in keywords
+            for item in candidates
         ]
         recall_state["stats"] = {
             "exact": debug_stats.get("exact_recall_count", 0),

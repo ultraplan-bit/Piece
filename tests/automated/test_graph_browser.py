@@ -73,8 +73,7 @@ def test_graph_browser_independent_roundtrip(graph_gui):
         page.route("**/*", route)
         try:
             page.goto(service["url"])
-            expect(page.get_by_text("人工智能 (1)", exact=True)).to_be_visible(timeout=30000)
-            page.get_by_role("button", name='Expand "文件库"', exact=True).click()
+            expect(page.locator(".resource-collection-row").first).to_be_visible(timeout=30000)
             page.get_by_role("button", name=t("sidebar.graph"), exact=True).click()
             expect(page.get_by_text(k("empty"), exact=True)).to_be_visible()
 
@@ -107,7 +106,8 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             expect(page.get_by_text(k("description") + " · 人工创建的关系", exact=True)).to_be_visible()
 
             # 给关系补证据。
-            page.get_by_role("button", name=k("add_evidence"), exact=True).click()
+            page.locator(".knowledge-detail").get_by_role("button", name=k("more"), exact=True).click()
+            page.locator(".q-menu").get_by_text(k("add_evidence"), exact=True).click()
             dialog.get_by_label(k("quote"), exact=True).fill("人工补充证据")
             dialog.get_by_label(k("reason"), exact=True).fill("证据验收")
             dialog.get_by_role("button", name=k("save"), exact=True).click()
@@ -121,6 +121,9 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             page.get_by_role("button", name="图谱中心", exact=True).first.click()
             page.get_by_role("button", name=k("view_graph"), exact=True).click()
             expect(page.locator(".nicegui-echart canvas")).to_be_visible(timeout=30000)
+            middle = page.locator(".workspace-splitter").last.locator(":scope > .q-splitter__before")
+            expect(middle).to_have_css("width", "260px")
+            expect(middle.get_by_role("button", name="目标图节点", exact=True)).to_be_visible()
             expect(page.get_by_text(k("table"), exact=True)).to_be_visible()
             state = chart_state(page)
             assert {node["id"] for node in state["nodes"]} == {root, target}
@@ -138,7 +141,8 @@ def test_graph_browser_independent_roundtrip(graph_gui):
 
             # 删除节点会影响其关系与证据，预览范围由服务给出。
             page.get_by_role("button", name="图谱中心", exact=True).first.click()
-            page.get_by_role("button", name=k("delete"), exact=True).click()
+            page.locator(".knowledge-detail").get_by_role("button", name=k("more"), exact=True).click()
+            page.locator(".q-menu").get_by_text(k("delete"), exact=True).click()
             expect(page.get_by_text(k("delete_preview"), exact=True)).to_be_visible()
             impact = t("knowledge.impact_count", kind=k("relations"), count=1)
             expect(page.get_by_text(impact, exact=True)).to_be_visible()

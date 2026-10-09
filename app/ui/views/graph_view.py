@@ -11,6 +11,7 @@ from nicegui import run, ui
 from app.ui.views.graph_presenter import (
     BASES, KINDS, PREDICATES, graph_options, merge_graph,
 )
+from app.ui.components import help_hint
 from app.ui.views.knowledge_common import STATUSES, WorkbenchBase, local_source
 from indexing.services import knowledge_service as service
 from indexing.services.errors import BusinessError
@@ -150,6 +151,7 @@ class GraphWorkbench(WorkbenchBase):
             return
         self.error = None
         self.detail = data
+        self.highlight_selection()
         if kind == "object":
             self.selected_object = ident
             self.local_relations = await self.call(service.graph, root_id=ident, depth=1, edge_types=["relation"])
@@ -170,48 +172,17 @@ class GraphWorkbench(WorkbenchBase):
         return data
 
     def render_middle(self):
-        with ui.column().classes("w-full h-full gap-3 p-4 theme-panel overflow-hidden"):
-            ui.label(self.text("heading")).classes("text-xl font-semibold theme-text")
-            ui.label(self.text("intro")).classes("text-xs theme-text-muted")
-            ui.label(self.text("auto_refresh")).classes("text-xs theme-text-muted")
-            ui.input(self.text("search"), value=self.query, on_change=lambda e: setattr(self, "query", e.value)).props("outlined dense").classes("w-full").on("keydown.enter", self.search)
-            with ui.row().classes("w-full gap-2"):
-                ui.select(self.choices(KINDS), label=self.text("kind"), value=self.kind, clearable=True,
-                          on_change=lambda e: setattr(self, "kind", e.value)).props("dense outlined").classes("flex-1")
-                ui.select(self.choices(STATUSES), label=self.text("status"), value=self.status, clearable=True,
-                          on_change=lambda e: setattr(self, "status", e.value)).props("dense outlined").classes("flex-1")
-            with ui.row().classes("gap-2"):
-                ui.button(self.text("search"), on_click=self.search).props("unelevated no-caps")
-                ui.button(self.text("create"), icon="add", on_click=lambda: self.edit_object()).props("flat no-caps")
-            with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(list=e.vertical_position)).classes("w-full flex-1") as area:
-                self._scroll_areas["list"] = area
-                @ui.refreshable
-                def listing():
-                    data = self.results
-                    if not data:
-                        ui.label(self.text("search_hint")).classes("theme-text-muted")
-                        return
-                    if not data["objects"]:
-                        ui.label(self.text("empty")).classes("theme-text-muted")
-                    for item in data["objects"]:
-                        with ui.column().classes("w-full gap-1 py-3 knowledge-list-item"):
-                            ui.button(item["title"], on_click=partial(self.select, "object", item["id"])).props("flat no-caps align=left").classes("w-full text-left theme-text")
-                            ui.label(self.text(item["kind"]) + " · " + self.text(item["status"])).classes("text-xs theme-text-muted")
-                            ui.label(item["summary"]).classes("text-sm theme-text-secondary line-clamp-3 break-words")
-                            ui.label(item["updated_at"]).classes("text-xs theme-text-muted")
-                    self.pager(self.offset, 25, data["total"], self.list_page)
-                self.refresh_list = listing.refresh
-                listing()
-            # 随面板创建/销毁，离开页面后不继续查询；重入时立即检查一次。
-            self._poll_timer = ui.timer(2.0, self.poll)
+        self.render_catalog(KINDS, "objects", "object", lambda: self.edit_object())
 
-    def render_right(self):
-        with ui.column().classes("w-full flex-1 min-h-0 min-w-0 theme-panel gap-0"):
+    def render_right(self, controls=None):
+        with ui.column().classes("w-full h-full flex-1 min-h-0 min-w-0 theme-content gap-0"):
             @ui.refreshable
             def modes():
-                with ui.row().classes("w-full items-center gap-2 px-4 py-2 library-heading"):
+                with ui.row().classes("w-full items-center library-heading workspace-toolbar overflow-x-auto"):
+                    if controls:
+                        controls()
                     for mode, icon in (("objects", "account_tree"), ("graph", "hub"), ("review", "fact_check")):
-                        ui.button(self.text(mode), icon=icon, on_click=partial(self.set_mode, mode)).props("flat no-caps").classes("theme-selected" if self.mode == mode else "")
+                        ui.button(self.text(mode), icon=icon, color=None, on_click=partial(self.set_mode, mode)).props("flat dense no-caps").classes("theme-selected" if self.mode == mode else "theme-text-secondary")
             self.refresh_modes = modes.refresh
             modes()
             with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(detail=e.vertical_position)).classes("w-full flex-1") as area:
@@ -268,7 +239,7 @@ class GraphWorkbench(WorkbenchBase):
         await self.remember_positions()
         root = self.selected_object if center or self.graph is None else self.graph["root_id"]
         if not root:
-            ui.notify(self.text("choose_root"), type="info")
+            self.notify(self.text("choose_root"), type="info")
             return
         filters = (tuple(self.edge_types), tuple(self.predicates or ()), tuple(self.relation_statuses or ()))
         incoming = await self.call(service.graph, root_id=self.selected_object if expand else root,
@@ -295,7 +266,9 @@ class GraphWorkbench(WorkbenchBase):
             await self.select("object", data["id"])
 
     def render_graph(self):
-        ui.label(self.text("graph_scope")).classes("text-xs theme-text-muted")
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.label(self.text("graph")).classes("text-sm font-medium theme-text")
+            help_hint(self.text("graph_scope"))
         with ui.row().classes("w-full items-center gap-2"):
             ui.select({1: self.text("one_hop"), 2: self.text("two_hops")}, value=self.depth,
                       on_change=lambda e: setattr(self, "depth", e.value)).props("dense outlined")
@@ -308,7 +281,6 @@ class GraphWorkbench(WorkbenchBase):
             ui.button(self.text("center"), on_click=partial(self.load_graph, center=True)).props("flat no-caps")
             ui.button(self.text("expand"), on_click=partial(self.load_graph, expand=True)).props("flat no-caps")
             ui.button(self.text("reset_view"), on_click=self.reset_graph_view).props("flat no-caps")
-            ui.button(self.text("objects"), on_click=partial(self.set_mode, "objects")).props("flat no-caps")
         @ui.refreshable
         def graph_body():
             if self.graph is None:
@@ -367,14 +339,19 @@ class GraphWorkbench(WorkbenchBase):
         with ui.column().classes("knowledge-detail w-full max-w-[1000px] mx-auto gap-3 min-w-0"):
             ui.label(data.get("title", self.text(kind))).classes("text-2xl font-semibold theme-text break-words")
             if kind in ("object", "relation"):
-                with ui.row().classes("items-center gap-2"):
+                with ui.row().classes("w-full items-center gap-2 knowledge-metadata"):
                     ui.icon("help_outline" if data["status"] == "disputed" else "schedule" if data["status"] == "outdated" else "label_outline", size="xs")
-                    ui.label(self.text(data["status"])).classes("text-xs theme-text-muted")
-                    ui.label(self.text("revision", revision=data["revision"], updated=data["updated_at"])).classes("text-xs theme-text-muted")
-                    ui.button(self.text("edit"), on_click=self.edit_current).props("flat dense no-caps")
-                    ui.button(self.text("history"), on_click=partial(self.show_history, kind, data["id"])).props("flat dense no-caps")
-                    ui.button(self.text("add_evidence"), on_click=partial(self.edit_evidence, kind, data["id"])).props("flat dense no-caps")
-                ui.button(self.text("delete"), icon="delete_outline", on_click=partial(self.preview_delete, kind, deepcopy(data))).props("flat dense no-caps")
+                    ui.label(self.text(data["status"])).classes("text-xs theme-text-muted").tooltip(
+                        self.text("revision", revision=data["revision"], updated=data["updated_at"])
+                    )
+                    ui.space()
+                    ui.button(self.text("edit"), icon="edit", on_click=self.edit_current).props("flat dense no-caps")
+                    with ui.button(icon="more_horiz").props(f'flat dense round size=sm aria-label="{self.text("more")}"').tooltip(self.text("more")):
+                        with ui.menu():
+                            ui.menu_item(self.text("add_evidence"), on_click=partial(self.edit_evidence, kind, data["id"]))
+                            ui.menu_item(self.text("history"), on_click=partial(self.show_history, kind, data["id"]))
+                            ui.separator()
+                            ui.menu_item(self.text("delete"), on_click=partial(self.preview_delete, kind, deepcopy(data))).classes("theme-danger")
             if kind == "object":
                 ui.label(self.text(data["kind"]) + (" · " + " / ".join(data["aliases"]) if data.get("aliases") else "")).classes("text-sm theme-text-muted")
                 if data["summary"]:
@@ -468,7 +445,7 @@ class GraphWorkbench(WorkbenchBase):
                 if found:
                     target.set_options({item["id"]: item["title"] + " · " + self.text(item["kind"]) + " · " + item["summary"][:60] + " · " + item["id"][:8]
                                         for item in found["objects"] if item["id"] != source_id})
-                    ui.notify(self.text("target_limit"), type="info")
+                    self.notify(self.text("target_limit"), type="info")
             ui.button(self.text("search"), on_click=lookup).props("flat")
             self.field("predicate", draft, options=PREDICATES)
             self.relation_fields(draft)
@@ -505,11 +482,14 @@ class GraphWorkbench(WorkbenchBase):
 
     # ---- 只读结构检查 ----
     def render_review(self):
-        ui.label(self.text("review_intro")).classes("text-sm theme-text-muted")
+        with ui.row().classes("items-center gap-2"):
+            ui.label(self.text("review")).classes("text-sm font-medium theme-text")
+            help_hint(self.text("review_intro"))
         with ui.row().classes("items-center gap-2"):
             ui.select(self.choices(("all", "selected", "filtered")), label=self.text("scope"), value=self.lint_scope,
                       on_change=lambda e: setattr(self, "lint_scope", e.value)).props("outlined dense")
-            ui.button(self.text("rebuild_index"), on_click=self.rebuild_index).props("outline no-caps").tooltip(self.text("rebuild_intro"))
+            ui.button(self.text("rebuild_index"), on_click=self.rebuild_index).props("outline no-caps")
+            help_hint(self.text("rebuild_intro"))
         with ui.row():
             ui.button(self.text("run_checks"), on_click=self.run_checks).props("outline no-caps")
             ui.button(self.text("disputed"), on_click=partial(self.show_status, "disputed")).props("flat no-caps")
@@ -559,7 +539,7 @@ class GraphWorkbench(WorkbenchBase):
         result = await self.call(service.rebuild_index)
         if result is None:
             return
-        ui.notify(self.text("rebuild_done"), type="positive")
+        self.notify(self.text("rebuild_done"), type="positive")
         await self.search(False)
 
     async def file_references(self, file_id, offset=0):

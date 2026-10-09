@@ -9,15 +9,18 @@
 """
 
 import asyncio
+import logging
 from indexing.utils import run_sync
 from pathlib import Path
-from typing import Optional
+from typing import Callable
 
 from nicegui import ui
 
 from indexing.services import chunk_service, file_service
+from indexing.services.parser_helper import run_preview_page_count
 from indexing.services.page_render import (
     VIEW_DPI,
+    PAGE_VIEWABLE_FORMATS,
     page_number_from_heading,
     render_pdf_page,
     resolve_source_pdf,
@@ -26,10 +29,13 @@ from app.i18n import t
 from app.ui.components import chunk_dialog, confirm_dialog
 
 
+logger = logging.getLogger(__name__)
+
+
 class ChunkHandlers:
     """切片操作处理器"""
 
-    def __init__(self, state: dict, ui_refs: dict, on_refresh_files: callable):
+    def __init__(self, state: dict, ui_refs: dict, on_refresh_files: Callable):
         """
         初始化切片处理器
 
@@ -48,6 +54,124 @@ class ChunkHandlers:
         # 批量删除模式状态
         self.state["chunk_batch_mode"] = False
         self.state["chunk_batch_selected_ids"] = set()
+        self.state.setdefault("source_follow", True)
+        self.state.setdefault("source_zoom", 100)
+
+    def can_compare(self) -> bool:
+        file_id = self.state.get("selected_file_id")
+        file = next((item for item in self.state.get("files_data", []) if item["id"] == file_id), None)
+        if not file or not file.get("original_file_path"):
+            return False
+        extension = (file.get("original_file_type") or Path(file["original_file_path"]).suffix.lstrip(".")).lower()
+        return f".{extension}" in PAGE_VIEWABLE_FORMATS
+
+    def _enter_comparison(self):
+        self.state["source_pane_open"] = True
+        if callback := self.ui_refs.get("set_library_view"):
+            callback("compare")
+        else:
+            self.state["library_view"] = "compare"
+            if callback := self.ui_refs.get("open_reader"):
+                callback()
+
+    async def _reading_page(self):
+        """根据可见切片定位页码，不假设正文总停在结果页的第一条。"""
+        file_id = self.state.get("selected_file_id")
+        if self.ui_refs.get("chunk_scroll") is not None:
+            try:
+                result = await ui.run_javascript("""(() => {
+                    const area = document.querySelector('.chunk-scroll');
+                    if (!area) return null;
+                    const bounds = area.getBoundingClientRect();
+                    const line = bounds.top + bounds.height / 3;
+                    const cards = [...area.querySelectorAll('.chunk-anchor[data-page]')]
+                        .filter(card => Number(card.dataset.page) > 0);
+                    const card = cards.find(card => card.getBoundingClientRect().bottom > line) || cards.at(-1);
+                    return card ? {file_id: Number(card.dataset.fileId), page: Number(card.dataset.page)} : null;
+                })()""")
+                if self.state.get("selected_file_id") != file_id:
+                    return None
+                if isinstance(result, dict) and result.get("file_id") == file_id and type(result.get("page")) is int:
+                    return result["page"]
+            except (RuntimeError, TimeoutError):
+                pass
+        chunks = self.get_visible_chunks()
+        return (page_number_from_heading(chunks[0].get("heading_path")) or 1) if chunks else 1
+
+    async def open_comparison(self):
+        if not self.can_compare():
+            return
+        source = self.state.get("source_page")
+        if source and not self.state.get("source_follow", True):
+            page = source["page"]
+        else:
+            page = await self._reading_page()
+        if page is None:
+            return
+        self._enter_comparison()
+        await self._show_source_page(page, notify_on_failure=True)
+
+    async def navigate_source(self, page_number: int):
+        source = self.state.get("source_page")
+        if not source or type(page_number) is not int or not 1 <= page_number <= source.get("total_pages", 0):
+            if source and (field := self.ui_refs.get("source_page_input")) is not None and not field.is_deleted:
+                field.set_value(str(source["page"]))
+            ui.notify(t("library.page_invalid"), type="warning")
+            return
+        self.state["source_follow"] = False
+        self.refresh_source_controls()
+        await self._show_source_page(page_number, notify_on_failure=True)
+        if (scroll := self.ui_refs.get("source_scroll")) is not None and not scroll.is_deleted:
+            with scroll.client.content:
+                await ui.run_javascript("document.querySelector('.source-scroll')?.scrollTo({top: 0, left: 0})")
+
+    async def step_source(self, delta: int):
+        source = self.state.get("source_page")
+        if source:
+            page = self._source_request["page"] if self._source_request else source["page"]
+            if 1 <= page + delta <= source.get("total_pages", 0):
+                await self.navigate_source(page + delta)
+
+    async def set_source_follow(self, value: bool):
+        if self.state.get("source_follow", True) == value:
+            return
+        self.state["source_follow"] = value
+        self.invalidate_source_requests()
+        if value and self.state.get("source_pane_open"):
+            page = await self._reading_page()
+            if page is not None:
+                await self._show_source_page(page)
+        self.refresh_source_controls()
+
+    def set_source_zoom(self, value: int):
+        self.state["source_zoom"] = max(50, min(300, value))
+        image = self.ui_refs.get("source_image")
+        if image is not None and not image.is_deleted:
+            image.style(f"width: {self.state['source_zoom']}%; max-width: none")
+        self.refresh_source_controls()
+
+    def refresh_source_controls(self):
+        source = self.state.get("source_page") or {}
+        page, total = source.get("page", 1), source.get("total_pages", 0)
+        page_input = self.ui_refs.get("source_page_input")
+        if page_input is not None and not page_input.is_deleted and self.ui_refs.get("source_input_page") != page:
+            page_input.set_value(str(page))
+            self.ui_refs["source_input_page"] = page
+        for key, text in (("source_total", f"/ {total or '?'}"),
+                          ("source_zoom_label", f"{self.state.get('source_zoom', 100)}%")):
+            element = self.ui_refs.get(key)
+            if element is not None and not element.is_deleted:
+                element.set_text(text)
+        for key, enabled in (("source_previous", page > 1), ("source_next", bool(total and page < total))):
+            element = self.ui_refs.get(key)
+            if element is not None and not element.is_deleted:
+                element.set_enabled(enabled)
+        follow = self.ui_refs.get("source_follow_toggle")
+        if follow is not None and not follow.is_deleted:
+            follow.set_value(self.state.get("source_follow", True))
+        status = self.ui_refs.get("source_follow_status")
+        if status is not None and not status.is_deleted:
+            status.set_visibility(not self.state.get("source_follow", True))
 
     async def handle_view_source_page(self, page_number: int):
         """切换原页对比栏：点开某一页，再点同一页则收起。
@@ -56,11 +180,11 @@ class ChunkHandlers:
         因此并排展开而不是弹窗——弹窗会把整页版面压得看不清。
         """
         current = self.state.get("source_page")
-        if current and current["page"] == page_number:
+        if current and current.get("file_id") == self.state.get("selected_file_id") and current["page"] == page_number:
             self.close_source_page()
             return
 
-        self.state["source_pane_open"] = True
+        self._enter_comparison()
         # 手动点页立即响应，取消浏览器中尚未上报的自动跟随候选。
         revision = self.state.get("source_follow_revision", 0) + 1
         self.state["source_follow_revision"] = revision
@@ -80,13 +204,28 @@ class ChunkHandlers:
             None,
         )
         page_number = page_number_from_heading(chunk.get("heading_path")) if chunk else None
-        if page_number is not None:
+        if page_number is not None and self.state.get("source_follow", True):
             # 即使回到了当前已显示页，也要替换正在等待的目标，避免旧请求稍后跳回来。
             await self._show_source_page(page_number)
 
     def invalidate_source_requests(self):
         """换文件、翻页或关闭时废弃旧目标；已开始的渲染只留缓存，不再更新界面。"""
         self._source_request = None
+
+    # ==================== 阅读形态 ====================
+
+    def set_file_reading_mode(self, mode: str):
+        """在"连续阅读"与"卡片管理"之间切换正文形态，不改变切片数据。
+
+        只重建正文与切换按钮；批量选择时正文仍强制卡片形态。
+        """
+        if mode not in ("reading", "cards"):
+            return
+        self.state["file_reading_mode"] = mode
+        if self.ui_refs.get("reading_mode_toggle"):
+            self.ui_refs["reading_mode_toggle"].refresh()
+        if self.ui_refs.get("chunk_inspector"):
+            self.ui_refs["chunk_inspector"].refresh()
 
     async def sync_source_page(self):
         """切片列表换了内容后，把对比栏对齐到首个切片所在页。
@@ -96,19 +235,15 @@ class ChunkHandlers:
         """
         if not self.state.get("source_pane_open"):
             return
-
-        chunks = self.get_visible_chunks()
-        page_number = (
-            page_number_from_heading(chunks[0].get("heading_path"))
-            if chunks
-            else None
-        )
-        if page_number is None:
-            self.invalidate_source_requests()
-            self.state["source_page"] = None
-            self._refresh_source_column()
+        if not self.can_compare():
+            self.close_source_page()
+            return
+        source = self.state.get("source_page")
+        if not self.state.get("source_follow", True) and source and source.get("file_id") == self.state.get("selected_file_id"):
             return
 
+        chunks = self.get_visible_chunks()
+        page_number = (page_number_from_heading(chunks[0].get("heading_path")) if chunks else None) or 1
         await self._show_source_page(page_number)
 
     async def _show_source_page(self, page_number: int, notify_on_failure: bool = False):
@@ -119,9 +254,7 @@ class ChunkHandlers:
             None,
         )
         if not file_info:
-            self.invalidate_source_requests()
-            self.state["source_page"] = None
-            self._refresh_source_column()
+            self.close_source_page()
             return
 
         pending = self._source_request
@@ -132,33 +265,38 @@ class ChunkHandlers:
         self._source_request = request
         try:
             current = self.state.get("source_page")
-            if current and current["page"] == page_number:
+            if current and current.get("file_id") == file_id and current["page"] == page_number:
                 return
             async with self._source_lock:
                 if self._source_request is not request:
                     return
                 # Office 转换和原页渲染都在线程中等待，不阻塞 UI 事件循环。
-                page_path = await run_sync(self._render_source_page, file_info, page_number)
+                rendered = await run_sync(self._render_source_page, file_info, page_number)
                 if (
                     self._source_request is not request
                     or self.state.get("selected_file_id") != file_id
                     or not self.state.get("source_pane_open")
                 ):
                     return
-                if page_path is None:
+                if rendered is None:
                     if request["notify"]:
-                        ui.notify(t("chunks.source_page_failed"), type="negative")
-                    self.state["source_page"] = None
+                        reader = self.ui_refs.get("chunk_scroll")
+                        if reader is not None:
+                            with reader.client.content:
+                                ui.notify(t("chunks.source_page_failed"), type="negative")
+                        else:
+                            ui.notify(t("chunks.source_page_failed"), type="negative")
+                    if (self.state.get("source_page") or {}).get("file_id") != file_id:
+                        self.close_source_page()
                 else:
+                    page_path, total_pages = rendered
                     self.state["source_page"] = {
                         "file_id": file_id,
                         "url": f"/pages/{page_path.name}",
                         "page": page_number,
-                        "caption": t(
-                            "chunks.source_page_caption",
-                            filename=file_info["filename"],
-                            page=page_number,
-                        ),
+                        "total_pages": total_pages,
+                        "source_name": Path(file_info["original_file_path"]).name if file_info.get("original_file_path") else "",
+                        "caption": t("library.original_pdf" if (file_info.get("original_file_type") or "").lower() == "pdf" else "library.original_page"),
                     }
                 self._refresh_source_column()
         finally:
@@ -166,15 +304,20 @@ class ChunkHandlers:
                 self._source_request = None
 
     @staticmethod
-    def _render_source_page(file_info: dict, page_number: int) -> Optional[Path]:
-        """在线程中完成原件解析和页面渲染"""
-        pdf_path = resolve_source_pdf(
-            file_info.get("original_file_path"),
-            file_info.get("original_file_type"),
-        )
+    def _render_source_page(file_info: dict, page_number: int) -> tuple[Path, int] | None:
+        """原件解析、页数查询和渲染均在线程/隔离预览进程中完成。"""
+        pdf_path = resolve_source_pdf(file_info.get("original_file_path"), file_info.get("original_file_type"))
         if pdf_path is None:
             return None
-        return render_pdf_page(pdf_path, page_number, VIEW_DPI)
+        try:
+            total = run_preview_page_count(pdf_path)
+            if not 1 <= page_number <= total:
+                return None
+            path = render_pdf_page(pdf_path, page_number, VIEW_DPI)
+            return (path, total) if path is not None else None
+        except Exception as exc:
+            logger.warning("[原页] 无法读取 %s: %s", pdf_path.name, exc)
+            return None
 
     def close_source_page(self):
         """收起原页对比栏，把版面还给切片列表"""
@@ -182,6 +325,11 @@ class ChunkHandlers:
         self.state["source_pane_open"] = False
         self.state["source_page"] = None
         self._refresh_source_column()
+        if self.state.get("library_view") == "compare":
+            if callback := self.ui_refs.get("set_library_view"):
+                callback("reading")
+            else:
+                self.state["library_view"] = "reading"
 
     def _refresh_source_column(self):
         """同栏切页只换图片和标题，保留滚动容器；展开、关闭时才重建。"""
@@ -190,10 +338,11 @@ class ChunkHandlers:
         if source and image is not None and not image.is_deleted:
             image.set_source(source["url"])
             self.ui_refs["source_caption"].set_text(source["caption"])
-            self.ui_refs["source_tooltip"].set_text(source["caption"])
+            self.ui_refs["source_tooltip"].set_text(source.get("source_name") or source["caption"])
             self.ui_refs["source_pane"].props(
                 f'data-file-id={source["file_id"]} data-page={source["page"]}'
             )
+            self.refresh_source_controls()
             return
         column = self.ui_refs.get("source_column")
         if column:
@@ -406,6 +555,8 @@ class ChunkHandlers:
             return
         self.state["chunk_batch_mode"] = True
         self.state["chunk_batch_selected_ids"] = set()
+        if self.ui_refs.get("reading_mode_toggle"):
+            self.ui_refs["reading_mode_toggle"].refresh()
         if self.ui_refs.get("chunk_toolbar_buttons"):
             self.ui_refs["chunk_toolbar_buttons"].refresh()
         if self.ui_refs.get("chunk_inspector"):
@@ -415,6 +566,8 @@ class ChunkHandlers:
         """退出切片批量删除模式"""
         self.state["chunk_batch_mode"] = False
         self.state["chunk_batch_selected_ids"] = set()
+        if self.ui_refs.get("reading_mode_toggle"):
+            self.ui_refs["reading_mode_toggle"].refresh()
         if self.ui_refs.get("chunk_toolbar_buttons"):
             self.ui_refs["chunk_toolbar_buttons"].refresh()
         if self.ui_refs.get("chunk_inspector"):

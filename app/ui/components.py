@@ -6,8 +6,10 @@
 - 保持 UI 风格一致性
 """
 
+from copy import deepcopy
 from typing import Callable, Optional
 from functools import cache
+from html import unescape
 import inspect
 import logging
 import re
@@ -18,6 +20,58 @@ from nicegui import context, ui
 from app.i18n import t
 
 logger = logging.getLogger(__name__)
+
+
+CATALOG_KEY_HANDLER = """(event) => {
+    if (event.isComposing || event.altKey ||
+        event.target.closest('input, textarea, select, button, a, [contenteditable=true], [role=menuitem]')) return;
+    const row = event.target.closest('[data-catalog-row]');
+    const catalog = row?.closest('[data-catalog]');
+    if (!catalog) return;
+    const rows = [...catalog.querySelectorAll('[data-catalog-row]')];
+    const index = rows.indexOf(row);
+    const focus = next => {
+        if (!next) return;
+        rows.forEach(item => item.tabIndex = item === next ? 0 : -1);
+        next.focus({preventScroll: true}); next.scrollIntoView({block: 'nearest'});
+        if (!event.ctrlKey && !event.metaKey &&
+            (catalog.dataset.multiselect !== 'true' || event.shiftKey)) {
+            next.dispatchEvent(new MouseEvent('click', {bubbles: true, shiftKey: event.shiftKey}));
+        }
+    };
+    if (catalog.dataset.tree === 'true' && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+        event.preventDefault(); event.stopPropagation();
+        const expanded = row.getAttribute('aria-expanded') === 'true';
+        if (row.dataset.collectionId && ((event.key === 'ArrowRight' && !expanded) ||
+            (event.key === 'ArrowLeft' && expanded))) {
+            row.dispatchEvent(new MouseEvent('dblclick', {bubbles: true}));
+        } else {
+            focus(rows.find(item => event.key === 'ArrowRight'
+                ? item.dataset.parentRow === row.dataset.catalogRow
+                : item.dataset.catalogRow === row.dataset.parentRow));
+        }
+        return;
+    }
+    if (event.key === 'F2' && row.dataset.collectionId) {
+        event.preventDefault(); row.dispatchEvent(new CustomEvent('rename-collection')); return;
+    }
+    if (catalog.dataset.catalog === 'files' && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+        event.preventDefault(); catalog.dispatchEvent(new CustomEvent('catalog-select-all')); return;
+    }
+    const directions = {ArrowUp: index - 1, ArrowDown: index + 1, Home: 0, End: rows.length - 1};
+    if (event.key in directions) {
+        event.preventDefault(); event.stopPropagation();
+        focus(rows[Math.max(0, Math.min(rows.length - 1, directions[event.key]))]);
+    } else if ((event.key === 'Enter' || event.key === ' ') && !event.repeat &&
+               !event.ctrlKey && !event.metaKey) {
+        event.preventDefault(); event.stopPropagation();
+        const type = row.dataset.collectionId || (event.key === 'Enter' && row.dataset.openOnEnter === 'true') ? 'dblclick' : 'click';
+        row.dispatchEvent(new MouseEvent(type, {bubbles: true, shiftKey: event.shiftKey}));
+    } else if (event.key === 'Escape' && catalog.dataset.multiselect === 'true') {
+        event.preventDefault(); event.stopPropagation();
+        catalog.dispatchEvent(new CustomEvent('catalog-cancel'));
+    }
+}"""
 
 
 def _open_dialog(dialog) -> None:
@@ -31,10 +85,11 @@ def _open_dialog(dialog) -> None:
     dialog.open()
 
 
-# 匹配 Markdown/HTML 图片引用中不带协议和根前缀的相对路径，
-# 如 src="文档名/img_xxx.jpg" 或 ![alt](文档名/img_xxx.jpg)（OCR 解析产出的工作文件内图片）
-_RELATIVE_IMG_SRC = re.compile(r'src="(?!https?://|/|data:)([^"]+)"')
-_RELATIVE_IMG_MD = re.compile(r'(\]\()(?!https?://|/|data:)([^)\s]+)(\))')
+# 只处理渲染后的 img 标签；跳过引号内的属性文本，不误改代码示例或普通链接。
+_IMG_SRC = re.compile(
+    r'''(<img\b(?:[^>"']|"[^"]*"|'[^']*')*?\ssrc\s*=\s*)(["'])(.*?)\2''',
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class _PieceLatex(markdown2.Latex):
@@ -103,15 +158,40 @@ def _warn_formula_support_unavailable() -> None:
 _MARKDOWN_EXTRAS = ["fenced-code-blocks", "tables", _PieceLatex.name]
 
 
-def _absolutize_image_srcs(markdown_text: str, base_url: str = "/working/") -> str:
-    """将切片文本中的相对图片引用重写为静态目录绝对路径。
+def _absolutize_image_srcs(html_text: str, base_url: str = "/working/") -> str:
+    """将已渲染 HTML 的相对图片地址补成工作目录 URL，并编码文件名中的特殊字符。"""
+    def replace(match: re.Match) -> str:
+        src = unescape(match[3])
+        if not src or src.lower().startswith(("https://", "http://", "/", "data:")):
+            return match[0]
+        return f'{match[1]}{match[2]}{base_url}{quote(src, safe="/")}{match[2]}'
 
-    浏览器按站点根解析相对路径，而工作文件图片挂载在 /working 下，
-    需要补前缀才能命中 app.add_static_files 注册的路由。
-    路径按 URL 编码：文档名里的 #、%、? 不编码会被浏览器当成片段或查询串。
-    """
-    text = _RELATIVE_IMG_SRC.sub(lambda m: f'src="{base_url}{quote(m[1], safe="/")}"', markdown_text)
-    return _RELATIVE_IMG_MD.sub(lambda m: f'{m[1]}{base_url}{quote(m[2], safe="/")}{m[3]}', text)
+    return _IMG_SRC.sub(replace, html_text)
+
+
+def help_hint(text: str, *, label: str | None = None):
+    """低频帮助不占正文；鼠标、键盘和触屏使用同一提示。"""
+    with ui.button(icon="help_outline", color=None).props("flat dense round no-ripple").classes("help-hint") as button:
+        tooltip = ui.tooltip(text).props('anchor="bottom middle" self="top middle"').classes("help-tooltip")
+    button._props.update({"aria-label": label or t("workspace.help"), "aria-describedby": f"c{tooltip.id}"})
+    for event in ("focus", "click"):
+        button.on(event, js_handler=f"() => getElement({tooltip.id}).show()")
+    for event in ("blur", "keydown.escape.stop"):
+        button.on(event, js_handler=f"() => getElement({tooltip.id}).hide()")
+    return button
+
+
+def workspace_controls(callbacks: dict, *, include_navigation: bool = True):
+    """目录常驻；工具栏只提供回到目录的焦点入口。"""
+    for key, icon, label in (
+        ("toggle_navigation", "menu", "workspace.navigation"),
+        ("focus_catalog", "view_sidebar", "workspace.results"),
+    ):
+        if key == "toggle_navigation" and not include_navigation:
+            continue
+        ui.button(icon=icon, color=None, on_click=callbacks.get(key)).props(
+            f'flat dense round size=sm aria-label="{t(label)}"'
+        ).classes("theme-text-muted").tooltip(t(label))
 
 
 def status_badge(status: str):
@@ -119,14 +199,16 @@ def status_badge(status: str):
     color_map = {
         "pending": "orange",
         "processing": "blue",
-        "completed": "green",
-        "indexed": "green",
+        "completed": "grey",
+        "indexed": "grey",
         "failed": "red",
         "error": "red",
         "empty": "grey",
     }
     color = color_map.get(status, "gray")
-    ui.badge(status, color=color).props("dense outline")
+    label = t("file_status." + status) if status in color_map else status
+    ui.badge(label, color=None if color == "grey" else color,
+             text_color="var(--text-muted)" if color == "grey" else None).props("dense outline")
 
 
 def chunk_card(
@@ -155,14 +237,14 @@ def chunk_card(
     Returns:
         卡片根元素，供调用方追加定位用的 class
     """
-    with ui.card().tight().props("flat bordered").classes("w-full mb-2 theme-card theme-card-shadow overflow-hidden").style("border: 1px solid var(--border-color)") as card:
+    with ui.card().tight().props("flat").classes("w-full mb-2 chunk-sheet overflow-hidden") as card:
         # w-full 不能省：NiceGUI 的 .nicegui-card 是 align-items:flex-start 的 flex 容器，
         # 内容区默认按正文宽度收缩，标题行的分隔线会随正文长短忽长忽短
         with ui.card_section().classes("w-full py-2 px-3 min-w-0"):
             # 标题行：标题 + 操作按钮 + 序号
             # w-full 不能省：否则这一行按内容宽度收缩，justify-between 失效、
             # 分隔线也只画半截
-            with ui.row().classes("w-full items-center justify-between gap-2 mb-2 theme-card-divider pb-2 flex-nowrap"):
+            with ui.row().classes("w-full items-center justify-between gap-2 mb-2 chunk-heading flex-nowrap"):
                 with ui.column().classes("gap-0 min-w-0"):
                     ui.label(doc_title).classes(
                         "font-semibold text-sm theme-text truncate"
@@ -182,23 +264,20 @@ def chunk_card(
                         ).props(f'flat dense round size=xs aria-label="{t("chunks.view_source_page", page=source_page)}"').classes(
                             "theme-text-muted"
                         ).tooltip(t("chunks.view_source_page", page=source_page))
-                    # 编辑按钮
                     if on_edit:
                         ui.button(
-                            icon="edit",
-                            on_click=lambda: on_edit(chunk_id)
-                        ).props("flat dense round size=xs").classes("theme-text-muted")
-                    # 删除按钮
+                            icon="edit", on_click=lambda: on_edit(chunk_id)
+                        ).props(f'flat dense round size=xs aria-label="{t("chunks.edit")}"').classes(
+                            "theme-text-muted"
+                        ).tooltip(t("chunks.edit"))
                     if on_delete:
-                        ui.button(
-                            icon="delete",
-                            on_click=lambda: on_delete(chunk_id)
-                        ).props("flat dense round size=xs").classes("theme-text-muted")
-                    # ID 徽章
+                        with ui.button(icon="more_horiz").props(
+                            f'flat dense round size=xs aria-label="{t("workspace.more")}"'
+                        ).classes("theme-text-muted").tooltip(t("workspace.more")):
+                            with ui.menu():
+                                ui.menu_item(t("chunks.delete_confirm_title"), on_click=lambda: on_delete(chunk_id)).classes("theme-danger")
                     if chunk_id:
-                        ui.badge(f"#{chunk_id}", color="grey").props(
-                            "dense outline"
-                        ).classes("text-xs")
+                        ui.label(f"#{chunk_id}").classes("text-xs theme-text-muted")
 
             # 正文内容
             chunk_markdown(chunk_text, chunk_id=chunk_id)
@@ -230,11 +309,45 @@ def chunk_markdown(chunk_text: str, chunk_id: int | None = None, file_path: str 
         relative = Path(file_path).resolve().parent.relative_to(get_working_dir().resolve())
         if relative.parts:
             base_url += quote(relative.as_posix()) + "/"
-    content = _absolutize_image_srcs(chunk_text, base_url)
-    return ui.markdown(
-        content,
-        extras=_MARKDOWN_EXTRAS,
-    ).classes("chunk-content text-sm leading-relaxed")
+    # 先让 Markdown 解析器处理空格、配对括号和引用式图片，再统一改写 HTML 地址。
+    # 同步更新元素属性，确保首次发给浏览器的就是正确 URL，不先触发一次错误请求。
+    rendered = ui.markdown(chunk_text, extras=_MARKDOWN_EXTRAS)
+    rendered._props["innerHTML"] = _absolutize_image_srcs(rendered._props["innerHTML"], base_url)
+    return rendered.classes("chunk-content text-sm leading-relaxed")
+
+
+def guard_unsaved(dialog, *, busy: Callable[[], bool] | None = None,
+                  pending: Callable[[], bool] | None = None):
+    """跟踪已渲染的表单值，返回统一的取消处理器；还原原值后不再提示。"""
+    controls = [element for element in dialog.descendants()
+                if isinstance(element, (ui.input, ui.select, ui.checkbox, ui.switch))]
+    original = [deepcopy(element.value) for element in controls]
+    status = ui.label(t("workspace.unsaved")).classes("text-xs theme-text-muted")
+    status.set_visibility(False)
+
+    def changed():
+        return [element.value for element in controls] != original
+
+    def update_status():
+        status.set_visibility(changed())
+
+    for element in controls:
+        element.on_value_change(update_status)
+    dialog.props("persistent")
+
+    def request_close():
+        if busy and busy():
+            return
+        if not changed() and not (pending and pending()):
+            dialog.close()
+            return
+        confirm_dialog(
+            title=t("workspace.discard_title"), message=t("workspace.discard_message"),
+            on_confirm=dialog.close, confirm_text=t("workspace.discard"),
+            cancel_text=t("workspace.keep_editing"),
+        )
+
+    return request_close
 
 
 def chunk_dialog(
@@ -257,6 +370,7 @@ def chunk_dialog(
         is_edit: True 为编辑已有切片，False 为新增
     """
     form_data = {"doc_title": doc_title, "chunk_text": chunk_text}
+    busy = {"value": False}
 
     title = (
         t("chunk_dialog.edit_title", id=owner_id)
@@ -271,22 +385,24 @@ def chunk_dialog(
     # on_save 多为 async 方法，必须在 handler 内 await；
     # 若放进 lambda 的列表里返回，NiceGUI 拿到的是 list 而非 awaitable，协程不会被执行。
     async def handle_save():
-        result = on_save(
-            owner_id,
-            form_data["doc_title"],
-            form_data["chunk_text"],
-        )
-        if inspect.isawaitable(result):
-            await result
-        dialog.close()
+        if busy["value"]:
+            return
+        busy["value"] = True
+        try:
+            result = on_save(owner_id, form_data["doc_title"], form_data["chunk_text"])
+            if inspect.isawaitable(result):
+                await result
+            dialog.close()
+        finally:
+            busy["value"] = False
 
-    with ui.dialog() as dialog, ui.card().classes("w-[600px] theme-card theme-card-shadow"):
+    with ui.dialog() as dialog, ui.card().classes("w-[780px] max-w-full max-h-[90vh] overflow-auto theme-card"):
         # 标题栏
         with ui.row().classes(
             "w-full items-center justify-between pb-2"
         ).style("border-bottom: 1px solid var(--border-color)"):
             ui.label(title).classes("text-base font-semibold theme-text")
-            ui.button(icon="close", on_click=dialog.close).props("flat dense round").classes("theme-text-muted")
+            ui.button(icon="close", on_click=lambda: request_close()).props("flat dense round").classes("theme-text-muted")
 
         # 表单内容（编辑时 value 回填，新增时 value 为空以显示 placeholder）
         with ui.column().classes("w-full gap-4 py-4"):
@@ -307,12 +423,14 @@ def chunk_dialog(
             ui.label(hint).classes("text-xs theme-text-muted")
 
         # 底部按钮
-        with ui.row().classes("w-full justify-end gap-2 pt-2").style("border-top: 1px solid var(--border-color)"):
-            ui.button(t("chunk_dialog.btn_cancel"), on_click=dialog.close).props("flat").classes("theme-text-muted")
+        with ui.row().classes("w-full items-center gap-2 pt-2").style("border-top: 1px solid var(--border-color)"):
+            request_close = guard_unsaved(dialog, busy=lambda: busy["value"])
+            ui.space()
+            ui.button(t("chunk_dialog.btn_cancel"), on_click=request_close).props("flat").classes("theme-text-muted")
             ui.button(
                 save_text,
                 on_click=handle_save,
-            ).props("color=primary").classes("theme-card-shadow")
+            ).props("unelevated color=primary")
 
     dialog.on("close", on_close)
     _open_dialog(dialog)
@@ -344,32 +462,48 @@ def confirm_dialog(
     if cancel_text is None:
         cancel_text = t("confirm_dialog.btn_cancel")
 
-    # 包装回调函数，支持异步。
-    # 判断返回值而不是 iscoroutinefunction(on_confirm)：调用方常传
-    # `lambda: self._do_xxx(id)`，lambda 本身不是协程函数，但返回协程。
-    async def handle_confirm():
-        result = on_confirm()
-        if inspect.isawaitable(result):
-            await result
-        dialog.close()
+    # 判断返回值而不是回调本身，兼容返回协程的 lambda。
+    busy = False
 
-    with ui.dialog() as dialog, ui.card().classes("w-[400px] theme-card theme-card-shadow"):
+    async def handle_confirm():
+        nonlocal busy
+        if busy:
+            return
+        busy = True
+        dialog.props("persistent")
+        confirm_button.props("loading")
+        for button in (confirm_button, cancel_button, close_button):
+            button.disable()
+        try:
+            result = on_confirm()
+            if inspect.isawaitable(result):
+                await result
+            dialog.close()
+        finally:
+            busy = False
+            if not dialog.is_deleted:
+                dialog.props(remove="persistent")
+                confirm_button.props(remove="loading")
+                for button in (confirm_button, cancel_button, close_button):
+                    button.enable()
+
+    with ui.dialog() as dialog, ui.card().classes("w-[440px] max-w-full theme-card theme-card-shadow"):
         with ui.row().classes(
             "w-full items-center justify-between pb-2"
         ).style("border-bottom: 1px solid var(--border-color)"):
             ui.label(title).classes("text-base font-semibold theme-text")
-            ui.button(icon="close", on_click=dialog.close).props("flat dense round").classes("theme-text-muted")
+            close_button = ui.button(icon="close", on_click=dialog.close).props(
+                f'flat dense round aria-label="{cancel_text}"'
+            ).classes("theme-text-muted")
 
         with ui.column().classes("w-full py-4"):
-            ui.label(message).classes("theme-text-secondary")
+            ui.label(message).classes("text-sm theme-text-secondary whitespace-pre-line")
 
         with ui.row().classes("w-full justify-end gap-2 pt-2").style("border-top: 1px solid var(--border-color)"):
-            ui.button(cancel_text, on_click=dialog.close).props("flat").classes("theme-text-muted")
-            btn_props = "color=red" if danger else "color=primary"
-            ui.button(
-                confirm_text,
-                on_click=handle_confirm,
-            ).props(btn_props).classes("theme-card-shadow")
+            cancel_button = ui.button(cancel_text, on_click=dialog.close).props("flat no-caps autofocus").classes("theme-text-muted")
+            confirm_button = ui.button(confirm_text, on_click=handle_confirm).props(
+                "unelevated no-caps color=red" if danger else "unelevated no-caps color=primary"
+            )
 
     _open_dialog(dialog)
     return dialog
@@ -401,6 +535,8 @@ def file_create_dialog(
             "w-full items-center justify-between pb-2"
         ).style("border-bottom: 1px solid var(--border-color)"):
             ui.label(t("file_dialog.create_title")).classes("text-base font-semibold theme-text")
+            help_hint(t("file_dialog.create_hint"), label=t("file_dialog.create_title"))
+            ui.space()
             ui.button(icon="close", on_click=dialog.close).props("flat dense round").classes("theme-text-muted")
 
         # 表单内容
@@ -410,10 +546,6 @@ def file_create_dialog(
                 placeholder=t("file_dialog.placeholder_filename"),
                 on_change=lambda e: form_data.update({"filename": e.value}),
             ).props("dense outlined").classes("w-full")
-
-            ui.label(t("file_dialog.create_hint")).classes(
-                "text-xs theme-text-muted"
-            )
 
         # 底部按钮
         with ui.row().classes("w-full justify-end gap-2 pt-2").style("border-top: 1px solid var(--border-color)"):
@@ -433,10 +565,10 @@ def collection_labels(names: list):
     """文件列表中的集合标签（紧凑，避免撑破 256px 的中栏）"""
     if not names:
         return
-    with ui.row().classes("items-center gap-1 min-w-0"):
-        ui.icon("folder", size="10px").classes("theme-text-muted")
+    with ui.row().classes("w-full items-center gap-1 min-w-0 flex-nowrap"):
+        ui.icon("folder", size="10px").classes("theme-text-muted shrink-0").props("aria-hidden=true")
         ui.label(" · ".join(names)).classes(
-            "text-xs theme-text-muted truncate"
+            "text-xs theme-text-muted truncate flex-1 min-w-0"
         ).tooltip(" · ".join(names))
 
 
@@ -485,10 +617,11 @@ def collection_manage_dialog(
         )
 
     with ui.dialog() as dialog, ui.card().classes("w-[520px] max-w-full theme-card theme-card-shadow"):
-        with ui.row().classes("w-full items-center justify-between"):
+        with ui.row().classes("w-full items-center gap-2"):
             ui.label(t("collections.manage_title")).classes("text-base font-semibold theme-text")
+            help_hint(t("collections.manage_hint"), label=t("collections.manage_title"))
+            ui.space()
             ui.button(icon="close", on_click=dialog.close).props("flat dense round").classes("theme-text-muted")
-        ui.label(t("collections.manage_hint")).classes("text-xs theme-text-muted")
 
         @ui.refreshable
         def editor():
@@ -541,6 +674,9 @@ def file_collections_dialog(
     on_save: Callable,
     on_create: Callable = None,
     on_close: Callable = None,
+    *,
+    batch: bool = False,
+    append: bool = False,
 ):
     """
     设置文件所属集合的对话框（一个文件可属于多个集合）
@@ -562,21 +698,41 @@ def file_collections_dialog(
         else:
             chosen.discard(collection_id)
 
+    busy = False
+
     async def handle_save():
-        result = on_save(list(chosen))
-        if inspect.isawaitable(result):
-            await result
-        dialog.close()
+        nonlocal busy
+        if busy:
+            return
+        busy = True
+        controls = [element for element in dialog.descendants() if isinstance(element, (ui.button, ui.checkbox, ui.input))]
+        for element in controls:
+            element.disable()
+        dialog.props("persistent")
+        try:
+            result = on_save(list(chosen))
+            if inspect.isawaitable(result):
+                result = await result
+            if result is not False:
+                dialog.close()
+        finally:
+            busy = False
+            dialog.props(remove="persistent")
+            for element in controls:
+                if not element.is_deleted:
+                    element.enable()
 
     with ui.dialog() as dialog, ui.card().classes("w-[420px] theme-card theme-card-shadow"):
         with ui.row().classes(
             "w-full items-center justify-between pb-2"
         ).style("border-bottom: 1px solid var(--border-color)"):
-            ui.label(t("collections.assign_title")).classes("text-base font-semibold theme-text")
+            ui.label(t("collections.add_title" if append else "collections.assign_title")).classes("text-base font-semibold theme-text")
             ui.button(icon="close", on_click=dialog.close).props("flat dense round").classes("theme-text-muted")
 
         with ui.column().classes("w-full gap-2 py-3"):
             ui.label(filename).classes("text-sm theme-text-secondary truncate")
+            if append or batch:
+                ui.label(t("collections.append_hint" if append else "collections.batch_overwrite_hint")).classes("text-xs theme-text-secondary")
 
             @ui.refreshable
             def checkbox_list():
@@ -665,6 +821,8 @@ def file_properties_dialog(
             "w-full items-center justify-between pb-2"
         ).style("border-bottom: 1px solid var(--border-color)"):
             ui.label(t("properties.dialog_title")).classes("text-base font-semibold theme-text")
+            help_hint(t("properties.hint"), label=t("properties.dialog_title"))
+            ui.space()
             ui.button(icon="close", on_click=dialog.close).props("flat dense round").classes("theme-text-muted")
 
         with ui.column().classes("w-full gap-2 py-3"):
@@ -701,8 +859,6 @@ def file_properties_dialog(
                 icon="add",
                 on_click=lambda: (entries.append({"key": "", "value": ""}), rows.refresh()),
             ).props("flat dense size=sm").classes("theme-text-accent self-start")
-
-            ui.label(t("properties.hint")).classes("text-xs theme-text-muted")
 
         with ui.row().classes("w-full justify-end gap-2 pt-2").style("border-top: 1px solid var(--border-color)"):
             ui.button(t("chunk_dialog.btn_cancel"), on_click=dialog.close).props("flat").classes("theme-text-muted")
@@ -751,20 +907,30 @@ def card_dialog(
         "chunk_text": "",
     }
 
-    async def handle_save():
-        file_id = None if form["box"] == NEW_BOX else form["box"]
-        new_box_name = form["new_box"] if form["box"] == NEW_BOX else None
-        result = on_save(file_id, new_box_name, form["doc_title"], form["chunk_text"])
-        if inspect.isawaitable(result):
-            await result
-        dialog.close()
+    busy = {"value": False}
 
-    with ui.dialog() as dialog, ui.card().classes("w-[600px] theme-card theme-card-shadow"):
+    async def handle_save():
+        if busy["value"]:
+            return
+        busy["value"] = True
+        try:
+            file_id = None if form["box"] == NEW_BOX else form["box"]
+            new_box_name = form["new_box"] if form["box"] == NEW_BOX else None
+            result = on_save(file_id, new_box_name, form["doc_title"], form["chunk_text"])
+            if inspect.isawaitable(result):
+                await result
+            dialog.close()
+        finally:
+            busy["value"] = False
+
+    with ui.dialog() as dialog, ui.card().classes("w-[780px] max-w-full max-h-[90vh] overflow-auto theme-card"):
         with ui.row().classes(
             "w-full items-center justify-between pb-2"
         ).style("border-bottom: 1px solid var(--border-color)"):
             ui.label(t("cards.dialog_title")).classes("text-base font-semibold theme-text")
-            ui.button(icon="close", on_click=dialog.close).props("flat dense round").classes("theme-text-muted")
+            help_hint(t("cards.hint"), label=t("cards.dialog_title"))
+            ui.space()
+            ui.button(icon="close", on_click=lambda: request_close()).props("flat dense round").classes("theme-text-muted")
 
         with ui.column().classes("w-full gap-4 py-4"):
             box_select = ui.select(
@@ -794,11 +960,11 @@ def card_dialog(
                 on_change=lambda e: form.update({"chunk_text": e.value}),
             ).props("outlined rows=10").classes("w-full")
 
-            ui.label(t("cards.hint")).classes("text-xs theme-text-muted")
-
-        with ui.row().classes("w-full justify-end gap-2 pt-2").style("border-top: 1px solid var(--border-color)"):
-            ui.button(t("chunk_dialog.btn_cancel"), on_click=dialog.close).props("flat").classes("theme-text-muted")
-            ui.button(t("cards.btn_add"), on_click=handle_save).props("color=primary").classes("theme-card-shadow")
+        with ui.row().classes("w-full items-center gap-2 pt-2").style("border-top: 1px solid var(--border-color)"):
+            request_close = guard_unsaved(dialog, busy=lambda: busy["value"])
+            ui.space()
+            ui.button(t("chunk_dialog.btn_cancel"), on_click=request_close).props("flat").classes("theme-text-muted")
+            ui.button(t("cards.btn_add"), on_click=handle_save).props("unelevated color=primary")
 
     if on_close:
         dialog.on("close", on_close)

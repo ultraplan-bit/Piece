@@ -53,6 +53,15 @@ def test_pages_reuse_one_process_without_taking_index_slots(pdf):
     assert _preview().process is process
 
 
+def test_page_count_uses_the_same_preview_lane(pdf):
+    parser_helper.start_parser_helpers(1)
+    with ThreadPoolExecutor(max_workers=1) as pool, parser_helper._slots:
+        assert pool.submit(parser_helper.run_preview_page_count, pdf).result(timeout=10) == 3
+    process = _preview().process
+    assert run_preview_renderer(pdf, 1, 100)
+    assert _preview().process is process
+
+
 def test_concurrent_same_page_publishes_only_one_cached_image(pdf, tmp_path, monkeypatch):
     cache = tmp_path / "pages"
     cache.mkdir()

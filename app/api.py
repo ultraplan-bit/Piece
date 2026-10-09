@@ -13,7 +13,7 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -470,6 +470,15 @@ def create_api(runtime):
     @app.get("/gui/file/{file_id}/content")
     async def content(file_id: int, format: Literal["markdown", "original"] = "markdown", include_resources: bool = False):
         snapshot = await run_sync(files.export_snapshot, file_id, format, include_resources)
+        return ExportResponse(snapshot)
+
+    @app.get("/api/v1/files/content")
+    @app.get("/gui/files/content")
+    async def files_content(
+        file_ids: Annotated[list[Annotated[int, Field(ge=1, lt=2**63)]], Query(min_length=1, max_length=files.MAX_EXPORT_FILES)],
+        format: Literal["markdown", "original"] = "markdown",
+    ):
+        snapshot = await run_sync(files.export_files_snapshot, file_ids, format)
         return ExportResponse(snapshot)
 
     @app.get("/api/v1/file/{file_id}/page/{page_number}")

@@ -136,7 +136,7 @@ def test_office_original_uses_converted_pdf(tmp_path, monkeypatch):
     md = _workspace(tmp_path, monkeypatch)
     pptx = tmp_path / "报告.pptx"
     pptx.write_bytes(b"not a real pptx")
-    converted = _make_pdf(tmp_path / "converted.pdf")
+    converted = _make_pdf(tmp_path / "converted.pdf", pages=10)
     monkeypatch.setattr(page_render, "convert_to_pdf", lambda _: converted)
 
     documents = {"报告_第2页": _doc(md, "正文没有插图", pptx, "报告 / 第2页")}
@@ -245,7 +245,7 @@ def test_pptx_original_is_never_rendered_directly(tmp_path, monkeypatch):
 
     from app.ui.handlers.chunk_handlers import ChunkHandlers
 
-    converted = _make_pdf(tmp_path / "converted.pdf")
+    converted = _make_pdf(tmp_path / "converted.pdf", pages=10)
     monkeypatch.setattr(page_render, "convert_to_pdf", lambda _: converted)
 
     calls = []
@@ -271,7 +271,7 @@ def test_stale_render_does_not_leak_into_other_file(tmp_path, monkeypatch):
 
     from app.ui.handlers.chunk_handlers import ChunkHandlers
 
-    converted = _make_pdf(tmp_path / "converted.pdf")
+    converted = _make_pdf(tmp_path / "converted.pdf", pages=10)
     monkeypatch.setattr(page_render, "convert_to_pdf", lambda _: converted)
 
     state = _pptx_state(tmp_path)
@@ -297,7 +297,7 @@ def test_refresh_survives_deleted_element(tmp_path, monkeypatch):
 
     from app.ui.handlers.chunk_handlers import ChunkHandlers
 
-    converted = _make_pdf(tmp_path / "converted.pdf")
+    converted = _make_pdf(tmp_path / "converted.pdf", pages=10)
     monkeypatch.setattr(page_render, "convert_to_pdf", lambda _: converted)
     monkeypatch.setattr(
         "app.ui.handlers.chunk_handlers.render_pdf_page",

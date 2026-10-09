@@ -33,7 +33,7 @@ def test_pending_same_page_is_merged_and_intermediate_pages_are_skipped(monkeypa
             if page == 2:
                 started.set()
                 await release.wait()
-            return Path(f"page-{page}.png")
+            return Path(f"page-{page}.png"), 4
 
         monkeypatch.setattr(chunk_handlers, "run_sync", render)
         handler._refresh_source_column = lambda: shown.append(handler.state["source_page"]["page"])
@@ -62,7 +62,7 @@ def test_invalidated_render_cannot_update_the_pane(monkeypatch, action):
         async def render(*_args):
             started.set()
             await release.wait()
-            return Path("page-2.png")
+            return Path("page-2.png"), 4
 
         monkeypatch.setattr(chunk_handlers, "run_sync", render)
         first = asyncio.create_task(handler._show_source_page(2))
@@ -104,7 +104,7 @@ def test_failed_render_can_be_retried_and_manual_request_keeps_notification(monk
             calls.append(1)
             started.set()
             await release.wait()
-            return None if len(calls) == 1 else Path("page-2.png")
+            return None if len(calls) == 1 else (Path("page-2.png"), 4)
 
         monkeypatch.setattr(chunk_handlers, "run_sync", render)
         monkeypatch.setattr(chunk_handlers.ui, "notify", lambda *args, **kwargs: notices.append(args))
@@ -135,7 +135,8 @@ def test_changing_source_reuses_image_caption_and_scroll_container():
             "file_id": 1, "page": 2, "url": "/pages/2.png", "caption": "page 2",
         }
         handler._refresh_source_column()
-        assert handler.ui_refs == refs
+        assert all(handler.ui_refs[key] is value for key, value in refs.items() if key != "source_input_page")
+        assert handler.ui_refs["source_input_page"] == 2
         assert image.parent_slot.parent is scroll and not scroll.is_deleted
         assert image.source == "/pages/2.png"
         assert refs["source_caption"].text == refs["source_tooltip"].text == "page 2"

@@ -3,6 +3,7 @@
 两个功能各自独立（服务、身份、生命周期），这里只复用与业务无关的通用能力：
 请求键不可变重试、证据卡片与来源比对、删除影响预览、修订历史、分页与滚动位置。
 """
+from contextlib import nullcontext
 from copy import deepcopy
 import inspect
 import json
@@ -11,10 +12,10 @@ from functools import partial
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from nicegui import run, ui
+from nicegui import context, run, ui
 
 from app.i18n import t
-from app.ui.components import _open_dialog
+from app.ui.components import _open_dialog, guard_unsaved, CATALOG_KEY_HANDLER
 from indexing.services.errors import BusinessError
 
 logger = logging.getLogger(__name__)
@@ -79,14 +80,17 @@ class WorkbenchBase:
         self.results = None
         self.detail = None
         self.error = None
+        self._client = None
         self._selection = 0
         self._search_generation = 0
         self._search_params = None
+        self._applied_query = None
         self._searching = False
         self._polling = False
         self._poll_timer = None
         self._scroll_areas = {}
         self._scroll_positions = {}
+        self._list_rows = {}
         self.refresh_list = lambda: None
         self.refresh_detail = lambda: None
         self.refresh_workspace = lambda: None
@@ -103,14 +107,120 @@ class WorkbenchBase:
     def choices(self, values):
         return {value: self.text(value) for value in values}
 
+    def notify(self, message, **options):
+        # 异步服务返回时事件父容器可能已销毁，通知挂到渲染时记录的页面客户端。
+        with self._client or nullcontext():
+            ui.notify(message, **options)
+
     async def call(self, function, *args, **kwargs):
         try:
             return await run.io_bound(function, *args, **kwargs)
         except BusinessError as exc:
-            ui.notify(self.text("error", code=exc.code), type="warning")
+            self.notify(self.text("error", code=exc.code), type="warning")
             return None
 
+    # ---- 查询输入：打字防抖刷新，回车/按钮立即执行 ----
+    def query_changed(self, event):
+        """值变化即记录查询串；列表刷新由防抖后的回调完成。"""
+        self.query = (event.value or "").strip()
+
+    async def apply_query(self, value=None, *, force=False):
+        """同一查询串不重复请求；force 供回车或按钮显式重查。"""
+        if value is not None:
+            self.query = (value or "").strip()
+        if not force and self.query == self._applied_query:
+            return
+        self._applied_query = self.query
+        await self.search()
+
+    async def query_committed(self):
+        await self.apply_query()
+
+    async def query_entered(self, event):
+        await self.apply_query(getattr(event, "args", None), force=True)
+
+    async def search_clicked(self):
+        await self.apply_query(force=True)
+
+    async def filters_changed(self):
+        await self.search()
+
+    async def clear_query(self):
+        await self.apply_query("", force=True)
+
     # ---- 布局 ----
+    def highlight_selection(self):
+        selected = (self.detail["kind"], self.detail["record"]["id"]) if self.detail else None
+        focused = selected if selected in self._list_rows else next(iter(self._list_rows), None)
+        for identity, row in self._list_rows.items():
+            if not row.is_deleted:
+                row.classes(add="theme-selected" if identity == selected else "",
+                            remove="" if identity == selected else "theme-selected")
+                row.props(f'aria-pressed={str(identity == selected).lower()} tabindex={0 if identity == focused else -1}')
+
+    def render_catalog(self, kinds, result_key, record_kind, create):
+        """共享紧凑目录；搜索与选择仍调用各工作台自己的服务。"""
+        self._client = context.client
+        with ui.column().classes("w-full h-full gap-0 theme-panel overflow-hidden knowledge-catalog").props(
+            f'data-catalog={self.prefix.rstrip(".")}'
+        ):
+            with ui.row().classes("w-full items-center justify-between library-heading workspace-toolbar"):
+                ui.label(self.text("heading")).classes("text-sm font-medium theme-text")
+                ui.button(self.text("create"), icon="add", on_click=create).props("flat dense no-caps size=sm")
+            with ui.column().classes("w-full p-3 gap-2 workspace-search"):
+                with ui.row().classes("w-full gap-1 items-center flex-nowrap"):
+                    search = ui.input(self.text("search"), value=self.query,
+                                      on_change=self.query_changed).props(
+                        "outlined dense clearable debounce=300"
+                    ).classes("flex-1 min-w-0")
+                    search.on("update:model-value", self.query_committed)
+                    search.on("keydown.enter", self.query_entered, js_handler="""(event) => {
+                        const field = event.target.closest && event.target.closest('.q-field');
+                        const el = (field && field.querySelector('input, textarea')) || event.target;
+                        emit(((el && el.value) || '').trim());
+                    }""")
+                    search.on("clear", self.clear_query)
+                    search.tooltip(self.text("search_hint"))
+                    ui.button(icon="search", on_click=self.search_clicked).props(
+                        f'flat dense round size=sm aria-label="{self.text("search")}"'
+                    ).tooltip(self.text("search"))
+                with ui.row().classes("w-full gap-2 flex-nowrap"):
+                    ui.select(self.choices(kinds), label=self.text("kind"), value=self.kind, clearable=True,
+                              on_change=lambda e: setattr(self, "kind", e.value)).props(
+                        "dense outlined").classes("flex-1 min-w-0").on("update:model-value", self.filters_changed)
+                    ui.select(self.choices(STATUSES), label=self.text("status"), value=self.status, clearable=True,
+                              on_change=lambda e: setattr(self, "status", e.value)).props(
+                        "dense outlined").classes("flex-1 min-w-0").on("update:model-value", self.filters_changed)
+            with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(list=e.vertical_position)).classes("w-full flex-1 scroll-flush") as area:
+                self._scroll_areas["list"] = area
+                @ui.refreshable
+                def listing():
+                    self._list_rows = {}
+                    data = self.results
+                    with ui.column().classes("w-full gap-0.5 px-2 pb-2"):
+                        if not data or not data[result_key]:
+                            ui.label(self.text("empty" if data else "search_hint")).classes("text-sm theme-text-muted px-2 py-6")
+                        for item in (data or {}).get(result_key, []):
+                            with ui.column().classes("w-full gap-1 workspace-list-item theme-hover").props(
+                                f'role=button tabindex=-1 data-catalog-row={item["id"]}'
+                            ) as row:
+                                self._list_rows[(record_kind, item["id"])] = row
+                                row._props["aria-label"] = item["title"]
+                                row.on("click", partial(self.select, record_kind, item["id"]))
+                                row.on("keydown", js_handler=CATALOG_KEY_HANDLER)
+                                ui.label(item["title"]).classes("w-full text-left workspace-list-title theme-text truncate").tooltip(item["title"])
+                                ui.label(self.text(item["kind"]) + " · " + self.text(item["status"])).classes("text-xs theme-text-muted")
+                                if item.get("summary"):
+                                    ui.label(item["summary"]).classes("text-xs theme-text-secondary line-clamp-2 break-words")
+                                row.tooltip(self.text("updated_at", date=item.get("updated_at", "")))
+                        if data:
+                            self.pager(self.offset, 25, data["total"], self.list_page)
+                    self.highlight_selection()
+                self.refresh_list = listing.refresh
+                listing()
+            area.scroll_to(pixels=self._scroll_positions.get("list", 0))
+            self._poll_timer = ui.timer(2.0, self.poll)
+
     async def _refresh_preserving_scroll(self, callback, section):
         area = self._scroll_areas.get(section)
         position = self._scroll_positions.get(section, 0)
@@ -121,12 +231,16 @@ class WorkbenchBase:
             area.scroll_to(pixels=position)
 
     def pager(self, offset, limit, total, callback):
+        if total == 0 and offset == 0:
+            return
         with ui.row().classes("items-center gap-2"):
             previous = ui.button(self.text("previous"), on_click=partial(callback, -1)).props("flat dense no-caps")
             previous.set_enabled(offset > 0)
+            previous.set_visibility(total > limit or offset > 0)
             ui.label(self.text("page_count", start=min(offset + 1, total), end=min(offset + limit, total), total=total)).classes("text-xs theme-text-muted")
             following = ui.button(self.text("next"), on_click=partial(callback, 1)).props("flat dense no-caps")
             following.set_enabled(offset + limit < total)
+            following.set_visibility(total > limit or offset > 0)
 
     def field(self, name, values, *, multiline=False, options=None):
         caption = self.text("title_field" if name == "title" else name)
@@ -134,6 +248,8 @@ class WorkbenchBase:
             element = ui.select(self.choices(options), label=caption, value=values.get(name))
         elif multiline:
             element = ui.textarea(caption, value=values.get(name, "")).props("autogrow")
+            if name == "body":
+                element.classes("editor-body")
         else:
             element = ui.input(caption, value=values.get(name, ""))
         element.bind_value(values, name).props("outlined dense").classes("w-full")
@@ -160,12 +276,18 @@ class WorkbenchBase:
     def write_dialog(self, title, fields, payload, kind, record):
         pending = {"value": None}
         reason = {"reason": ""}
-        with ui.dialog().props("persistent") as dialog, ui.card().classes("w-[780px] max-w-full max-h-[90vh] overflow-auto theme-card"):
-            ui.label(title).classes("text-xl font-semibold")
-            fields()
-            self.field("reason", reason)
-            message = ui.label().classes("text-sm whitespace-pre-wrap theme-text-muted")
-            comparison = ui.column().classes("w-full")
+        with ui.dialog().props("persistent") as dialog, ui.card().classes("w-[900px] max-w-full max-h-[90vh] theme-card editor-dialog"):
+            with ui.row().classes("w-full items-center justify-between editor-header"):
+                ui.label(title).classes("text-base font-semibold theme-text")
+                close_icon = ui.button(icon="close", on_click=lambda: request_close()).props(
+                    f'flat dense round size=sm aria-label="{self.text("close")}"'
+                ).classes("theme-text-muted")
+            with ui.column().classes("w-full min-h-0 editor-fields") as form:
+                fields()
+                self.field("reason", reason)
+                message = ui.label().classes("text-sm whitespace-pre-wrap theme-text-muted")
+                comparison = ui.column().classes("w-full")
+            controls = [element for element in form.descendants() if isinstance(element, (ui.input, ui.select))]
             busy = {"value": False}
 
             async def show_failure(code):
@@ -188,6 +310,11 @@ class WorkbenchBase:
                 if busy["value"]:
                     return
                 busy["value"] = True
+                save_button.disable()
+                close_button.disable()
+                close_icon.disable()
+                for element in controls:
+                    element.disable()
                 try:
                     if pending["value"] is None:
                         pending["value"] = PendingWrite({**payload(), "reason": reason["reason"]})
@@ -211,9 +338,19 @@ class WorkbenchBase:
                         message.set_text(self.text("uncertain", request_key=pending["value"].key))
                 finally:
                     busy["value"] = False
+                    save_button.enable()
+                    close_button.enable()
+                    close_icon.enable()
+                    # 响应未知时保留原提交；先核查原请求，避免让用户误以为新输入会被提交。
+                    for element in controls:
+                        element.set_enabled(pending["value"] is None or not pending["value"].uncertain)
 
-            ui.button(self.text("save"), on_click=save).props("unelevated no-caps")
-            ui.button(self.text("close"), on_click=dialog.close).props("flat")
+            with ui.row().classes("w-full items-center gap-2 editor-footer"):
+                request_close = guard_unsaved(dialog, busy=lambda: busy["value"],
+                                              pending=lambda: pending["value"] is not None)
+                ui.space()
+                close_button = ui.button(self.text("close"), on_click=request_close).props("flat no-caps")
+                save_button = ui.button(self.text("save"), on_click=save).props("unelevated no-caps")
         _open_dialog(dialog)
 
     async def after_write(self, result):
@@ -225,10 +362,10 @@ class WorkbenchBase:
         await self.search(False)
         # 索引失败但文件已提交（index_status=stale）或部分页面失败，不能冒充全部成功。
         if result.get("errors") or result.get("partial") or result.get("index_status") == "stale":
-            ui.notify(self.text("partial_saved", count=len(result.get("errors") or []),
+            self.notify(self.text("partial_saved", count=len(result.get("errors") or []),
                                 index=self.text("index_" + str(result.get("index_status") or "unknown"))), type="warning")
             return
-        ui.notify(self.text("saved" if readback else "saved_unread"), type="positive" if readback else "warning")
+        self.notify(self.text("saved" if readback else "saved_unread"), type="positive" if readback else "warning")
 
     # ---- 删除：预览影响范围，确认后重放同一请求键 ----
     def after_delete_extra(self):
@@ -347,13 +484,13 @@ class WorkbenchBase:
     async def compare_source(self, evidence):
         fresh = await self.call(self.service.get_record, kind="evidence", id=evidence["id"])
         if not fresh or not local_source(fresh["record"], fresh["library_id"]):
-            ui.notify(self.text("source_unavailable"), type="warning")
+            self.notify(self.text("source_unavailable"), type="warning")
             return
         evidence = fresh["record"]
         from indexing.services.chunk_service import get_chunk_by_id
         chunk = await self.call(get_chunk_by_id, evidence["source_chunk_id"])
         if not chunk or chunk["file_id"] != evidence["source_file_id"]:
-            ui.notify(self.text("source_unavailable"), type="warning")
+            self.notify(self.text("source_unavailable"), type="warning")
             return
         with ui.dialog() as dialog, ui.card().classes("w-[1000px] max-w-full theme-card"):
             ui.label(self.text("compare_source")).classes("text-lg font-semibold")

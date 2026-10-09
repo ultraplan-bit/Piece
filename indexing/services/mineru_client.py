@@ -378,11 +378,8 @@ def _render_block(block: Dict[str, object]) -> str:
         parts = []
         image_path = str(block.get("img_path") or "").strip()
         if image_path:
-            # 用 HTML 形态而不是 ![](...)：引用会被改写成 "<文档名>/xxx.jpg"，
-            # 而文档名可能带空格和括号（如 "报告 (1)"）。Markdown 的链接目标
-            # 遇到空格即截断，界面侧的重写正则（components._RELATIVE_IMG_MD）
-            # 也只接受不含空白的路径，结果是图片请求打到站点根目录而 404。
-            # PaddleOCR 路径产出的同样是 <img src="...">，形态保持一致。
+            # 用 HTML 属性承载可能带空格和括号的图片路径，与 PaddleOCR 保持一致，
+            # 避免不同 Markdown 消费端对链接目标的解析规则不一致。
             parts.append(f'<img src="{image_path}">')
         parts.append(_caption(block, f"{block_type}_caption"))
         # 图注之外的脚注同样是正文：期刊末页的作者简介就挂在头像的 image_footnote 里

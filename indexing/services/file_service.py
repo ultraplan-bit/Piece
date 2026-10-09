@@ -428,6 +428,9 @@ def reindex_file(file_id, source=None, request_key=None):
             "request_key": request_key, "status": "accepted", "chunk_ids_may_change": True}
 
 
+MAX_EXPORT_FILES = 1000
+
+
 def export_file(file_id, format="markdown"):
     file_info = get_file_by_id(file_id)
     if not file_info:
@@ -470,6 +473,29 @@ def export_snapshot(file_id, format="markdown", include_resources=False):
         else:
             output = directory / source.name
             shutil.copy2(source, output)
+        return {"path": output, "filename": output.name, "temporary_dir": directory}
+    except BaseException:
+        shutil.rmtree(directory)
+        raise
+
+
+@serialized_mutation
+def export_files_snapshot(file_ids, format="markdown"):
+    """将明确选中的文档打成 ZIP；ID 前缀避免同名文件覆盖，响应结束后清理。"""
+    from zipfile import ZipFile, ZIP_DEFLATED
+
+    if (not isinstance(file_ids, (list, tuple)) or not 1 <= len(file_ids) <= MAX_EXPORT_FILES
+            or any(type(file_id) is not int or not 0 < file_id < 2**63 for file_id in file_ids)):
+        raise BusinessError("INVALID_INPUT", f"请选择 1 至 {MAX_EXPORT_FILES} 个有效文档")
+    if format not in {"markdown", "original"}:
+        raise BusinessError("INVALID_INPUT", "导出格式必须为 markdown 或 original")
+    directory = Path(tempfile.mkdtemp(prefix="piece-export-"))
+    try:
+        output = directory / f"piece-{format}.zip"
+        with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
+            for file_id in dict.fromkeys(file_ids):
+                source = export_file(file_id, format)
+                archive.write(source, f"{file_id}-{source.name}")
         return {"path": output, "filename": output.name, "temporary_dir": directory}
     except BaseException:
         shutil.rmtree(directory)

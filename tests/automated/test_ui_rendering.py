@@ -6,6 +6,7 @@ import runpy
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
 
@@ -49,6 +50,52 @@ def test_card_renders_supported_markup(components, text, expected):
     rendered = _render(components, text)
     for fragment in expected:
         assert fragment in rendered
+
+
+@pytest.mark.parametrize("markup", [
+    '![插图]({path})',
+    '![插图](<{path}> "图注")',
+    '<img src="{html_path}">',
+    "<img alt=\"宽度 > 0\" src='{html_path}'>",
+])
+def test_image_paths_with_spaces_parentheses_and_entities(components, markup):
+    path = "报告 #1 (草稿(50%)) & 附录/图 a.jpg"
+    source = markup.format(path=path, html_path=html.escape(path, quote=True))
+    assert f'/working/{quote(path, safe="/")}' in _render(components, source)
+
+
+def test_reference_image_uses_the_working_directory(components):
+    source = '![插图][figure]\n\n[figure]: book(1)/figure.png "图注"'
+    rendered = _render(components, source)
+    assert 'src="/working/book%281%29/figure.png"' in rendered
+    assert 'alt="插图" title="图注"' in rendered
+
+
+def test_image_rewrite_leaves_code_links_and_absolute_urls_unchanged(components):
+    from nicegui.elements.markdown import prepare_content
+
+    source = (
+        '`![插图](book/figure.png)`\n\n'
+        '`<img src="book/figure.png">`\n\n'
+        '[附件](book/readme.md)\n\n'
+        '![远程](https://example.com/a.png)\n\n'
+        '![远程](//example.com/a.png)\n\n'
+        '![静态图](/working/book/figure.png)\n\n'
+        '![内嵌图](data:image/png;base64,aGVsbG8=)'
+    )
+    expected = prepare_content(source, extras=" ".join(components._MARKDOWN_EXTRAS))
+    assert components.chunk_markdown(source)._props["innerHTML"] == expected
+
+
+def test_cached_image_markup_keeps_each_files_generation_path(components):
+    from indexing.services.file_service import get_working_dir
+
+    source = '![插图](报告 (1)/图 a.jpg)'
+    for generation in ("task-1-test", "task-2-test"):
+        file_path = get_working_dir() / ".generations" / generation / "报告 (1).md"
+        rendered = components.chunk_markdown(source, file_path=str(file_path))._props["innerHTML"]
+        expected = f'/working/.generations/{generation}/{quote("报告 (1)/图 a.jpg", safe="/")}'
+        assert f'src="{expected}"' in rendered
 
 
 @pytest.mark.parametrize("formula", [

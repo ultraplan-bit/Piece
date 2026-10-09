@@ -9,6 +9,7 @@
 from nicegui import ui
 
 from app.i18n import t, SUPPORTED_LANGUAGES
+from app.ui.components import help_hint
 from app.utils import open_external
 from indexing.mcp.config import get_mcp_port
 from indexing.settings import MINERU_LANGUAGES
@@ -243,7 +244,12 @@ def _render_embedding_settings(settings_form: dict, settings_handlers):
             ui.separator()
 
             # 索引性能：嵌入限流与并发，跟着上面的模型配置一起调
-            ui.label(t("settings_performance.title")).classes("text-sm font-medium theme-text")
+            with ui.row().classes("w-full items-center gap-1"):
+                ui.label(t("settings_performance.title")).classes("text-sm font-medium theme-text")
+                help_hint(
+                    t("settings_performance.hint"),
+                    label=t("settings_performance.title"),
+                )
 
             _render_performance_fields(settings_form)
 
@@ -264,7 +270,7 @@ def _render_performance_fields(settings_form: dict):
     ]
 
     with ui.column().classes("w-full gap-3"):
-        ui.label(t("settings_performance.hint")).classes("text-xs theme-text-muted")
+        ui.label(t("settings_performance.restart_hint")).classes("text-xs theme-text-muted")
 
         for key, label_key, default, minimum, maximum, step in fields:
             ui.number(
@@ -498,7 +504,12 @@ def _render_ocr_paddle_fields(settings_form: dict):
         ui.separator()
 
         # 解析参数（optionalPayload）：三态开关 None=跟随服务端默认
-        ui.label(t("settings_ocr.payload_title")).classes("text-sm font-medium theme-text")
+        with ui.row().classes("w-full items-center gap-1"):
+            ui.label(t("settings_ocr.payload_title")).classes("text-sm font-medium theme-text")
+            help_hint(
+                t("settings_ocr.payload_hint"),
+                label=t("settings_ocr.payload_title"),
+            )
 
         def _tri_state_switch(form_key: str):
             """三态选择：default(None) / on(True) / off(False)"""
@@ -530,18 +541,21 @@ def _render_ocr_paddle_fields(settings_form: dict):
             on_change=lambda e: settings_form.update({"ocr_markdown_ignore_labels": e.value}),
         ).props("dense outlined").classes("w-full")
 
-        ui.label(t("settings_ocr.payload_hint")).classes("text-xs theme-text-muted")
-
 
 def _render_ocr_vlm_fields(settings_form: dict):
     """自定义多模态模型的配置字段"""
     with ui.column().classes("w-full gap-3"):
         # 服务地址
-        ui.input(
-            label=t("settings_ocr.vlm_base_url"),
-            value=settings_form.get("ocr_vlm_base_url", ""),
-            on_change=lambda e: settings_form.update({"ocr_vlm_base_url": e.value}),
-        ).props("dense outlined").classes("w-full")
+        with ui.row().classes("w-full items-center gap-1"):
+            ui.input(
+                label=t("settings_ocr.vlm_base_url"),
+                value=settings_form.get("ocr_vlm_base_url", ""),
+                on_change=lambda e: settings_form.update({"ocr_vlm_base_url": e.value}),
+            ).props("dense outlined").classes("flex-1")
+            help_hint(
+                t("settings_ocr.vlm_hint"),
+                label=t("settings_ocr.vlm_base_url"),
+            )
 
         ui.label(t("settings_ocr.vlm_base_url_hint")).classes("text-xs theme-text-muted")
 
@@ -583,19 +597,25 @@ def _render_ocr_vlm_fields(settings_form: dict):
                 on_change=lambda e: settings_form.update({"ocr_vlm_concurrency": e.value}),
             ).props("dense outlined").classes("flex-1")
 
-        ui.label(t("settings_ocr.vlm_hint")).classes("text-xs theme-text-muted")
-
 
 def _render_ocr_mineru_fields(settings_form: dict):
     """MinerU 精准解析的配置字段"""
     with ui.column().classes("w-full gap-3"):
-        ui.input(
-            label=t("settings_ocr.mineru_token"),
-            value=settings_form.get("ocr_mineru_token", ""),
-            password=True,
-            password_toggle_button=True,
-            on_change=lambda e: settings_form.update({"ocr_mineru_token": e.value}),
-        ).props("dense outlined").classes("w-full")
+        # 第三方上传隐私风险保持可见，其余参数帮助收进问号
+        ui.label(t("settings_ocr.third_party_warning")).classes("text-xs theme-danger")
+
+        with ui.row().classes("w-full items-center gap-1"):
+            ui.input(
+                label=t("settings_ocr.mineru_token"),
+                value=settings_form.get("ocr_mineru_token", ""),
+                password=True,
+                password_toggle_button=True,
+                on_change=lambda e: settings_form.update({"ocr_mineru_token": e.value}),
+            ).props("dense outlined").classes("flex-1")
+            help_hint(
+                t("settings_ocr.mineru_hint"),
+                label=t("settings_ocr.mineru_token"),
+            )
 
         ui.button(
             t("settings_ocr.mineru_token_help"),
@@ -614,30 +634,40 @@ def _render_ocr_mineru_fields(settings_form: dict):
         ui.label(t("settings_ocr.mineru_model_version_hint")).classes("text-xs theme-text-muted")
 
         # 文档语言只影响 OCR 阶段；选项为官方 language 取值全表
-        ui.select(
-            options=dict(MINERU_LANGUAGES),
-            value=settings_form.get("ocr_mineru_language", "ch"),
-            label=t("settings_ocr.mineru_language"),
-            on_change=lambda e: settings_form.update({"ocr_mineru_language": e.value}),
-        ).props("dense outlined").classes("w-full")
+        with ui.row().classes("w-full items-center gap-1"):
+            ui.select(
+                options=dict(MINERU_LANGUAGES),
+                value=settings_form.get("ocr_mineru_language", "ch"),
+                label=t("settings_ocr.mineru_language"),
+                on_change=lambda e: settings_form.update({"ocr_mineru_language": e.value}),
+            ).props("dense outlined").classes("flex-1")
+            help_hint(
+                t("settings_ocr.mineru_language_hint"),
+                label=t("settings_ocr.mineru_language"),
+            )
 
-        ui.label(t("settings_ocr.mineru_language_hint")).classes("text-xs theme-text-muted")
-
-        ui.switch(
-            t("settings_ocr.mineru_is_ocr"),
-            value=bool(settings_form.get("ocr_mineru_is_ocr", False)),
-            on_change=lambda e: settings_form.update({"ocr_mineru_is_ocr": e.value}),
-        ).props("dense").classes("theme-text")
-
-        ui.label(t("settings_ocr.mineru_is_ocr_hint")).classes("text-xs theme-text-muted")
-        ui.label(t("settings_ocr.mineru_hint")).classes("text-xs theme-text-muted")
+        with ui.row().classes("w-full items-center gap-1"):
+            ui.switch(
+                t("settings_ocr.mineru_is_ocr"),
+                value=bool(settings_form.get("ocr_mineru_is_ocr", False)),
+                on_change=lambda e: settings_form.update({"ocr_mineru_is_ocr": e.value}),
+            ).props("dense").classes("theme-text")
+            help_hint(
+                t("settings_ocr.mineru_is_ocr_hint"),
+                label=t("settings_ocr.mineru_is_ocr"),
+            )
 
 
 def _render_office_settings(settings_form: dict, settings_handlers):
     """渲染 Office 文档转换设置表单"""
     with ui.card().tight().classes("w-full theme-card").style("border: 1px solid var(--border-color)"):
         with ui.column().classes("w-full gap-3 p-3"):
-            ui.label(t("settings_office.converter")).classes("text-sm font-medium theme-text")
+            with ui.row().classes("w-full items-center gap-1"):
+                ui.label(t("settings_office.converter")).classes("text-sm font-medium theme-text")
+                help_hint(
+                    t("settings_office.converter_hint"),
+                    label=t("settings_office.converter"),
+                )
 
             ui.toggle(
                 options={
@@ -649,8 +679,6 @@ def _render_office_settings(settings_form: dict, settings_handlers):
                 value=settings_form.get("office_converter", "auto"),
                 on_change=lambda e: settings_form.update({"office_converter": e.value}),
             ).props("dense unelevated no-caps").classes("theme-text")
-
-            ui.label(t("settings_office.converter_hint")).classes("text-xs theme-text-muted")
 
             ui.separator()
 

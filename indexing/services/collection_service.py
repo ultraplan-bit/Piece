@@ -161,19 +161,35 @@ def get_collections_by_file(file_ids=None) -> Dict[int, List[str]]:
 
 
 @serialized_mutation
-def set_file_collections(file_id: int, collection_ids: List[int]) -> None:
-    """覆盖式设置直接归属；不会展开父子范围。"""
+def update_file_collections(file_ids: List[int], collection_ids: List[int], *, mode: str) -> None:
+    """原子追加、移除或替换直接归属；先验证整批，不触碰文档或其它归属。"""
+    if mode not in {"add", "remove", "replace"}:
+        raise BusinessError("INVALID_INPUT", "归属操作必须为 add、remove 或 replace")
+    files = list(dict.fromkeys(file_ids))
+    ids = list(dict.fromkeys(collection_ids))
+    if any(type(value) is not int or value <= 0 for value in files + ids):
+        raise BusinessError("INVALID_INPUT", "文档和资料集 ID 必须为正整数")
     with get_db_cursor(write=True) as cursor:
-        cursor.execute("SELECT 1 FROM files WHERE id = ?", (file_id,))
-        if cursor.fetchone() is None:
-            raise BusinessError("NOT_FOUND", f"文件不存在：{file_id}")
-        ids = list(dict.fromkeys(collection_ids))
+        cursor.execute("BEGIN IMMEDIATE")
+        for file_id in files:
+            cursor.execute("SELECT 1 FROM files WHERE id = ?", (file_id,))
+            if cursor.fetchone() is None:
+                raise BusinessError("NOT_FOUND", f"文件不存在：{file_id}")
         for cid in ids:
             cursor.execute("SELECT 1 FROM collections WHERE id = ?", (cid,))
             if cursor.fetchone() is None:
                 raise BusinessError("NOT_FOUND", f"集合不存在：{cid}")
-        cursor.execute("DELETE FROM file_collections WHERE file_id = ?", (file_id,))
-        cursor.executemany("INSERT INTO file_collections VALUES (?, ?)", [(file_id, cid) for cid in ids])
+        if mode == "replace":
+            cursor.executemany("DELETE FROM file_collections WHERE file_id = ?", ((fid,) for fid in files))
+        query = ("DELETE FROM file_collections WHERE file_id = ? AND collection_id = ?" if mode == "remove"
+                 else "INSERT OR IGNORE INTO file_collections VALUES (?, ?)")
+        cursor.executemany(query, ((fid, cid) for fid in files for cid in ids))
+
+
+@serialized_mutation
+def set_file_collections(file_id: int, collection_ids: List[int]) -> None:
+    """覆盖式设置直接归属；不会展开父子范围。"""
+    update_file_collections([file_id], collection_ids, mode="replace")
 
 
 def get_file_ids(collection_ids: Optional[List[int]], include_descendants=True) -> Optional[List[int]]:

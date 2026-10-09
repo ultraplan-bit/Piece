@@ -34,18 +34,20 @@ def test_file_library_uses_shared_pagination_and_keeps_reader(knowledge_base, mo
 
     async def scenario():
         await handler.load_files()
+        await handler.set_library_mode("all")
         assert state["file_total"] == 3 and len(state["filtered_files"]) == 1
         await handler.on_collection_change([root])
-        assert state["file_total"] == 2
-        assert len(state["filtered_files"]) == 1
-        selected = state["filtered_files"][0]["id"]
+        assert state["tree_pages"][str(root)]["total"] == 0
+        await handler.toggle_collection(child)
+        assert state["tree_pages"][str(child)]["total"] == 2
+        selected = state["tree_pages"][str(child)]["files"][0]["id"]
         await handler.load_chunks(selected)
-        await handler.go_to_file_page(2)
+        await handler.go_to_tree_page(child, 2)
         assert state["selected_file_id"] == selected
-        assert len(state["files_data"]) == 2  # 当前页 + 阅读对象，不是全库
+        assert len(state["files_data"]) == 3  # 两个可见分支的文档 + 独立阅读对象
         assert selected in {f["id"] for f in state["files_data"]}
-        await handler.on_descendants_change(SimpleNamespace(value=False))
-        assert state["file_page"] == 1 and state["file_total"] == 0
+        await handler.toggle_collection(child)
+        assert [file["id"] for file in state["filtered_files"]] == [loose]
         assert state["selected_file_id"] == selected
         await handler.on_collection_change([], uncategorized=True)
         assert state["file_total"] == 1
@@ -69,19 +71,21 @@ def test_file_library_uses_shared_pagination_and_keeps_reader(knowledge_base, mo
 
 
 def test_tree_uses_ids_and_rejects_disconnected_cycles(knowledge_base):
-    from app.ui.views.sidebar import collection_tree_nodes
+    from app.ui.resource_tree import collection_tree_nodes
     from indexing.services import collection_service as collections
 
     root = collections.create_collection("a/b")["collection_id"]
     child = collections.create_collection("child", parent_id=root)["collection_id"]
     nodes = collection_tree_nodes(collections.list_collections())
     assert len(nodes) == 1 and nodes[0]["id"] == str(root)
+    assert nodes[0]["name"] == "a/b" and nodes[0]["file_count"] == 0
+    assert nodes[0]["label"] == "a/b (0)"
     assert nodes[0]["children"][0]["id"] == str(child)
     bad = [dict(id=1, parent_id=2, name="a", file_count=0),
            dict(id=2, parent_id=1, name="b", file_count=0)]
-    with pytest.raises(ValueError, match="集合结构"):
+    with pytest.raises(ValueError, match="资料集结构"):
         collection_tree_nodes(bad)
-    with pytest.raises(ValueError, match="集合结构"):
+    with pytest.raises(ValueError, match="资料集结构"):
         collection_tree_nodes([dict(id=1, parent_id=99, name="a", file_count=0)])
 
 
@@ -102,21 +106,27 @@ def test_file_library_and_collection_editor_render(knowledge_base):
     chunks = ChunkHandlers(state=state, ui_refs=refs, on_refresh_files=handler.load_files)
     handler.set_chunk_handlers(chunks)
     asyncio.run(handler.load_files())
-    state["active_collection_ids"] = [root]
+    asyncio.run(handler.on_collection_change([root]))
 
     with ui.column() as container:
-        render_sidebar(current_view={"value": "files"}, state=state, ui_refs=refs, file_handlers=handler,
-                       **{key: lambda: None for key in (
-                           "switch_to_files", "switch_to_recall_test", "switch_to_cloud_sync",
-                           "switch_to_mcp_config", "switch_to_skills", "switch_to_logs", "switch_to_settings")})
+        render_sidebar(current_view={"value": "files"}, state=state, ui_refs=refs, file_handlers=handler)
         render_files_middle(state, refs, handler)
         render_files_right(state, refs, chunks, handler)
         dialog = collection_manage_dialog(state["collections"], handler._create_collection,
                                           handler._rename_collection, handler._move_collection,
                                           handler._delete_collection, handler._preview_delete_collection,
                                           selected_id=root)
-    assert refs["tree_element"]._props["selected"] == str(root)
+    assert refs["catalog_rows"][f"c:{root}"]._props["aria-selected"] == "true"
+    assert not any(element._props.get("data-collection-id") for element in refs["sidebar_container"].descendants())
     assert refs["file_pagination"] and refs["file_scroll"] and refs["chunk_scroll"]
+    # 资料表与阅读区提供明确的阅读形态入口；默认连续阅读
+    assert refs["reading_mode_toggle"] and refs["file_list_container"]
+    assert state["file_reading_mode"] == "reading"
+    stats = refs["stats_label"]
+    tooltip = next(element for element in refs["sidebar_container"].descendants()
+                   if isinstance(element, ui.tooltip) and element.text == stats.text)
+    stats.set_text("123.4 GB / 88888/99999 已索引")
+    assert tooltip.text == stats.text
     dialog.delete()
     container.delete()
 

@@ -225,17 +225,25 @@ class ParserSession:
                 _condition.notify_all()
 
 
-def run_preview_renderer(
-    pdf_path: Path, page_number: int, dpi: int, *, timeout: float = PARSER_TIMEOUT,
-) -> bytes | None:
+def _get_preview_session() -> ParserSession:
     """预览独享会话，不与后台文档争用进程或索引名额。"""
     global _preview_session
     with _condition:
         _check_stopping(None)
         if _preview_session is None:
             _preview_session = ParserSession(use_slots=False)
-        session = _preview_session
-    return session.run("render_page", pdf_path, page_number, dpi, "png", timeout=timeout)
+        return _preview_session
+
+
+def run_preview_renderer(
+    pdf_path: Path, page_number: int, dpi: int, *, timeout: float = PARSER_TIMEOUT,
+) -> bytes | None:
+    return _get_preview_session().run("render_page", pdf_path, page_number, dpi, "png", timeout=timeout)
+
+
+def run_preview_page_count(pdf_path: Path, *, timeout: float = PARSER_TIMEOUT) -> int:
+    """总页数也在预览子进程中读取，避免 UI 进程打开 PDF。"""
+    return _get_preview_session().run("page_count", pdf_path, timeout=timeout)
 
 
 def run_parser(

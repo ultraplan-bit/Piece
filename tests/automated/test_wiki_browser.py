@@ -59,30 +59,51 @@ def test_wiki_browser_independent_roundtrip(wiki_gui):
         page.route("**/*", route)
         try:
             page.goto(service["url"])
-            expect(page.get_by_text("人工智能 (1)", exact=True)).to_be_visible(timeout=30000)
-            page.get_by_role("button", name='Expand "文件库"', exact=True).click()
+            expect(page.locator(".resource-collection-row").first).to_be_visible(timeout=30000)
             page.get_by_role("button", name=t("sidebar.wiki"), exact=True).click()
             expect(page.get_by_text(k("empty"), exact=True)).to_be_visible()
 
-            # GUI 新建页面，正文含表格与公式。
+            # 文档在主工作区编辑，不使用遮挡导航的编辑弹窗。
             page.get_by_role("button", name=k("create"), exact=True).click()
+            editor = page.locator(".wiki-editor")
+            middle = page.locator(".workspace-splitter").last.locator(":scope > .q-splitter__before")
+            expect(middle).to_have_css("width", "260px")
+            expect(page.get_by_role("dialog")).to_have_count(0)
+            editor.get_by_label(k("title_field"), exact=True).fill("Wiki 浏览页")
+            editor.get_by_label(k("body"), exact=True).fill("# 阅读\n\n| 项目 | 内容 |\n| --- | --- |\n| 范围 | 本地 |\n\n公式 $a^2+b^2=c^2$。")
+            editor.get_by_label(k("aliases_text"), exact=True).fill("浏览别名")
+            editor.get_by_label(k("reason"), exact=True).fill("界面创建")
+            expect(editor.get_by_text(t("workspace.unsaved"), exact=True)).to_be_visible()
+            page.screenshot(path=str(service["path"] / "wiki-editor.png"), animations="disabled")
+            editor.get_by_role("button", name=wk("preview"), exact=True).click()
+            expect(editor.locator(".knowledge-prose table")).to_be_visible()
+            editor.get_by_role("button", name=wk("edit_source"), exact=True).click()
+            # 离开工作区不丢草稿，回来继续编辑。
+            page.locator(".workspace-primary").get_by_role("button", name=t("sidebar.files"), exact=True).click()
+            expect(editor).not_to_be_visible()
+            page.locator(".workspace-primary").get_by_role("button", name=t("sidebar.wiki"), exact=True).click()
+            expect(editor.get_by_label(k("reason"), exact=True)).to_have_value("界面创建")
+            editor.get_by_role("button", name=k("close"), exact=True).click()
+            confirmation = page.get_by_role("dialog").filter(has_text=t("workspace.discard_title"))
+            expect(confirmation).to_be_visible()
+            confirmation.get_by_role("button", name=t("workspace.keep_editing"), exact=True).click()
+            expect(confirmation).not_to_be_visible()
+            expect(editor.get_by_label(k("body"), exact=True)).to_have_value("# 阅读\n\n| 项目 | 内容 |\n| --- | --- |\n| 范围 | 本地 |\n\n公式 $a^2+b^2=c^2$。")
+            editor.get_by_role("button", name=k("save"), exact=True).click()
+            expect(editor).not_to_be_visible()
             dialog = page.get_by_role("dialog")
-            dialog.get_by_label(k("title_field"), exact=True).fill("Wiki 浏览页")
-            dialog.get_by_label(k("body"), exact=True).fill("# 阅读\n\n| 项目 | 内容 |\n| --- | --- |\n| 范围 | 本地 |\n\n公式 $a^2+b^2=c^2$。")
-            dialog.get_by_label(k("aliases_text"), exact=True).fill("浏览别名")
-            dialog.get_by_label(k("reason"), exact=True).fill("界面创建")
-            dialog.get_by_role("button", name=k("save"), exact=True).click()
-            expect(dialog).not_to_be_visible()
             prose = page.locator(".knowledge-prose")
             expect(prose).to_contain_text("阅读")
             expect(prose.locator("table")).to_be_visible()
             expect(prose.locator("math")).to_be_visible()
+            page.screenshot(path=str(service["path"] / "wiki-reading.png"))
 
             from indexing.services import wiki_service
             page1 = wiki_service.search_pages(query="浏览别名")["pages"][0]
             assert page1["content_hash"]
             # 外部调用者新建目标页，并把 MD 页面链接写进正文。
-            target = apply(pages=[{"ref": "target", "kind": "concept", "title": "目标页", "body": "目标正文"}]
+            target = apply(pages=[{"ref": "target", "kind": "concept", "title": "目标页", "body": "目标正文",
+                                   "aliases": ["clearsearchuniquetoken"]}]
                            )["refs"]["target"]["id"]
             current = get_page(page1["id"])["record"]
             apply(pages=[{"id": page1["id"], "expected_revision": current["revision"],
@@ -95,6 +116,18 @@ def test_wiki_browser_independent_roundtrip(wiki_gui):
             expect(page.locator(".knowledge-prose")).to_contain_text("目标正文")
             page.get_by_role("button", name="Wiki 浏览页", exact=True).first.click()
 
+            # 清空按钮立即恢复完整列表，不留下“框已空、结果仍被过滤”的状态。
+            search = page.get_by_role("textbox", name=k("search"), exact=True)
+            search.fill("clearsearchuniquetoken")
+            search.press("Enter")
+            expect(page.get_by_role("button", name="Wiki 浏览页", exact=True)).to_have_count(0)
+            search_field = page.locator(".workspace-search .q-field").filter(has=search)
+            clear = search_field.get_by_role("button", name="Clear", exact=True)
+            assert clear.count() == 1, search_field.evaluate("el => el.outerHTML")
+            clear.click()
+            expect(search).to_have_value("")
+            expect(page.get_by_role("button", name="Wiki 浏览页", exact=True)).to_be_visible()
+
             # 只在 Wiki 出现的证据：Piece 来源定位、比对与打开原页。
             library = wiki_service.list_pages()["library_id"]
             from indexing.services import file_service
@@ -105,7 +138,20 @@ def test_wiki_browser_independent_roundtrip(wiki_gui):
                   evidence=[{"page": {"id": page1["id"]}, "source_kind": "piece",
                              "source_library_id": library, "source_file_id": service["file_id"],
                              "source_chunk_id": chunk["id"], "quote": chunk["chunk_text"]}])
+            page.get_by_role("button", name=wk("page_info"), exact=True).click()
             expect(page.get_by_text(k("location_current"), exact=True)).to_be_visible(timeout=15000)
+            page.screenshot(path=str(service["path"] / "wiki-inspector.png"))
+            # 从证据进入原页，再返回 Wiki；正文与检查面板仍在原工作区。
+            page.get_by_role("button", name=k("compare_source"), exact=True).click()
+            expect(dialog.get_by_text(k("snapshot"), exact=True)).to_be_visible()
+            dialog.get_by_role("button", name=k("open_file"), exact=True).click()
+            expect(page.locator(".source-pane img")).to_be_visible(timeout=30000)
+            expect(middle).to_have_css("width", "320px")
+            expect(page.locator(".library-reader-title")).to_have_text("研究方法.pdf")
+            page.get_by_role("button", name=wk("return"), exact=True).click()
+            expect(middle).to_have_css("width", "260px")
+            expect(page.locator(".knowledge-prose")).to_contain_text("目标页")
+            expect(page.get_by_text(k("location_current"), exact=True)).to_be_visible()
 
             # 结构检查与从 Markdown 重建派生索引，都不重写正文。
             page.get_by_role("button", name=k("review"), exact=True).click()
@@ -126,7 +172,8 @@ def test_wiki_browser_independent_roundtrip(wiki_gui):
 
             # 删除页面后服务不再返回该页面，历史快照仍可读。
             page.get_by_role("button", name="Wiki 浏览页", exact=True).first.click()
-            page.get_by_role("button", name=k("delete"), exact=True).click()
+            page.locator(".knowledge-detail").get_by_role("button", name=k("more"), exact=True).click()
+            page.locator(".q-menu").get_by_text(k("delete"), exact=True).click()
             expect(page.get_by_text(k("delete_preview"), exact=True)).to_be_visible()
             dialog.get_by_role("button", name=k("confirm_delete"), exact=True).click()
             expect(dialog).not_to_be_visible()

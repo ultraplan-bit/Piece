@@ -15,7 +15,7 @@ from nicegui import ui
 from app.i18n import t
 from app.platform import get_default_data_dir
 from app.skills import cli_prefix, export_skills, get_version, list_skills, render_skill, split_skill_meta
-from app.ui.components import chunk_markdown, confirm_dialog
+from app.ui.components import chunk_markdown, confirm_dialog, help_hint
 from indexing.utils import run_sync
 
 # 内置 Skill 是安装期资源，运行期不变，加载一次即可
@@ -176,13 +176,17 @@ def render_skill_right(
                                 on_click=_copy_prefix,
                             ).props("flat dense").classes("theme-text-accent").props("title=" + t("skills.copy_prefix"))
                         ui.label(t("skills.cli_prefix_hint")).classes("text-xs theme-text-muted")
-                        ui.input(
-                            label=t("skills.export_dir"),
-                            placeholder=t("skills.export_dir_placeholder"),
-                            value=export_state.get("export_dir") or _default_export_dir(),
-                            on_change=lambda e: export_state.update({"export_dir": e.value}),
-                        ).props("dense outlined").classes("w-full")
-                        ui.label(t("skills.export_dir_hint")).classes("text-xs theme-text-muted")
+                        with ui.row().classes("w-full items-center gap-1"):
+                            ui.input(
+                                label=t("skills.export_dir"),
+                                placeholder=t("skills.export_dir_placeholder"),
+                                value=export_state.get("export_dir") or _default_export_dir(),
+                                on_change=lambda e: export_state.update({"export_dir": e.value}),
+                            ).props("dense outlined").classes("flex-1")
+                            help_hint(
+                                t("skills.export_dir_hint"),
+                                label=t("skills.export_dir"),
+                            )
                         with ui.row().classes("w-full justify-end gap-2"):
                             if skill:
                                 ui.button(

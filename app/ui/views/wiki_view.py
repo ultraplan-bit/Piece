@@ -10,8 +10,9 @@ import logging
 import markdown2
 from nicegui import run, ui
 
-from app.ui.components import _MARKDOWN_EXTRAS
-from app.ui.views.knowledge_common import STATUSES, WorkbenchBase
+from app.ui.components import _MARKDOWN_EXTRAS, help_hint
+from app.ui.views.knowledge_common import WorkbenchBase
+from app.ui.views.wiki_editor import WikiEditor
 from app.ui.views.wiki_presenter import KINDS, safe_wiki_html
 
 from indexing.services.errors import BusinessError
@@ -44,6 +45,13 @@ class WikiWorkbench(WorkbenchBase):
         self.references_data = None
         self.reference_file = None
         self.refresh_modes = lambda: None
+        self.editor: WikiEditor | None = None
+        self.inspector_open = False
+        self._workspace_host = None
+        self._inspector = None
+        self._info_button = None
+        self.refresh_workspace = self.rebuild_workspace
+        self.refresh_detail = self.refresh_reader
 
     def _list_function(self, params):
         return self.service.search_pages if "query" in params else self.service.list_pages
@@ -135,6 +143,14 @@ class WikiWorkbench(WorkbenchBase):
             self._polling = False
 
     async def select(self, kind, ident, *, offset=0):
+        had_editor = self.editor is not None
+        if self.editor:
+            if not await self.editor.can_close():
+                return None
+            self.editor = None
+        previous = (self.detail["kind"], self.detail["record"]["id"]) if self.detail else None
+        if previous != (kind, ident):
+            self._scroll_positions["detail"] = 0
         self._selection += 1
         generation = self._selection
         data = await self.call(self.service.get_record, kind=kind, id=ident, limit=25, offset=offset)
@@ -147,8 +163,12 @@ class WikiWorkbench(WorkbenchBase):
                 self.error = self.text("lint_FILE_MISSING_OR_INVALID")
             self.refresh_detail()
             return
+        if data == self.detail and not self.error and not had_editor:
+            self.highlight_selection()
+            return data
         self.error = None
         self.detail = data
+        self.highlight_selection()
         self.links = data.get("links") if kind == "page" else None
         self.backlinks = data.get("backlinks") if kind == "page" else None
         self.refresh_detail()
@@ -169,115 +189,139 @@ class WikiWorkbench(WorkbenchBase):
         return element
 
     def render_middle(self):
-        with ui.column().classes("w-full h-full gap-3 p-4 theme-panel overflow-hidden"):
-            ui.label(self.text("heading")).classes("text-xl font-semibold theme-text")
-            ui.label(self.text("intro")).classes("text-xs theme-text-muted")
-            ui.label(self.text("auto_refresh")).classes("text-xs theme-text-muted")
-            ui.input(self.text("search"), value=self.query, on_change=lambda e: setattr(self, "query", e.value)).props("outlined dense").classes("w-full").on("keydown.enter", self.search)
-            with ui.row().classes("w-full gap-2"):
-                ui.select(self.choices(KINDS), label=self.text("kind"), value=self.kind, clearable=True,
-                          on_change=lambda e: setattr(self, "kind", e.value)).props("dense outlined").classes("flex-1")
-                ui.select(self.choices(STATUSES), label=self.text("status"), value=self.status, clearable=True,
-                          on_change=lambda e: setattr(self, "status", e.value)).props("dense outlined").classes("flex-1")
-            with ui.row().classes("gap-2"):
-                ui.button(self.text("search"), on_click=self.search).props("unelevated no-caps")
-                ui.button(self.text("create"), icon="add", on_click=lambda: self.edit_page()).props("flat no-caps")
-            with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(list=e.vertical_position)).classes("w-full flex-1") as area:
-                self._scroll_areas["list"] = area
-                @ui.refreshable
-                def listing():
-                    data = self.results
-                    if not data:
-                        ui.label(self.text("search_hint")).classes("theme-text-muted")
-                        return
-                    if not data["pages"]:
-                        ui.label(self.text("empty")).classes("theme-text-muted")
-                    for item in data["pages"]:
-                        with ui.column().classes("w-full gap-1 py-3 knowledge-list-item"):
-                            ui.button(item["title"], on_click=partial(self.select, "page", item["id"])).props("flat no-caps align=left").classes("w-full text-left theme-text")
-                            ui.label(self.text(item["kind"]) + " · " + self.text(item["status"])).classes("text-xs theme-text-muted")
-                            ui.label(item["summary"]).classes("text-sm theme-text-secondary line-clamp-3 break-words")
-                            ui.label(item["updated_at"]).classes("text-xs theme-text-muted")
-                    self.pager(self.offset, 25, data["total"], self.list_page)
-                self.refresh_list = listing.refresh
-                listing()
-            self._poll_timer = ui.timer(2.0, self.poll)
+        self.render_catalog(KINDS, "pages", "page", lambda: self.edit_page())
 
-    def render_right(self):
-        with ui.column().classes("w-full flex-1 min-h-0 min-w-0 theme-panel gap-0"):
+    def render_right(self, controls=None):
+        with ui.column().classes("wiki-workbench w-full h-full flex-1 min-h-0 min-w-0 theme-content gap-0"):
             @ui.refreshable
             def modes():
-                with ui.row().classes("w-full items-center gap-2 px-4 py-2 library-heading"):
+                with ui.row().classes("w-full items-center library-heading workspace-toolbar"):
+                    if controls:
+                        controls()
                     for mode, icon in (("pages", "article"), ("review", "fact_check")):
-                        ui.button(self.text(mode), icon=icon, on_click=partial(self.set_mode, mode)).props("flat no-caps").classes("theme-selected" if self.mode == mode else "")
+                        ui.button(self.text(mode), icon=icon, color=None, on_click=partial(self.set_mode, mode)).props("flat dense no-caps").classes("theme-selected" if self.mode == mode else "theme-text-secondary")
+                    ui.space()
+                    self._info_button = ui.button(self.text("page_info"), icon="info", color=None, on_click=self.toggle_inspector).props("flat dense no-caps").classes("wiki-info-toggle")
+                    self._info_button.set_enabled(self.editor is None and self.mode == "pages")
             self.refresh_modes = modes.refresh
             modes()
-            with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(detail=e.vertical_position)).classes("w-full flex-1") as area:
-                self._scroll_areas["detail"] = area
-                @ui.refreshable
-                def workspace():
-                    with ui.column().classes("w-full min-w-0 p-5 gap-4"):
-                        if self.mode == "review":
-                            self.render_review()
-                        if self.references_data is not None:
-                            self.render_references()
-                        @ui.refreshable
-                        def detail():
-                            self.render_detail()
-                        self.refresh_detail = detail.refresh
-                        detail()
-                self.refresh_workspace = workspace.refresh
-                workspace()
+            self._workspace_host = ui.column().classes("w-full flex-1 min-h-0 gap-0")
+            self.rebuild_workspace()
+
+    def rebuild_workspace(self):
+        if self._workspace_host is None or self._workspace_host.is_deleted:
+            return
+        if self._info_button is not None and not self._info_button.is_deleted:
+            self._info_button.set_enabled(self.editor is None and self.mode == "pages")
+        self._workspace_host.clear()
+        with self._workspace_host:
+            if self.editor:
+                self.editor.render()
+            elif self.mode == "review":
+                with ui.scroll_area().classes("w-full flex-1"):
+                    self.render_review()
+            else:
+                self.render_detail()
+
+    def refresh_reader(self):
+        # 外部更新仍进入 detail；编辑器的草稿和冲突条件不随轮询变化。
+        if self.editor is None:
+            self.rebuild_workspace()
+
+    def finish_editing(self):
+        self.editor = None
+        self.rebuild_workspace()
+
+    def toggle_inspector(self):
+        self.inspector_open = not self.inspector_open
+        if self._inspector is not None and not self._inspector.is_deleted:
+            self._inspector.set_visibility(self.inspector_open)
 
     async def set_mode(self, mode):
+        if self.editor:
+            if not await self.editor.can_close():
+                return
+            self.editor = None
         self.mode = mode
         self.refresh_modes()
-        self.refresh_workspace()
+        self.rebuild_workspace()
 
     def render_detail(self):
-        if self.error:
-            ui.label(self.error).classes("theme-text-muted")
-            ui.button(self.text("back"), on_click=self.clear_error).props("flat")
+        with ui.row().classes("wiki-reader w-full h-full min-h-0 gap-0 flex-nowrap relative"):
+            with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(detail=e.vertical_position)).classes("flex-1 h-full min-w-0 scroll-flush") as area:
+                self._scroll_areas["detail"] = area
+                with ui.column().classes("wiki-paper knowledge-detail w-full mx-auto gap-4 min-w-0"):
+                    if self.error:
+                        ui.label(self.error).classes("theme-text-muted")
+                        ui.button(self.text("back"), on_click=self.clear_error).props("flat")
+                    if self.references_data is not None:
+                        self.render_references()
+                    if not self.detail:
+                        with ui.column().classes("wiki-empty items-center w-full"):
+                            ui.icon("menu_book", size="48px").classes("theme-text-muted")
+                            ui.label(self.text("choose_page")).classes("text-lg theme-text")
+                            ui.label(self.text("reading_hint")).classes("text-sm theme-text-muted text-center")
+                        return
+                    data, kind = self.detail["record"], self.detail["kind"]
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.label(self.text(data["kind"]) if kind == "page" else self.text(kind)).classes("wiki-kind-label")
+                        ui.space()
+                        if kind == "page":
+                            ui.button(self.text("edit"), icon="edit", on_click=self.edit_current).props("flat dense no-caps")
+                            with ui.button(icon="more_horiz", color=None).props(f'flat dense round size=sm aria-label="{self.text("more")}"').tooltip(self.text("more")):
+                                with ui.menu():
+                                    ui.menu_item(self.text("add_evidence"), on_click=partial(self.edit_evidence, data["id"]))
+                                    ui.menu_item(self.text("history"), on_click=partial(self.show_history, "page", data["id"]))
+                                    ui.separator()
+                                    ui.menu_item(self.text("delete"), on_click=partial(self.preview_delete, "page", deepcopy(data))).classes("theme-danger")
+                    ui.label(data.get("title", self.text(kind))).classes("knowledge-title theme-text break-words")
+                    if kind == "page":
+                        ui.label(self.text(data["status"]) + " · " + self.text("revision", revision=data["revision"], updated=data.get("updated_at", ""))).classes("text-xs theme-text-muted")
+                        if data.get("index_status") and data["index_status"] != "current":
+                            ui.label(self.text("index_" + data["index_status"])).classes("text-xs theme-text-muted")
+                        if data.get("summary"):
+                            ui.label(data["summary"]).classes("wiki-summary theme-text-secondary break-words")
+                        self.markdown(data["body"]) if data.get("body") else ui.label(self.text("no_body")).classes("theme-text-muted")
+                    elif kind == "evidence":
+                        if data.get("page_id"):
+                            ui.button(self.text("open_page"), on_click=partial(self.select, "page", data["page_id"])).props("flat dense no-caps")
+                        self.render_evidence(data)
+            area.scroll_to(pixels=self._scroll_positions.get("detail", 0))
+            with ui.column().classes("wiki-reader-inspector h-full gap-0 theme-panel") as self._inspector:
+                self._inspector.set_visibility(self.inspector_open)
+                with ui.row().classes("w-full items-center justify-between px-4 library-heading"):
+                    ui.label(self.text("page_info")).classes("text-sm font-semibold theme-text")
+                    ui.button(icon="close", color=None, on_click=self.toggle_inspector).props(f'flat dense round size=sm aria-label="{self.text("close_info")}"')
+                with ui.scroll_area().classes("w-full flex-1"):
+                    self.render_inspector()
+
+    def render_inspector(self):
         if not self.detail:
-            ui.label(self.text("choose_page")).classes("text-sm theme-text-muted py-8")
             return
         data, kind = self.detail["record"], self.detail["kind"]
-        with ui.column().classes("knowledge-detail w-full max-w-[1000px] mx-auto gap-3 min-w-0"):
-            ui.label(data.get("title", self.text(kind))).classes("text-2xl font-semibold theme-text break-words")
-            if kind == "page":
-                with ui.row().classes("items-center gap-2"):
-                    ui.icon("help_outline" if data["status"] == "disputed" else "schedule" if data["status"] == "outdated" else "label_outline", size="xs")
-                    ui.label(self.text(data["status"])).classes("text-xs theme-text-muted")
-                    ui.label(self.text("revision", revision=data["revision"], updated=data.get("updated_at", ""))).classes("text-xs theme-text-muted")
-                    if data.get("index_status") and data["index_status"] != "current":
-                        ui.label(self.text("index_" + data["index_status"])).classes("text-xs theme-text-muted")
-                    ui.button(self.text("edit"), on_click=self.edit_current).props("flat dense no-caps")
-                    ui.button(self.text("history"), on_click=partial(self.show_history, "page", data["id"])).props("flat dense no-caps")
-                    ui.button(self.text("add_evidence"), on_click=partial(self.edit_evidence, data["id"])).props("flat dense no-caps")
-                ui.button(self.text("delete"), icon="delete_outline", on_click=partial(self.preview_delete, "page", deepcopy(data))).props("flat dense no-caps")
-                ui.label(self.text(data["kind"]) + (" · " + " / ".join(data["aliases"]) if data.get("aliases") else "")).classes("text-sm theme-text-muted")
-                if data["summary"]:
-                    ui.label(data["summary"]).classes("text-base theme-text-secondary break-words")
-                self.markdown(data["body"]) if data.get("body") else ui.label(self.text("no_body")).classes("theme-text-muted")
-                self.render_page_links()
-            elif kind == "evidence":
-                if data.get("page_id"):
-                    ui.button(self.text("open_page"), on_click=partial(self.select, "page", data["page_id"])).props("flat dense no-caps")
-                self.render_evidence(data)
-            if self.detail.get("evidence"):
-                evidence = self.detail["evidence"]
-                ui.label(self.text("evidence_count", count=evidence["total"])).classes("font-semibold theme-text")
-                if not evidence["items"]:
-                    ui.label(self.text("no_evidence")).classes("text-sm theme-text-muted")
-                for item in evidence["items"]:
-                    self.render_evidence(item)
-                self.pager(evidence["offset"], evidence["limit"], evidence["total"],
-                           partial(self.evidence_page, kind, data["id"], evidence["offset"]))
+        if kind == "page":
+            ui.label(self.text("page_properties")).classes("workspace-section-label")
+            for key in ("kind", "status"):
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label(self.text(key)).classes("text-xs theme-text-muted")
+                    ui.label(self.text(data[key])).classes("text-xs theme-text")
+            if data.get("aliases"):
+                ui.label(" / ".join(data["aliases"])).classes("text-sm theme-text-secondary break-words")
+            self.render_page_links()
+        if self.detail.get("evidence"):
+            evidence = self.detail["evidence"]
+            ui.label(self.text("evidence_count", count=evidence["total"])).classes("text-sm font-semibold theme-text")
+            if not evidence["items"]:
+                ui.label(self.text("no_evidence")).classes("text-sm theme-text-muted")
+            for item in evidence["items"]:
+                self.render_evidence(item)
+            self.pager(evidence["offset"], evidence["limit"], evidence["total"],
+                       partial(self.evidence_page, kind, data["id"], evidence["offset"]))
 
     def render_page_links(self):
         # 服务返回 {items,total,limit,offset} 的导航对象：出链取 target，反向链接取 source。
         for caption, nav in (("outgoing_links", self.links), ("backlinks", self.backlinks)):
-            with ui.expansion(self.text(caption), icon="link", value=True).classes("w-full"):
+            with ui.expansion(self.text(caption), icon="link", value=bool((nav or {}).get("items"))).props("dense").classes("w-full knowledge-links"):
                 items = (nav or {}).get("items") or []
                 if not items:
                     ui.label(self.text("empty")).classes("text-sm theme-text-muted")
@@ -285,7 +329,7 @@ class WikiWorkbench(WorkbenchBase):
                     ident = item.get("target_id") if caption == "outgoing_links" else item.get("source_id")
                     label = item.get("title") or ident
                     if item.get("exists"):
-                        ui.button(label, on_click=partial(self.select, "page", ident)).props("flat no-caps").classes("w-full break-words")
+                        ui.button(label, on_click=partial(self.select, "page", ident)).props("flat dense no-caps align=left").classes("w-full break-words")
                     else:
                         ui.label(self.text("link_missing") + " · " + label).classes("text-sm theme-text-muted break-words")
                 if nav and self.detail:
@@ -301,25 +345,12 @@ class WikiWorkbench(WorkbenchBase):
         self.edit_page(deepcopy(self.detail["record"]))
 
     def edit_page(self, record=None):
-        draft = {key: deepcopy(record.get(key)) for key in ("kind", "title", "summary", "body", "aliases", "status")} if record else {
-            "kind": "concept", "title": "", "summary": "", "body": "", "aliases": [], "status": "active"}
-        draft["aliases_text"] = "\n".join(draft.pop("aliases") or [])
-
-        def payload():
-            item = {k: v for k, v in draft.items() if k != "aliases_text"}
-            item["aliases"] = [a.strip() for a in draft["aliases_text"].splitlines() if a.strip()]
-            if record:
-                item.update({"id": record["id"], "expected_revision": record["revision"],
-                             "expected_content_hash": record["content_hash"]})
-            else:
-                item["ref"] = "new"
-            return {"pages": [item]}
-
-        def fields():
-            for name in ("kind", "title", "summary", "body", "aliases_text", "status"):
-                self.field(name, draft, multiline=name in ("summary", "body", "aliases_text"),
-                           options=KINDS if name == "kind" else STATUSES if name == "status" else None)
-        self.write_dialog(self.text("edit" if record else "create"), fields, payload, "page", record)
+        if self.editor:
+            self.notify(self.text("finish_draft"), type="info")
+            return
+        self.editor = WikiEditor(self, record)
+        self.mode = "pages"
+        self.rebuild_workspace()
 
     def adopt_latest(self, record, latest):
         record["revision"] = latest["revision"]
@@ -366,11 +397,14 @@ class WikiWorkbench(WorkbenchBase):
 
     # ---- 只读结构检查与索引重建 ----
     def render_review(self):
-        ui.label(self.text("review_intro")).classes("text-sm theme-text-muted")
+        with ui.row().classes("items-center gap-2"):
+            ui.label(self.text("review")).classes("text-sm font-medium theme-text")
+            help_hint(self.text("review_intro"))
         with ui.row().classes("items-center gap-2"):
             ui.select(self.choices(("all", "selected", "filtered")), label=self.text("scope"), value=self.lint_scope,
                       on_change=lambda e: setattr(self, "lint_scope", e.value)).props("outlined dense")
-            ui.button(self.text("rebuild_index"), on_click=self.rebuild_index).props("outline no-caps").tooltip(self.text("rebuild_intro"))
+            ui.button(self.text("rebuild_index"), on_click=self.rebuild_index).props("outline no-caps")
+            help_hint(self.text("rebuild_intro"))
         with ui.row():
             ui.button(self.text("run_checks"), on_click=self.run_checks).props("outline no-caps")
             ui.button(self.text("disputed"), on_click=partial(self.show_status, "disputed")).props("flat no-caps")
@@ -420,7 +454,7 @@ class WikiWorkbench(WorkbenchBase):
         result = await self.call(self.service.rebuild_index)
         if result is None:
             return
-        ui.notify(self.text("rebuild_done"), type="positive")
+        self.notify(self.text("rebuild_done"), type="positive")
         await self.search(False)
 
     async def file_references(self, file_id, offset=0):

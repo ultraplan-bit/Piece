@@ -39,6 +39,11 @@ class TaskHandlers:
         # 任务进度缓存 {task_id: {"file_id", "filename", "progress", "status", ...}}
         self.state["task_progress"] = {}
         self.state["task_progress_by_file_id"] = {}
+        # 任务活动面板：最近任务快照（含终态）与面板显隐；隐藏时不重绘
+        self.state.setdefault("task_activity", [])
+        self.state["task_activity_open"] = False
+        # 供顶栏任务活动面板按需加载；约定回调通过 ui_refs 传递
+        self.ui_refs["load_task_activity"] = self.refresh_activity
         # 订阅起点：只拉 updated_at >= _marker 的行（活跃任务不受此限制，每轮都拉）。
         # 闭区间会把标记时刻的行重复带回来，合并逻辑是幂等的，重复无害
         self._marker: Optional[str] = None
@@ -51,6 +56,26 @@ class TaskHandlers:
     def set_chunk_handlers(self, chunk_handlers):
         """设置切片处理器引用（用于解决循环依赖）"""
         self.chunk_handlers = chunk_handlers
+
+    async def refresh_activity(self):
+        """装入最近任务供任务活动面板展示。
+
+        面板打开时由 ``poll`` 每轮调用，关闭时不查询也不重绘；快照未变化
+        时直接返回，避免每秒重建面板而打断键盘焦点与操作按钮。
+        """
+        result = await run_sync(task_service.list_tasks, limit=20)
+        by_id = {task["id"]: task for task in result["tasks"]}
+        # 长时间运行的旧任务不能被最近 20 条记录挤掉；复用现有活跃任务缓存。
+        for task in self.state["task_progress"].values():
+            task_id = task["task_id"]
+            by_id.setdefault(task_id, {**task, "id": task_id, "original_filename": task["filename"]})
+        tasks = list(by_id.values())
+        if tasks == self.state.get("task_activity"):
+            return
+        self.state["task_activity"] = tasks
+        panel = self.ui_refs.get("task_activity_panel")
+        if panel is not None and not getattr(panel, "is_deleted", False):
+            panel.refresh()
 
     def _rebuild_task_progress_index(self):
         """按文件 ID 建立任务进度索引，避免渲染时重复遍历任务。"""
@@ -101,7 +126,7 @@ class TaskHandlers:
         self._rebuild_task_progress_index()
 
         # 如果有活跃任务，刷新文件列表
-        if active_tasks and self.ui_refs.get("file_list_container"):
+        if active_tasks and self.ui_refs.get("file_list_container") and not self.state.get("collection_edit"):
             self.ui_refs["file_list_container"].refresh()
 
     async def poll(self):
@@ -145,9 +170,17 @@ class TaskHandlers:
             if full_refresh_needed or dropped:
                 await self._refresh_all_async()
                 self._mark_task_progress_rendered()
-            elif list_changed and self.ui_refs.get("file_list_container"):
+            elif list_changed and self.ui_refs.get("file_list_container") and not self.state.get("collection_edit"):
                 self.ui_refs["file_list_container"].refresh()
                 self._mark_task_progress_rendered()
+
+            # 顶栏进行中计数跟随 task_progress 缓存原地更新，不重建按钮
+            from app.ui.views.task_activity import update_activity_badge
+            update_activity_badge(self.state, self.ui_refs)
+
+            # 任务活动面板打开时才跟随轮询刷新；隐藏时不查询也不重绘
+            if self.state.get("task_activity_open"):
+                await self.refresh_activity()
         finally:
             self._polling = False
 

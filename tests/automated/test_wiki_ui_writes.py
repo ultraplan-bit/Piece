@@ -41,6 +41,7 @@ def test_conflict_adopts_revision_and_content_hash_together(knowledge_base, monk
     original = service.get_record(kind="page", id=oid)["record"]
     workbench = WikiWorkbench()
     asyncio.run(workbench.select("page", oid))
+    workbench.render_right()
     workbench.edit_page(deepcopy(original))
     body = next(element for element in reversed(list(context.client.elements.values()))
                 if isinstance(element, ui.textarea) and element._props.get("label") == k("body"))
@@ -74,6 +75,7 @@ def test_timeout_queries_original_request_without_duplicate_write(knowledge_base
     oid = create_page(service)
     original = service.get_record(kind="page", id=oid)["record"]
     workbench = WikiWorkbench()
+    workbench.render_right()
     workbench.edit_page(deepcopy(original))
     reason = next(element for element in reversed(list(context.client.elements.values()))
                   if isinstance(element, ui.input) and element._props.get("label") == k("reason"))
@@ -90,6 +92,10 @@ def test_timeout_queries_original_request_without_duplicate_write(knowledge_base
     save = newest_button(ui, k("save"))
     asyncio.run(click(save))
     assert service.get_record(kind="page", id=oid)["record"]["revision"] == 2
+    pending_key = workbench.editor.pending.key
+    workbench.render_right()
+    assert workbench.editor.pending.key == pending_key
+    save = newest_button(ui, k("save"))
     asyncio.run(click(save))
     assert len(keys) == 1
     assert service.get_record(kind="page", id=oid)["record"]["revision"] == 2

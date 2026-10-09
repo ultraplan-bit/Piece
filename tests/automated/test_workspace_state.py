@@ -14,12 +14,14 @@ def state():
     return {"navigation_width": 208, "search_keyword": "", "chunk_scroll_by_file": {}, "chunk_page_by_file": {}}
 
 
-def test_workspace_roundtrip_preserves_catalog_and_reading_position(tmp_path):
+@pytest.mark.parametrize("mode", ["reading", "cards"])
+@pytest.mark.parametrize("view", ["reading", "compare"])
+def test_workspace_roundtrip_preserves_catalog_and_reading_position(tmp_path, mode, view):
     original = state() | {
         "selected_file_id": 12, "active_collection_ids": [3], "expanded_collection_ids": ["1", "3"],
         "file_page": 2, "file_scroll": 240, "tree_scroll": 80, "chunk_page": 3, "chunk_scroll": 460,
         "search_keyword": "研究", "sort_key": "filename", "include_descendants": False,
-        "source_zoom": 125, "source_follow": False, "library_view": "compare", "file_reading_mode": "reading",
+        "source_zoom": 125, "source_follow": False, "library_view": view, "file_reading_mode": mode,
         "library_mode": "tree", "tree_page_numbers": {"root": 2, "3": 4}, "focused_tree_key": "f:3:12",
         "secret": "not-persisted", "draft": "not-persisted",
     }
@@ -31,7 +33,8 @@ def test_workspace_roundtrip_preserves_catalog_and_reading_position(tmp_path):
     assert restored["selected_file_id"] == 12
     assert restored["chunk_scroll_by_file"] == {12: 460}
     assert restored["chunk_page_by_file"] == {12: 3}
-    assert restored["source_pane_open"] and restored["source_zoom"] == 125
+    assert restored["source_pane_open"] == (view == "compare")
+    assert restored["file_reading_mode"] == mode and restored["source_zoom"] == 125
     assert restored["active_collection_ids"] == [3] and restored["file_page"] == 2
     assert restored["search_keyword"] == "研究" and not restored["include_descendants"]
     assert restored["library_mode"] == "tree" and restored["tree_page_numbers"] == {"root": 2, "3": 4}

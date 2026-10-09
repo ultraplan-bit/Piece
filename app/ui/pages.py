@@ -7,7 +7,7 @@ from app.i18n import t
 from app.ui.views.wiki_view import WikiWorkbench
 from app.ui.views.graph_view import GraphWorkbench
 from app.ui.views.sidebar import render_app_header
-from app.ui.components import workspace_controls
+from app.ui.components import confirm_dialog, workspace_controls
 from app.ui.file_drop import render_workspace_upload
 from app.ui.workspace_state import (
     RESULTS_WIDTHS, MIN_RESULTS_WIDTH, MIN_NAVIGATION_WIDTH, restore_workspace, storage_key, workspace_snapshot,
@@ -38,7 +38,7 @@ def register_pages(port: int = 8689):
         client = context.client
         current_view = {"value": "files"}
         navigation_revision = 0
-        selected_setting = {"value": None}
+        selected_setting = {"value": "appearance"}
         selected_client = {"value": None}
         selected_skill = {"value": None}
         skill_export_state = {"export_dir": ""}
@@ -90,6 +90,20 @@ def register_pages(port: int = 8689):
             previous = current_view["value"]
             if previous == view:
                 return
+            if previous == "settings" and settings_handlers.dirty:
+                dialog = ui_refs.get("settings_exit_dialog")
+                if dialog is not None and not dialog.is_deleted and dialog.value:
+                    return
+
+                async def discard_and_leave():
+                    settings_handlers.discard_group()
+                    await switch_view(view)
+
+                ui_refs["settings_exit_dialog"] = confirm_dialog(
+                    t("settings.discard_title"), t("settings.discard_message"), discard_and_leave,
+                    confirm_text=t("settings.discard"), cancel_text=t("settings.keep_editing"),
+                )
+                return
             if state.get("collection_edit"):
                 ui.notify(t("collections.finish_edit"), type="info")
                 return
@@ -103,6 +117,8 @@ def register_pages(port: int = 8689):
             current_view["value"] = view
             state["results_width"] = widths.get(view, RESULTS_WIDTH)
             results_splitter.value = state["results_width"]
+            results_splitter.classes(add="tool-full-width" if view == "logs" else "",
+                                     remove="tool-full-width" if view != "logs" else "")
             adapt_navigation()
             if view == "settings":
                 settings_handlers.init_settings_form()
@@ -117,6 +133,13 @@ def register_pages(port: int = 8689):
             if ui_refs["settings_list"]:
                 ui_refs["settings_list"].refresh()
             right_column.refresh()
+
+        async def open_settings(group="appearance"):
+            if current_view["value"] == "settings":
+                select_setting(group)
+            else:
+                selected_setting["value"] = group
+                await switch_view("settings")
 
         def select_client(client_id):
             selected_client["value"] = client_id
@@ -215,9 +238,7 @@ def register_pages(port: int = 8689):
                 state["source_pane_open"] = True
             if current_view["value"] != "files":
                 return
-            # 文档模式只影响右侧内容，保留资料表的宽度与显隐状态。
-            if state.get("file_reading_mode") != "reading":
-                chunk_handlers.set_file_reading_mode("reading")
+            # 原页对照只控制对照栏，不改变正文形态或目录布局。
             if toolbar := ui_refs.get("reading_mode_toggle"):
                 toolbar.refresh()
             if view == "compare":
@@ -234,9 +255,32 @@ def register_pages(port: int = 8689):
             if current_view["value"] == "files":
                 await file_handlers.open_reader(file_id)
 
+        async def open_recall_result(file_id, chunk_id=None):
+            from indexing.services.errors import BusinessError
+            await switch_view("files")
+            if current_view["value"] != "files":
+                return
+            state["knowledge_return"] = True
+            state["knowledge_return_view"] = "recall_test"
+            open_reader()
+            try:
+                await file_handlers.load_chunks(file_id, chunk_id=chunk_id)
+            except BusinessError:
+                ui.notify(t("knowledge.source_unavailable"), type="warning")
+                return
+            if chunk_id is not None:
+                await ui.run_javascript(f'''const target = document.querySelector(
+                    '.chunk-anchor[data-file-id="{int(file_id)}"][data-chunk-id="{int(chunk_id)}"]');
+                    target?.scrollIntoView({{block: 'center'}});''')
+
         ui_refs.update(toggle_navigation=toggle_navigation, focus_catalog=focus_catalog,
                        focus_search=focus_search, open_task_file=open_task_file,
                        open_reader=open_reader, open_library=open_library,
+                       open_recall_result=open_recall_result,
+                       open_settings=open_settings, open_webdav_settings=lambda: open_settings("webdav"),
+                       open_mcp_config=lambda: switch_view("mcp_config"),
+                       open_cloud_sync=lambda: switch_view("cloud_sync"),
+                       refresh_settings=lambda: right_column.refresh(),
                        set_library_view=set_library_view)
         render_workspace_upload(ui_refs, file_handlers)
         header = render_app_header(current_view, switch_view, ui_refs, state=state, file_handlers=file_handlers)
@@ -273,7 +317,8 @@ def register_pages(port: int = 8689):
                             elif view == "logs":
                                 render_logs_middle(ui_refs=ui_refs)
                             else:
-                                render_settings_middle(selected_setting=selected_setting, ui_refs=ui_refs, on_select_setting=select_setting)
+                                render_settings_middle(selected_setting=selected_setting, ui_refs=ui_refs,
+                                                       on_select_setting=select_setting, settings_handlers=settings_handlers)
                         middle_column()
                     with results_splitter.after, ui.row().classes("workspace-content w-full h-full gap-0 flex-nowrap overflow-hidden"):
                         @ui.refreshable
@@ -294,7 +339,8 @@ def register_pages(port: int = 8689):
                             elif view == "cloud_sync":
                                 render_cloud_sync_right(sync_state=sync_state, ui_refs=ui_refs, sync_handlers=sync_handlers)
                             elif view == "mcp_config":
-                                render_mcp_config_right(selected_client=selected_client)
+                                render_mcp_config_right(selected_client=selected_client,
+                                                        on_open_settings=lambda: open_settings("mcp"))
                             elif view == "skills":
                                 render_skill_right(selected_skill=selected_skill, export_state=skill_export_state, port=port)
                             elif view == "logs":
@@ -302,7 +348,8 @@ def register_pages(port: int = 8689):
                             else:
                                 render_settings_right(selected_setting=selected_setting, settings_form=settings_form,
                                                       settings_handlers=settings_handlers,
-                                                      apply_theme_callback=lambda theme: apply_theme(dark_mode, theme))
+                                                      apply_theme_callback=lambda theme: apply_theme(dark_mode, theme),
+                                                      callbacks=ui_refs)
                         right_column()
                         @ui.refreshable
                         def source_column():
@@ -370,12 +417,29 @@ def register_pages(port: int = 8689):
             document.addEventListener('keydown', event => {
                 if (event.defaultPrevented || event.isComposing || event.altKey || event.shiftKey ||
                     event.target.closest('.q-dialog, .q-menu')) return;
-                if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+                const key = event.key.toLowerCase();
+                if (!(event.ctrlKey || event.metaKey)) return;
+                if (key === ',') {
+                    const settings = document.querySelector('[data-open-settings]');
+                    if (settings) { event.preventDefault(); if (!event.repeat) settings.click(); }
+                } else if (key === 's') {
+                    const settings = document.querySelector('.settings-workspace');
+                    if (settings) {
+                        event.preventDefault();
+                        if (!event.repeat) settings.dispatchEvent(new CustomEvent('settings-save'));
+                    }
+                } else if (key === 'k') {
                     const input = document.querySelector('[data-catalog] .workspace-search input');
                     if (input) {
                         event.preventDefault();
                         if (!event.repeat) { input.focus(); input.select(); }
                     }
+                }
+            });
+            window.addEventListener('beforeunload', event => {
+                const unsaved = document.querySelector('[data-settings-unsaved]');
+                if (unsaved?.getClientRects().length) {
+                    event.preventDefault(); event.returnValue = '';
                 }
             });
         </script>""")

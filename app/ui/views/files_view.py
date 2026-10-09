@@ -3,7 +3,7 @@
 
 职责:
 - 渲染文件库中栏（宽栏资料表 / 窄栏分层列表）
-- 渲染文件库右栏（默认连续阅读，可切到卡片管理；文件检查信息按需展开）
+- 渲染文件库右栏（默认连续阅读，可切到卡片视图；文件检查信息按需展开）
 """
 
 import inspect
@@ -84,7 +84,7 @@ _SORT_LABELS = {
     "filename": "files.sort_name",
 }
 
-# 阅读区两种形态：默认连续阅读（像文档），可切到卡片管理（逐条带管理栏）
+# 阅读区两种形态：默认连续阅读（像文档），可切到卡片视图（逐条带管理栏）
 READING_MODES = ("reading", "cards")
 
 # 整行只响应"空白处"的单击/双击/回车：落在按钮、输入框等交互元素上的事件不冒泡上来。
@@ -807,8 +807,8 @@ def render_files_right(
     """
     渲染文件库右栏
 
-    顶部以当前文件名为主标题，卡片管理收进次级操作；正文默认"连续阅读"，
-    可切到"卡片管理"逐条编辑。文件属性收进按需展开的检查区域。
+    顶部以当前文件名为主标题，正文与卡片视图可双向切换，原页对照独立开关。
+    文件属性收进按需展开的检查区域。
 
     Args:
         state: 共享状态字典
@@ -821,16 +821,6 @@ def render_files_right(
         panel = ui_refs.get("file_info_drawer")
         if panel is not None and not panel.is_deleted:
             panel.set_visibility(state["file_info_open"])
-
-    def choose_view(view):
-        if callback := ui_refs.get("set_library_view"):
-            callback(view)
-        else:
-            state["library_view"] = view
-
-    def manage_cards():
-        choose_view("reading")
-        chunk_handlers.set_file_reading_mode("cards")
 
     with ui.column().classes("flex-1 h-full flex flex-col theme-content min-w-0 gap-0 relative reader-panel"):
         @ui.refreshable
@@ -858,7 +848,6 @@ def render_files_right(
                 ).tooltip(t("workspace.more"))
                 more.set_enabled(selected_file is not None)
                 with more, ui.menu():
-                    ui.menu_item(t("library.mode_cards"), on_click=manage_cards)
                     ui.menu_item(t("chunks.add"), on_click=chunk_handlers.handle_add_chunk)
                     ui.menu_item(t("workspace.select"), on_click=chunk_handlers.enter_chunk_batch_mode)
                     ui.separator()
@@ -870,7 +859,8 @@ def render_files_right(
             workspace_controls(ui_refs, include_navigation=False)
             if state.get("knowledge_return") and ui_refs.get("return_knowledge"):
                 return_view = state.get("knowledge_return_view") or "wiki"
-                return_label = t("wiki.return" if return_view == "wiki" else "graph.return")
+                return_label = t({"wiki": "wiki.return", "graph": "graph.return", "recall_test": "recall_test.return"}.get(
+                    return_view, "wiki.return"))
                 ui.button(icon="arrow_back", color=None, on_click=ui_refs["return_knowledge"]).props(
                     f'flat dense round size=sm aria-label="{return_label}"'
                 ).tooltip(return_label)
@@ -886,29 +876,31 @@ def render_files_right(
             def reading_mode_toggle():
                 if state.get("chunk_batch_mode"):
                     return
-                mode = state.get("library_view", "reading")
-                with ui.row().classes("reader-view-switch items-center gap-0 flex-nowrap").props(
-                    f'role=group aria-label="{t("library.view_mode")}"'
-                ):
-                    can_compare = chunk_handlers.can_compare()
-                    for value in ("reading", "compare"):
-                        callback = chunk_handlers.open_comparison if value == "compare" else lambda v=value: choose_view(v)
-                        enabled = can_compare if value == "compare" else state.get("selected_file_id") is not None
-
-                        def make_button(value=value, callback=callback, enabled=enabled):
-                            button = ui.button(t("library.view_" + value), color=None, on_click=callback).props(
+                mode = state.get("file_reading_mode", "reading")
+                with ui.row().classes("items-center gap-2 flex-nowrap"):
+                    with ui.row().classes("reader-view-switch items-center gap-0 flex-nowrap").props(
+                        f'role=group aria-label="{t("library.view_mode")}"'
+                    ):
+                        for value in READING_MODES:
+                            ui.button(t("library.mode_" + value), color=None,
+                                      on_click=lambda v=value: chunk_handlers.set_file_reading_mode(v)).props(
                                 f'flat dense no-caps no-ripple aria-pressed={str(mode == value).lower()}'
-                            ).classes("reader-mode-active" if mode == value else "theme-text-muted")
-                            button.set_enabled(enabled)
-                            return button
-
-                        if enabled or value != "compare":
-                            make_button()
-                            continue
-                        # 禁用的 Quasar 按钮不派发鼠标事件，把原因提示挂到外层容器。
+                            ).classes("reader-mode-active" if mode == value else "theme-text-muted").set_enabled(
+                                state.get("selected_file_id") is not None
+                            )
+                    comparing = state.get("source_pane_open", False)
+                    enabled = comparing or chunk_handlers.can_compare()
+                    # 禁用的 Quasar 按钮不派发鼠标事件，把原因提示挂到外层容器。
+                    with ui.element("div").classes("inline-flex items-center") as compare_control:
+                        ui.button(t("library.view_compare"), color=None,
+                                  on_click=chunk_handlers.close_source_page if comparing else chunk_handlers.open_comparison).props(
+                            f'flat dense no-caps no-ripple aria-pressed={str(comparing).lower()}'
+                        ).classes("reader-source-toggle").classes(
+                            "reader-mode-active" if comparing else "theme-text-muted"
+                        ).set_enabled(enabled)
+                    if not enabled:
                         hint = t("library.compare_unavailable") if state.get("selected_file_id") else t("chunks.select_file_first")
-                        with ui.element("div").classes("inline-flex items-center").tooltip(hint):
-                            make_button()
+                        compare_control.tooltip(hint)
             ui_refs["reading_mode_toggle"] = reading_mode_toggle
             reading_mode_toggle()
             chunk_toolbar_buttons()

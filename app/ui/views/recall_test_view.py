@@ -12,6 +12,7 @@
 """
 
 from indexing.utils import run_sync
+import inspect
 import time
 
 from nicegui import ui
@@ -37,6 +38,48 @@ _GET_DOCS_LIMIT = 3
 _EMPTY_ERRORS = ("缺少检索结果", "未提取到有效关键词")
 
 
+def _run_conditions(recall_state: dict) -> dict:
+    """把当前输入归一成一次检索的条件快照（与 last_run["conditions"] 同构）。"""
+    return {
+        "query": (recall_state.get("query") or "").strip(),
+        "filenames": _split_filenames(recall_state.get("filenames") or ""),
+        "collections": sorted(recall_state.get("collection_names") or []),
+        "include_descendants": bool(recall_state.get("include_descendants", True)),
+    }
+
+
+def is_stale(recall_state: dict) -> bool:
+    """输入已被改动、当前结果仍来自上一次检索时为 True。"""
+    last = (recall_state.get("last_run") or {}).get("conditions")
+    if not last:
+        return False
+    return _run_conditions(recall_state) != last
+
+
+async def _maybe_await(result):
+    """兼容同步/异步回调：返回协程时等待它。"""
+    if inspect.isawaitable(result):
+        await result
+
+
+def _locate_handler(ui_refs: dict, item: dict):
+    """结果行的「在资料库中定位」：优先注入的精确回调，其次只打开文件。"""
+
+    async def locate():
+        doc = item.get("doc") or {}
+        callback = ui_refs.get("open_recall_result")
+        if callback:
+            await _maybe_await(callback(doc.get("file_id"), doc.get("chunk_id")))
+            return
+        fallback = ui_refs.get("open_task_file")
+        if fallback and doc.get("file_id"):
+            await _maybe_await(fallback(doc["file_id"]))
+            return
+        ui.notify(t("recall_test.locate_unavailable"), type="warning")
+
+    return locate
+
+
 def render_recall_test_middle(recall_state: dict, ui_refs: dict):
     """
     渲染召回测试中栏
@@ -51,7 +94,7 @@ def render_recall_test_middle(recall_state: dict, ui_refs: dict):
         # 顶部标题栏
         with ui.row().classes(
             "w-full px-3 items-center justify-between"
-        ).style("border-bottom: 1px solid var(--border-color); height: 49px"):
+        ).style("border-bottom: 1px solid var(--border-color); height: 44px"):
             ui.label(t("recall_test.title")).classes("text-sm font-medium theme-text")
 
         # 查询表单
@@ -102,6 +145,44 @@ def render_recall_test_middle(recall_state: dict, ui_refs: dict):
 
             ui_refs["recall_run_button"] = run_button
             run_button()
+
+            @ui.refreshable
+            def recall_last_run():
+                last = recall_state.get("last_run")
+                if not last:
+                    return
+                conditions = last["conditions"]
+                with ui.column().classes("w-full gap-0 pt-1"):
+                    with ui.row().classes("w-full items-center gap-1"):
+                        ui.icon("history", size="14px").classes("theme-text-muted")
+                        ui.label(t("recall_test.last_run")).classes(
+                            "text-xs font-medium theme-text-muted"
+                        )
+                    ui.label(conditions["query"]).classes(
+                        "text-xs theme-text truncate"
+                    ).tooltip(conditions["query"])
+                    if conditions["filenames"]:
+                        names = ", ".join(conditions["filenames"])
+                        ui.label(f'{t("recall_test.filenames")}: {names}').classes(
+                            "text-xs theme-text-muted truncate"
+                        ).tooltip(names)
+                    if conditions["collections"]:
+                        suffix = (
+                            f' ({t("collections.include_descendants")})'
+                            if conditions["include_descendants"]
+                            else ""
+                        )
+                        ui.label(
+                            f'{t("recall_test.collections")}: '
+                            + " · ".join(conditions["collections"])
+                            + suffix
+                        ).classes("text-xs theme-text-muted truncate")
+                    ui.label(
+                        t("recall_test.last_run_at", time=last["at"])
+                    ).classes("text-xs theme-text-muted")
+
+            ui_refs["recall_last_run"] = recall_last_run
+            recall_last_run()
 
         # 检索明细（跑完才出现）
         with ui.scroll_area().classes("flex-1"):
@@ -157,7 +238,7 @@ def render_recall_test_right(recall_state: dict, ui_refs: dict):
         # 顶部信息区
         with ui.row().classes(
             "w-full px-5 items-center justify-between theme-sidebar"
-        ).style("border-bottom: 1px solid var(--border-color); height: 49px"):
+        ).style("border-bottom: 1px solid var(--border-color); height: 44px"):
             with ui.row().classes("items-center gap-2"):
                 ui.icon("manage_search", size="xs").classes("theme-text-accent")
                 ui.label(t("recall_test.results")).classes(
@@ -196,11 +277,13 @@ def render_recall_test_right(recall_state: dict, ui_refs: dict):
                     )
                 else:
                     with ui.column().classes("w-full gap-1 px-4 py-3"):
+                        if is_stale(recall_state):
+                            _stale_banner(recall_state)
                         ui.label(
                             t("recall_test.top_hint", limit=_GET_DOCS_LIMIT)
                         ).classes("text-xs theme-text-muted pb-1")
                         for index, item in enumerate(results, start=1):
-                            _render_result(index, item)
+                            _render_result(index, item, ui_refs)
 
             ui_refs["recall_results"] = recall_results
             recall_results()
@@ -223,13 +306,29 @@ def _placeholder(icon: str, title: str, hint: str):
         ui.label(hint).classes("text-xs theme-text-muted text-center")
 
 
-def _render_result(index: int, item: dict):
+def _stale_banner(recall_state: dict):
+    """旧结果与当前输入不一致时的提示：明确结果来自哪次条件。"""
+    last = (recall_state.get("last_run") or {}).get("conditions") or {}
+    query = last.get("query", "")
+    with ui.row().classes(
+        "w-full items-center gap-2 rounded-md px-3 py-2 theme-panel"
+    ).style("border: 1px solid var(--border-color)"):
+        ui.icon("warning_amber", size="16px").classes("theme-text-muted shrink-0")
+        ui.label(t("recall_test.stale")).classes("text-xs theme-text flex-1 min-w-0")
+        if query:
+            ui.label(query).classes(
+                "text-xs theme-text-muted truncate max-w-[12rem]"
+            ).tooltip(f'{t("recall_test.last_run")}: {query}')
+
+
+def _render_result(index: int, item: dict, ui_refs: dict = None):
     """
     渲染一条召回结果
 
     Args:
         index: 排名（从 1 开始）
         item: {"doc_title", "score", "routes", "doc"}
+        ui_refs: UI 组件引用字典（提供「在资料库中定位」回调）
     """
     doc = item.get("doc") or {}
 
@@ -280,6 +379,15 @@ def _render_result(index: int, item: dict):
                 ui.label(" · ".join(part for part in meta if part)).classes(
                     "text-xs theme-text-muted flex-1 min-w-0 truncate"
                 )
+                if doc.get("file_id") and ui_refs is not None:
+                    ui.button(
+                        icon="my_location",
+                        on_click=_locate_handler(ui_refs, item),
+                    ).props(
+                        f'flat dense round size=xs aria-label="{t("recall_test.locate")}"'
+                    ).classes("theme-text-muted shrink-0").tooltip(
+                        t("recall_test.locate")
+                    )
                 toggle_button = ui.button(icon="code").props(
                     "flat dense round size=xs"
                 ).classes("theme-text-muted shrink-0").tooltip(
@@ -327,16 +435,17 @@ async def _run_search(recall_state: dict, ui_refs: dict):
     recall_state["is_running"] = True
     _refresh(ui_refs, "recall_run_button")
 
+    conditions = _run_conditions(recall_state)
     try:
-        filenames = _split_filenames(recall_state.get("filenames") or "")
-        collections = list(recall_state.get("collection_names") or [])
+        filenames = conditions["filenames"]
+        collections = conditions["collections"]
 
         started = time.perf_counter()
         result = await resolve_database_keywords(
             query,
             filenames=filenames or None,
             collections=collections or None,
-            include_descendants=recall_state.get("include_descendants", True),
+            include_descendants=conditions["include_descendants"],
         )
         candidates = result.get("candidates", [])
         # MCP 工具层限制每次 3 张；面板按精确 ID 批量预取全部 top-k。
@@ -387,9 +496,15 @@ async def _run_search(recall_state: dict, ui_refs: dict):
     finally:
         recall_state["is_running"] = False
         recall_state["has_run"] = True
+        # 记录本次运行的条件快照：输入改动后据此把旧结果标注为「非当前条件」
+        recall_state["last_run"] = {
+            "conditions": conditions,
+            "at": time.strftime("%H:%M:%S"),
+        }
         _refresh(
             ui_refs,
             "recall_run_button",
+            "recall_last_run",
             "recall_stats",
             "recall_count",
             "recall_results",

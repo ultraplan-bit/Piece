@@ -7,7 +7,7 @@ from pathlib import Path
 
 RESULTS_WIDTHS = {
     "files": 320, "wiki": 260, "graph": 260, "recall_test": 300,
-    "cloud_sync": 240, "mcp_config": 240, "skills": 240, "logs": 240, "settings": 240,
+    "cloud_sync": 240, "mcp_config": 240, "skills": 240, "logs": 240, "settings": 220,
 }
 MIN_NAVIGATION_WIDTH = 160
 MIN_RESULTS_WIDTH = 220

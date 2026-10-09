@@ -4,12 +4,17 @@
     "name": "Piece"
   },
   "file_status": {
-    "pending": "待处理", "processing": "处理中", "completed": "已完成",
-    "indexed": "已索引", "failed": "失败", "error": "错误", "empty": "无内容"
+    "pending": "待处理",
+    "processing": "处理中",
+    "completed": "已完成",
+    "indexed": "已索引",
+    "failed": "失败",
+    "error": "错误",
+    "empty": "无内容"
   },
   "library": {
     "view_reading": "阅读",
-    "view_compare": "对照",
+    "view_compare": "原页对照",
     "view_mode": "文档视图",
     "preview_title": "预览",
     "parsed_text": "解析正文 · Markdown",
@@ -33,8 +38,8 @@
     "table_type": "来源格式",
     "table_status": "状态",
     "table_date": "日期",
-    "mode_reading": "连续阅读",
-    "mode_cards": "卡片管理",
+    "mode_reading": "正文",
+    "mode_cards": "卡片",
     "switch_mode": "切换阅读方式",
     "row_hint": "单击预览，双击或回车打开阅读",
     "compare_unavailable": "此文档没有可对照的原页。支持 PDF 及已转换为 PDF 的文档。"
@@ -261,7 +266,9 @@
     "settings": "设置",
     "cloud_sync_dev": "云同步功能开发中",
     "wiki": "Wiki",
-    "graph": "知识图谱"
+    "graph": "知识图谱",
+    "tools_integrations": "接入",
+    "tools_diagnostics": "诊断"
   },
   "stats": {
     "loading": "加载中...",
@@ -544,8 +551,8 @@
   },
   "settings": {
     "title": "设置",
-    "appearance": "基础设置",
-    "embedding": "嵌入模型",
+    "appearance": "通用",
+    "embedding": "嵌入与索引",
     "mcp": "MCP 服务",
     "storage": "数据存储",
     "webdav": "云同步",
@@ -553,7 +560,47 @@
     "btn_save": "保存",
     "saved_immediately": "设置已保存并立即生效",
     "saved_need_restart": "设置已保存，以下配置项需重启应用后生效：{items}",
-    "save_failed": "设置保存失败"
+    "save_failed": "设置保存失败，请重试；未保存的输入已保留",
+    "nav_application": "应用",
+    "nav_processing": "文档处理",
+    "nav_services": "服务与数据",
+    "unsaved_short": "未保存",
+    "unsaved_group": "当前分组有未保存的更改",
+    "saved_group": "当前分组已保存",
+    "no_changes": "当前分组没有未保存的更改",
+    "other_drafts": "另有 {count} 个分组未保存；本次保存不包含它们",
+    "pending_restart": "已保存 · 以下配置待重启生效：{groups}。请使用原来的启动方式重新启动 Piece。",
+    "pending_reindex": "新配置用于后续文档处理，已有文档不会自动改变。如需更新，请在资料库中重新索引。",
+    "effect_api": "管理服务",
+    "effect_mcp": "MCP 服务",
+    "effect_performance": "索引性能",
+    "effect_data_path": "数据目录",
+    "testing_draft": "正在测试当前输入，不会保存配置…",
+    "test_current": "测试当前输入",
+    "not_tested": "当前输入尚未测试",
+    "test_stale": "输入已更改，请重新测试",
+    "test_failed": "测试失败：{error}",
+    "complete_connection": "请先填写此连接所需的地址、模型或凭据",
+    "unknown_error": "未知错误，请检查服务后重试",
+    "saved_pending": "设置已保存；生效方式请查看页面中的持续提示",
+    "invalid_path": "请输入服务所在电脑上的绝对目录路径，或使用 ~ 表示主目录",
+    "invalid_form": "请检查当前分组的地址、选项和数值后重试；未保存的输入已保留",
+    "model_change_blocked": "资料库已有向量，不能直接切换模型、服务地址或维度。当前配置未修改；请保留原配置，或先明确切换到空资料库后配置新模型。",
+    "tasks_busy": "仍有文档处理任务，暂时不能切换模型。请等待任务完成后重试。",
+    "required": "请填写此项",
+    "invalid_url": "请输入完整的 http:// 或 https:// 服务地址",
+    "integer_range": "请输入 {minimum} 到 {maximum} 之间的整数",
+    "save_group": "保存当前分组",
+    "revert_group": "撤销更改",
+    "auto_save": "此页偏好更改后自动保存",
+    "refresh_interface": "刷新界面以应用语言",
+    "parser_effect_hint": "解析设置用于新导入或重新索引的文档，不会自动改写已有文档。",
+    "advanced": "高级参数",
+    "copy_failed": "复制失败，请允许剪贴板访问，或选中文本手动复制",
+    "discard_title": "离开设置？",
+    "discard_message": "仍有未保存的更改。离开并放弃后，这些更改将丢失；已保存的设置不受影响。",
+    "discard": "放弃更改并离开",
+    "keep_editing": "继续编辑"
   },
   "settings_appearance": {
     "title": "基础设置",
@@ -577,7 +624,8 @@
     "testing": "测试中...",
     "test_success": "连接成功，向量维度: {dim}",
     "test_dim_mismatch": "维度不匹配！实际维度: {actual}，配置维度: {expected}",
-    "test_failed": "连接失败: {error}"
+    "test_failed": "连接失败: {error}",
+    "change_hint": "地址、模型和维度决定向量空间；已有向量时不能直接切换。连接测试只验证当前输入，不会保存。"
   },
   "settings_performance": {
     "title": "索引性能",
@@ -611,12 +659,23 @@
     "auth_enabled_hint": "禁用后任何人都可以访问 MCP 服务（仅建议本地调试时使用）",
     "include_images": "默认附带插图",
     "include_images_hint": "开启后 AI 获取原文时会一并收到卡片中的插图（仅对含插图的文档生效，会增加 token 消耗）；AI 可按需自行跳过",
-    "max_images": "单次最多返回图片数"
+    "max_images": "单次最多返回图片数",
+    "open_config": "配置客户端",
+    "services_title": "端口与访问权限",
+    "apply_title": "保存 MCP 服务变更？",
+    "apply_message": "端口、认证或密钥的变更将在保存并重启 Piece 后生效。届时已配置的客户端可能需要更新连接信息；重启前继续使用原配置。"
   },
   "settings_storage": {
     "title": "数据存储设置",
     "data_path": "数据目录路径",
-    "data_path_hint": "存储数据库、原始文件和工作文件的根目录（修改后需重启应用生效）"
+    "data_path_hint": "存储数据库、原始文件和工作文件的根目录（修改后需重启应用生效）",
+    "server_path_hint": "这里的路径属于运行 Piece 服务的电脑，不是浏览器所在电脑。",
+    "current_path": "当前使用目录",
+    "no_migration": "只更改路径，不会移动现有资料。重启后将从新目录读取，请先自行准备好该目录。",
+    "copy_path": "复制当前路径",
+    "path_copied": "目录路径已复制",
+    "apply_title": "更改数据目录？",
+    "apply_message": "重启后将使用：\n{path}\n\n本次保存不会移动原目录的资料，也不会删除原数据。请先确认新目录已准备好。"
   },
   "settings_webdav": {
     "title": "云同步设置",
@@ -629,7 +688,9 @@
     "test_btn": "测试连接",
     "testing": "测试中...",
     "test_success": "连接成功",
-    "test_failed": "连接失败: {error}"
+    "test_failed": "连接失败: {error}",
+    "open_sync": "打开同步",
+    "connection_only": "这里保存同步连接信息；实际同步请在云同步工具中执行。"
   },
   "settings_ocr": {
     "title": "PDF 解析设置",
@@ -691,7 +752,8 @@
     "testing": "检测中...",
     "test_success": "可用：{backend}",
     "test_none": "没有可用的转换后端，Word/PPT 将按原方式解析",
-    "test_failed": "检测失败：{error}"
+    "test_failed": "检测失败：{error}",
+    "test_disabled": "已选择直接解析，不使用 Office 转换后端"
   },
   "task": {
     "completed": "任务已完成",
@@ -723,14 +785,44 @@
     "already_syncing": "同步任务正在进行中",
     "sync_hint": "智能同步策略:\n• 首次同步: 仅下载云端文件\n• 日常同步: 以本地为主，支持删除同步\n• config.json 不同步（保护隐私）",
     "log_title": "同步日志",
-    "no_logs": "无同步日志记录"
+    "no_logs": "无同步日志记录",
+    "go_settings": "前往设置",
+    "current_stage": "最近进度信息",
+    "last_result": "上次结果",
+    "result_counts": "上传 {uploaded} · 下载 {downloaded} · 跳过 {skipped} · 错误 {errors}",
+    "strategy": "同步策略",
+    "clear_logs": "清空同步日志"
   },
   "mcp_config": {
     "title": "MCP 客户端",
     "select_client": "请在左侧选择一个客户端",
     "hint": "将以下配置添加到对应客户端的 MCP 配置文件中：",
     "copy_btn": "复制配置",
-    "copied": "配置已复制到剪贴板"
+    "copied": "配置已复制到剪贴板",
+    "search_placeholder": "搜索客户端",
+    "no_match": "没有匹配的客户端",
+    "client_count": "{count} 个客户端",
+    "services_heading": "服务（勾选要写入配置的服务）",
+    "service_kb": "检索服务（piece-kb）",
+    "service_index": "索引服务（piece-index）",
+    "service_kb_purpose": "用途：检索已入库资料 · 只读",
+    "service_index_purpose": "用途：建库、导入与重索引 · 可写",
+    "auth_state": "Bearer 认证：{state}",
+    "auth_on": "已启用",
+    "auth_off": "未启用",
+    "config_heading": "配置内容",
+    "entry_heading": "配置入口",
+    "entry_json": "将以下配置加入该客户端的 MCP 配置文件。",
+    "entry_bash": "在终端执行以下命令（claude mcp add）。",
+    "entry_toml": "将以下内容写入 Codex 的 config.toml 并保存。",
+    "docs_btn": "官方配置文档",
+    "setup_amp": "写入 VS Code settings.json 的 amp.mcpServers 键下。",
+    "setup_copilot_agent": "该云端 Agent 在 GitHub 网页端配置，每个服务需声明 tools。",
+    "copy_failed": "复制失败，请手动选中文本复制",
+    "open_settings": "MCP 服务设置",
+    "no_service_selected": "至少选择一个服务后才能复制配置",
+    "settings_restart_hint": "端点与密钥来自当前运行进程；在「MCP 服务设置」修改端口或密钥后，需重启服务并重新复制配置。",
+    "notice": "本页只生成配置并显示本机服务端点，不检测客户端连接。复制成功、服务状态、客户端连接是三件不同的事。"
   },
   "skills": {
     "title": "Skill 导出",
@@ -753,7 +845,19 @@
     "missing": "未找到 Skill：{names}",
     "overwrite_confirm_title": "覆盖已有 Skill",
     "overwrite_confirm_msg": "目标目录已存在「{names}」的 SKILL.md，覆盖后将替换原有内容。是否继续？",
-    "overwrite_btn": "覆盖"
+    "overwrite_btn": "覆盖",
+    "copy_failed": "复制失败，请手动选中复制",
+    "all_target": "全部内置 Skill",
+    "export_target": "导出目标：{target}",
+    "result_heading": "上次导出结果",
+    "result_exists": "其中 {count} 个已存在，未覆盖",
+    "copy_path": "复制路径",
+    "path_copied": "路径已复制到剪贴板",
+    "overwrite_action": "覆盖已存在的 Skill",
+    "overwrite_confirm_message": "目标目录「{dir}」已存在「{names}」的 SKILL.md，覆盖后将替换原有内容。是否继续？",
+    "preview_heading": "内容预览",
+    "prefix_expand": "命令行前缀（高级）",
+    "export_note": "下一步：在目标客户端中启用或重新加载该 Skill。"
   },
   "logs": {
     "title": "日志",
@@ -768,7 +872,16 @@
     "refreshed": "日志刷新成功",
     "refresh_failed": "日志刷新失败",
     "cleared": "日志清空成功",
-    "clear_failed": "日志清空失败"
+    "clear_failed": "日志清空失败",
+    "copy": "复制",
+    "copied": "已复制 {count} 条日志",
+    "copy_failed": "复制失败，请检查剪贴板权限",
+    "copy_empty": "当前没有可复制的日志",
+    "clear_title": "清空内存日志",
+    "clear_message": "将清空进程内共享的内存日志缓冲区（所有会话和视图都可见），磁盘日志文件（data/logs）不受影响。",
+    "view_exception": "查看详情",
+    "detail_title": "日志详情",
+    "masked_hint": "已脱敏敏感内容"
   },
   "recall_test": {
     "title": "召回测试",
@@ -796,7 +909,13 @@
     "top_hint": "前 {limit} 条高亮：AI 单次最多翻开这么多张卡片",
     "doc_missing": "正文已不存在（卡片可能刚被删除）",
     "chunk_position": "第 {index}/{total} 张",
-    "toggle_view": "切换渲染 / 原文"
+    "toggle_view": "切换渲染 / 原文",
+    "return": "返回召回测试",
+    "last_run": "上次运行",
+    "last_run_at": "运行于 {time}",
+    "stale": "查询条件已修改，以下为上次运行的结果",
+    "locate": "在资料库中定位",
+    "locate_unavailable": "当前无法定位到资料库"
   },
   "wiki": {
     "page_info": "页面信息",

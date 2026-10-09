@@ -4,12 +4,17 @@
     "name": "Piece"
   },
   "file_status": {
-    "pending": "Pending", "processing": "Processing", "completed": "Completed",
-    "indexed": "Indexed", "failed": "Failed", "error": "Error", "empty": "Empty"
+    "pending": "Pending",
+    "processing": "Processing",
+    "completed": "Completed",
+    "indexed": "Indexed",
+    "failed": "Failed",
+    "error": "Error",
+    "empty": "Empty"
   },
   "library": {
     "view_reading": "Read",
-    "view_compare": "Compare",
+    "view_compare": "Compare source",
     "view_mode": "Document view",
     "preview_title": "Preview",
     "parsed_text": "Parsed content · Markdown",
@@ -33,8 +38,8 @@
     "table_type": "Source",
     "table_status": "Status",
     "table_date": "Date",
-    "mode_reading": "Continuous reading",
-    "mode_cards": "Card management",
+    "mode_reading": "Text",
+    "mode_cards": "Cards",
     "switch_mode": "Switch reading mode",
     "row_hint": "Click to preview; double-click or press Enter to read",
     "compare_unavailable": "No source pages available. Supported for PDFs and documents converted to PDF."
@@ -261,7 +266,9 @@
     "settings": "Settings",
     "cloud_sync_dev": "Cloud sync is under development",
     "wiki": "Wiki",
-    "graph": "Knowledge graph"
+    "graph": "Knowledge graph",
+    "tools_integrations": "Integrations",
+    "tools_diagnostics": "Diagnostics"
   },
   "stats": {
     "loading": "Loading...",
@@ -544,8 +551,8 @@
   },
   "settings": {
     "title": "Settings",
-    "appearance": "Appearance",
-    "embedding": "Embedding Model",
+    "appearance": "General",
+    "embedding": "Embedding & Indexing",
     "mcp": "MCP Service",
     "storage": "Data Storage",
     "webdav": "Cloud Sync",
@@ -553,7 +560,47 @@
     "btn_save": "Save",
     "saved_immediately": "Settings saved and applied immediately",
     "saved_need_restart": "Settings saved, the following configuration items require application restart to take effect: {items}",
-    "save_failed": "Settings save failed"
+    "save_failed": "Could not save settings. Your unsaved input has been kept; please try again.",
+    "nav_application": "Application",
+    "nav_processing": "Document processing",
+    "nav_services": "Services & data",
+    "unsaved_short": "Unsaved",
+    "unsaved_group": "This section has unsaved changes",
+    "saved_group": "This section is saved",
+    "no_changes": "No unsaved changes in this section",
+    "other_drafts": "{count} other section(s) have unsaved changes; this save does not include them",
+    "pending_restart": "Saved · Restart required for: {groups}. Restart Piece using your usual launch method.",
+    "pending_reindex": "The new configuration applies to future document processing. Existing documents do not change automatically; reindex them in the library if needed.",
+    "effect_api": "Management service",
+    "effect_mcp": "MCP services",
+    "effect_performance": "Indexing performance",
+    "effect_data_path": "Data directory",
+    "testing_draft": "Testing the current input without saving…",
+    "test_current": "Test current input",
+    "not_tested": "Current input has not been tested",
+    "test_stale": "Input changed; test again",
+    "test_failed": "Test failed: {error}",
+    "complete_connection": "Enter the address, model or credentials required for this connection first",
+    "unknown_error": "Unknown error; check the service and try again",
+    "saved_pending": "Settings saved; see the persistent notice for when they take effect",
+    "invalid_path": "Enter an absolute directory path on the service host, or use ~ for its home directory",
+    "invalid_form": "Check the addresses, options and numbers in this section, then try again. Your unsaved input has been kept.",
+    "model_change_blocked": "The library already contains vectors. Its model, service URL or dimensions cannot be changed directly. No changes were saved. Keep the current configuration, or explicitly switch to an empty library before configuring a new model.",
+    "tasks_busy": "Documents are still being processed. Wait for those tasks to finish before changing the model.",
+    "required": "This field is required",
+    "invalid_url": "Enter a complete http:// or https:// service URL",
+    "integer_range": "Enter a whole number between {minimum} and {maximum}",
+    "save_group": "Save this section",
+    "revert_group": "Revert changes",
+    "auto_save": "Preferences on this page are saved automatically",
+    "refresh_interface": "Refresh interface to apply language",
+    "parser_effect_hint": "Parsing settings apply to newly imported or reindexed documents. Existing documents are not rewritten automatically.",
+    "advanced": "Advanced options",
+    "copy_failed": "Copy failed. Allow clipboard access, or select and copy the text manually.",
+    "discard_title": "Leave settings?",
+    "discard_message": "You still have unsaved changes. Leaving and discarding will lose them; already saved settings are unaffected.",
+    "discard": "Discard and leave",
+    "keep_editing": "Keep editing"
   },
   "settings_appearance": {
     "title": "Appearance Settings",
@@ -577,7 +624,8 @@
     "testing": "Testing...",
     "test_success": "Connected successfully, vector dimension: {dim}",
     "test_dim_mismatch": "Dimension mismatch! Actual dimension: {actual}, configured dimension: {expected}",
-    "test_failed": "Connection failed: {error}"
+    "test_failed": "Connection failed: {error}",
+    "change_hint": "The URL, model and dimensions define the vector space and cannot be switched directly when vectors exist. Testing checks the current input without saving it."
   },
   "settings_performance": {
     "title": "Indexing Performance",
@@ -611,12 +659,23 @@
     "auth_enabled_hint": "When disabled, anyone can access MCP service (only recommended for local debugging)",
     "include_images": "Include figures by default",
     "include_images_hint": "When enabled, the AI also receives the figures embedded in the retrieved cards (only for documents that have them; costs extra tokens). The AI can still skip them when not needed.",
-    "max_images": "Max images per call"
+    "max_images": "Max images per call",
+    "open_config": "Configure clients",
+    "services_title": "Ports & access",
+    "apply_title": "Save MCP service changes?",
+    "apply_message": "Changes to ports, authentication or keys take effect after saving and restarting Piece. Existing clients may then need updated connection details. The current configuration remains active until restart."
   },
   "settings_storage": {
     "title": "Data Storage Settings",
     "data_path": "Data Directory Path",
-    "data_path_hint": "Root directory for storing database, original files and working files (requires application restart to take effect after modification)"
+    "data_path_hint": "Root directory for storing database, original files and working files (requires application restart to take effect after modification)",
+    "server_path_hint": "Paths refer to the computer running the Piece service, not the browser's computer.",
+    "current_path": "Current directory",
+    "no_migration": "Changing the path does not move existing data. After restart Piece reads from the new directory; prepare it beforehand.",
+    "copy_path": "Copy current path",
+    "path_copied": "Directory path copied",
+    "apply_title": "Change the data directory?",
+    "apply_message": "After restart, Piece will use:\n{path}\n\nSaving does not move or delete data in the original directory. Make sure the new directory is ready."
   },
   "settings_webdav": {
     "title": "Cloud Sync Settings",
@@ -629,7 +688,9 @@
     "test_btn": "Test Connection",
     "testing": "Testing...",
     "test_success": "Connected successfully",
-    "test_failed": "Connection failed: {error}"
+    "test_failed": "Connection failed: {error}",
+    "open_sync": "Open sync",
+    "connection_only": "Save connection details here. Run synchronization from the Cloud Sync tool."
   },
   "settings_ocr": {
     "title": "PDF Parsing Settings",
@@ -691,7 +752,8 @@
     "testing": "Checking...",
     "test_success": "Available: {backend}",
     "test_none": "No conversion backend available; Word/PPT will use the original parser",
-    "test_failed": "Check failed: {error}"
+    "test_failed": "Check failed: {error}",
+    "test_disabled": "Direct parsing selected; no Office conversion backend is used"
   },
   "task": {
     "completed": "Task completed successfully",
@@ -723,14 +785,44 @@
     "already_syncing": "Sync task already in progress",
     "sync_hint": "Smart Sync Strategy:\n• First sync: Download only\n• Daily sync: Local-first with delete sync\n• config.json not synced (privacy)",
     "log_title": "Sync Log",
-    "no_logs": "No sync log records"
+    "no_logs": "No sync log records",
+    "go_settings": "Open Settings",
+    "current_stage": "Latest progress",
+    "last_result": "Last result",
+    "result_counts": "Uploaded {uploaded} · Downloaded {downloaded} · Skipped {skipped} · Errors {errors}",
+    "strategy": "Sync strategy",
+    "clear_logs": "Clear sync log"
   },
   "mcp_config": {
     "title": "MCP Clients",
     "select_client": "Please select a client on the left",
     "hint": "Add the following config to the client's MCP configuration file:",
     "copy_btn": "Copy Config",
-    "copied": "Config copied to clipboard"
+    "copied": "Config copied to clipboard",
+    "search_placeholder": "Search clients",
+    "no_match": "No matching clients",
+    "client_count": "{count} clients",
+    "services_heading": "Services (tick the ones to include)",
+    "service_kb": "Retrieval service (piece-kb)",
+    "service_index": "Index service (piece-index)",
+    "service_kb_purpose": "Purpose: search indexed documents · read-only",
+    "service_index_purpose": "Purpose: build, import and reindex · read-write",
+    "auth_state": "Bearer auth: {state}",
+    "auth_on": "enabled",
+    "auth_off": "disabled",
+    "config_heading": "Config",
+    "entry_heading": "Where to add this",
+    "entry_json": "Add the config below to this client's MCP configuration file.",
+    "entry_bash": "Run the following commands in a terminal (claude mcp add).",
+    "entry_toml": "Write the following into Codex's config.toml and save.",
+    "docs_btn": "Official docs",
+    "setup_amp": "Written under the amp.mcpServers key in VS Code's settings.json.",
+    "setup_copilot_agent": "This cloud agent is configured on the GitHub web UI, and each service must declare tools.",
+    "copy_failed": "Copy failed; select the text and copy manually",
+    "open_settings": "MCP service settings",
+    "no_service_selected": "Select at least one service before copying the config",
+    "settings_restart_hint": "Endpoints and keys come from the running process; after changing the port or keys in \"MCP service settings\", restart the service and copy the config again.",
+    "notice": "This page only generates config and shows local service endpoints; it does not check the client connection. Copy success, service status and client connection are three different things."
   },
   "skills": {
     "title": "Skill Export",
@@ -753,7 +845,19 @@
     "missing": "Skill not found: {names}",
     "overwrite_confirm_title": "Overwrite existing skill",
     "overwrite_confirm_msg": "\"{names}\" already exists in the target directory and overwriting will replace its SKILL.md. Continue?",
-    "overwrite_btn": "Overwrite"
+    "overwrite_btn": "Overwrite",
+    "copy_failed": "Copy failed; select and copy manually",
+    "all_target": "All built-in skills",
+    "export_target": "Exporting: {target}",
+    "result_heading": "Last export",
+    "result_exists": "{count} already existed and were not overwritten",
+    "copy_path": "Copy path",
+    "path_copied": "Path copied to clipboard",
+    "overwrite_action": "Overwrite existing skills",
+    "overwrite_confirm_message": "\"{names}\" already exists under \"{dir}\" and overwriting will replace its SKILL.md. Continue?",
+    "preview_heading": "Preview",
+    "prefix_expand": "Command prefix (advanced)",
+    "export_note": "Next: enable or reload the skill in your target client."
   },
   "logs": {
     "title": "Logs",
@@ -768,7 +872,16 @@
     "refreshed": "Logs refreshed successfully",
     "refresh_failed": "Logs refresh failed",
     "cleared": "Logs cleared successfully",
-    "clear_failed": "Logs clear failed"
+    "clear_failed": "Logs clear failed",
+    "copy": "Copy",
+    "copied": "Copied {count} log entries",
+    "copy_failed": "Copy failed; check clipboard permission",
+    "copy_empty": "No logs to copy",
+    "clear_title": "Clear in-memory logs",
+    "clear_message": "Clears the shared in-memory log buffer (visible to all sessions and views). On-disk logs under data/logs are not affected.",
+    "view_exception": "View details",
+    "detail_title": "Log details",
+    "masked_hint": "Sensitive content masked"
   },
   "recall_test": {
     "title": "Recall Test",
@@ -796,7 +909,13 @@
     "top_hint": "Top {limit} highlighted: the AI opens at most this many cards per call",
     "doc_missing": "Content no longer exists (the card may have just been deleted)",
     "chunk_position": "Card {index}/{total}",
-    "toggle_view": "Toggle rendered / raw text"
+    "toggle_view": "Toggle rendered / raw text",
+    "return": "Return to recall test",
+    "last_run": "Last run",
+    "last_run_at": "Ran at {time}",
+    "stale": "Conditions changed; results below are from the last run",
+    "locate": "Locate in Library",
+    "locate_unavailable": "Cannot open in Library right now"
   },
   "wiki": {
     "page_info": "Page info",

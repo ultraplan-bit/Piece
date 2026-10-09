@@ -27,15 +27,23 @@ def render_app_header(current_view: dict, switch_view: Callable, callbacks: dict
             render_task_activity(state, callbacks or {}, file_handlers)
         with ui.button(t("sidebar.tools"), icon="tune", color=None).props("flat dense no-caps").classes("app-tools theme-text-secondary"):
             with ui.menu().props("auto-close"):
-                for key, icon in (("recall_test", "manage_search"), ("mcp_config", "settings_input_component"),
-                                  ("skills", "extension"), ("logs", "description")):
-                    with ui.menu_item(on_click=partial(switch_view, key)).classes("gap-3"):
-                        ui.icon(icon, size="xs").classes("theme-text-muted")
-                        ui.label(t(f"sidebar.{key}"))
+                for group, items in (
+                    ("tools_integrations", (("mcp_config", "settings_input_component"), ("skills", "extension"))),
+                    ("tools_diagnostics", (("recall_test", "manage_search"), ("logs", "description"))),
+                ):
+                    ui.label(t(f"sidebar.{group}")).classes("px-4 pt-2 pb-1 text-xs theme-text-muted")
+                    for key, icon in items:
+                        with ui.menu_item(on_click=partial(switch_view, key)).props(
+                            f'role=menuitem aria-label="{t(f"sidebar.{key}")}"'
+                        ).classes("gap-3"):
+                            ui.icon(icon, size="xs").classes("theme-text-muted").props("aria-hidden=true")
+                            ui.label(t(f"sidebar.{key}"))
         for key, icon in (("cloud_sync", "cloud_sync"), ("settings", "settings")):
-            ui.button(icon=icon, color=None, on_click=partial(switch_view, key)).props(
+            button = ui.button(icon=icon, color=None, on_click=partial(switch_view, key)).props(
                 f'flat dense round size=sm aria-label="{t(f"sidebar.{key}")}"'
             ).classes("theme-text-muted").tooltip(t(f"sidebar.{key}"))
+            if key == "settings":
+                button.props('data-open-settings aria-keyshortcuts="Control+, Meta+,"')
 
     def refresh():
         if header.is_deleted:

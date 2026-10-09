@@ -41,7 +41,23 @@ class SyncHandlers:
         if finished_at is not None:
             # 本轮服务运行期间同步过，以它为准（配置里只记成功的那次）
             self.sync_state["last_sync"] = finished_at.strftime("%Y-%m-%d %H:%M")
+        # 会话重开时补回本轮服务的上次结果，保证反馈依然可见
+        self._sync_last_result(self.sync_service.last_result, finished_at)
         self.refresh_from_service()
+
+    def _sync_last_result(self, result, finished_at) -> None:
+        """把服务侧上次同步结果（真实计数与消息）镜像到界面状态，只读展示。"""
+        if result is None:
+            return
+        self.sync_state["last_result"] = {
+            "success": result.success,
+            "uploaded": len(result.uploaded),
+            "downloaded": len(result.downloaded),
+            "skipped": len(result.skipped),
+            "errors": len(result.errors),
+            "message": result.message,
+            "finished_at": finished_at.strftime("%H:%M:%S") if finished_at else "",
+        }
 
     def is_enabled(self) -> bool:
         """检查云同步是否启用"""
@@ -77,6 +93,7 @@ class SyncHandlers:
         if finished_at is not None and finished_at != self._notified_finish:
             self._notified_finish = finished_at
             self.sync_state["last_sync"] = finished_at.strftime("%Y-%m-%d %H:%M")
+            self._sync_last_result(self.sync_service.last_result, finished_at)
             changed = True
         return changed
 
@@ -103,7 +120,8 @@ class SyncHandlers:
         if not self.refresh_from_service():
             return
 
-        self._refresh("sync_buttons", "last_sync_info", "sync_logs")
+        self._refresh("connection_status", "current_stage", "last_result_info",
+                      "sync_buttons", "last_sync_info", "sync_logs")
 
         if notify_finish and result is not None:
             ui.notify(

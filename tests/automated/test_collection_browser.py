@@ -166,14 +166,13 @@ def test_collection_browser_roundtrip(gui_service):
             expect(page.locator(".library-reading-block")).to_have_count(1)
             page.screenshot(path=str(service["path"] / "library-table.png"))
             toolbar = page.locator(".reader-toolbar")
-            toolbar.get_by_role("button", name="更多操作", exact=True).click()
-            page.locator(".q-menu").get_by_text("卡片管理", exact=True).click()
+            toolbar.get_by_role("button", name=t("library.mode_cards"), exact=True).click()
             expect(page.locator(".chunk-sheet")).to_have_count(1)
-            toolbar.get_by_role("button", name="阅读", exact=True).click()
+            toolbar.get_by_role("button", name=t("library.mode_reading"), exact=True).click()
             expect(page.locator(".library-reading-block")).to_have_count(1)
             expect(page.locator(".workspace-splitter").first.locator(":scope > .q-splitter__before")).to_have_css("width", "160px")
             expect(middle).to_have_css("width", "320px")
-            toolbar.get_by_role("button", name="对照", exact=True).click()
+            toolbar.get_by_role("button", name=t("library.view_compare"), exact=True).click()
             expect(page.locator(".source-pane img")).to_be_visible(timeout=30000)
             expect(middle).to_have_css("width", "320px")
             expect(file_row).to_have_attribute("id", row_id)
@@ -218,7 +217,7 @@ def test_collection_browser_roundtrip(gui_service):
             page.screenshot(path=str(service["path"] / "collections-light.png"))
 
             # 多归属定位必须让用户选择目标；信息面板不再常驻正文顶部。
-            toolbar.get_by_role("button", name="阅读", exact=True).click()
+            toolbar.get_by_role("button", name=t("library.view_compare"), exact=True).click()
             expect(page.locator(".source-pane")).to_have_count(0)
             toolbar.get_by_role("button", name=t("files.info_title"), exact=True).click()
             page.get_by_role("button", name=t("files.locate"), exact=True).click()
@@ -235,11 +234,11 @@ def test_collection_browser_roundtrip(gui_service):
             expect(page.get_by_text("原页核验正文。父范围包含后代，直接归类不变。")).to_be_visible()
 
             # 阅读与对照均保留目录；窄窗口改为上下对照，不自动收起导航。
-            toolbar.get_by_role("button", name="阅读", exact=True).click()
+            toolbar.get_by_role("button", name=t("library.mode_reading"), exact=True).click()
             expect(page.locator(".source-pane")).to_have_count(0)
             expect(middle).to_have_css("width", "320px")
             page.screenshot(path=str(service["path"] / "collections-reading.png"))
-            toolbar.get_by_role("button", name="对照", exact=True).click()
+            toolbar.get_by_role("button", name=t("library.view_compare"), exact=True).click()
             expect(page.locator(".source-pane img")).to_be_visible(timeout=30000)
             page.set_viewport_size({"width": 850, "height": 760})
             expect(page.locator(".workspace-splitter").first.locator(":scope > .q-splitter__before")).to_have_css("width", "160px")
@@ -261,14 +260,14 @@ def test_collection_browser_roundtrip(gui_service):
 
             # 切换工作区与主题后，仍保持对照模式及原页。
             page.get_by_role("button", name="设置", exact=True).click()
-            page.get_by_text("基础设置", exact=True).click()
-            page.get_by_text("深色", exact=True).click()
+            page.locator(".settings-nav-item").filter(has_text=t("settings.appearance")).click()
+            page.get_by_role("button", name=t("settings_appearance.theme_dark"), exact=True).click()
             page.get_by_role("button", name=t("sidebar.files"), exact=True).click()
             expect(page.locator(".source-pane img")).to_be_visible()
-            expect(toolbar.get_by_role("button", name="对照", exact=True)).to_have_attribute("aria-pressed", "true")
+            expect(toolbar.get_by_role("button", name=t("library.view_compare"), exact=True)).to_have_attribute("aria-pressed", "true")
             expect(middle).to_have_css("width", "320px")
             page.screenshot(path=str(service["path"] / "collections-dark.png"))
-            toolbar.get_by_role("button", name="阅读", exact=True).click()
+            toolbar.get_by_role("button", name=t("library.view_compare"), exact=True).click()
             expect(collection_row(page, service["graph"])).to_have_attribute("aria-selected", "true")
 
             # 在条目上就地改名、新建子资料集，删除仍展示影响确认。

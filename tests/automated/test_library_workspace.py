@@ -1,9 +1,11 @@
-"""文件库资料表与"连续阅读 / 卡片管理"切换的离线回归（不使用网络与真实嵌入）。"""
+"""文件库资料表与正文 / 卡片视图切换的离线回归（不使用网络与真实嵌入）。"""
 
 import asyncio
 from types import SimpleNamespace
 
 import pytest
+
+from test_import_dialogs import _click, _run
 
 
 def _state(**overrides):
@@ -140,7 +142,8 @@ def test_library_table_renders_compact_rows_not_cards(knowledge_base, batch_mode
     container.delete()
 
 
-def test_reader_defaults_to_continuous_then_switches_to_cards(knowledge_base):
+@pytest.mark.parametrize("comparing", [False, True])
+def test_reader_buttons_switch_both_ways_without_changing_comparison(knowledge_base, comparing):
     from nicegui import ui
     from app.i18n import t
     from app.ui.handlers.chunk_handlers import ChunkHandlers
@@ -150,10 +153,15 @@ def test_reader_defaults_to_continuous_then_switches_to_cards(knowledge_base):
 
     file_id = file_service.create_empty_file("reading-mode")["file_id"]
     file_info = file_service.get_file_by_id(file_id)
+    assert file_info is not None
+    file_info.update(original_file_path="original.pdf", original_file_type="pdf")
+    source = {"file_id": file_id, "page": 2} if comparing else None
     state = _state(
         selected_file_id=file_id,
         files_data=[file_info],
         filtered_files=[file_info],
+        source_pane_open=comparing, source_page=source,
+        library_view="compare" if comparing else "reading",
         chunks_data=[{
             "id": 987654, "doc_title": "第一节", "chunk_text": "连续阅读正文。",
             "heading_path": "reading-mode / 第1页",
@@ -168,28 +176,38 @@ def test_reader_defaults_to_continuous_then_switches_to_cards(knowledge_base):
     with ui.column() as container:
         render_files_right(state, refs, chunks, file_handlers)
     assert state["file_reading_mode"] == "reading"
-    # 文档模式与列表显隐分离，工具栏不再有同义的“资料”模式。
+    # 正文形态与原页对照是两组独立控件。
     view_switch = next(element for element in container.descendants() if "reader-view-switch" in element._classes)
     assert [element.text for element in view_switch.descendants() if isinstance(element, ui.button)] == [
-        t("library.view_reading"), t("library.view_compare"),
+        t("library.mode_reading"), t("library.mode_cards"),
     ]
     list_toggles = [element for element in container.descendants()
                     if isinstance(element, ui.button) and element._props.get("aria-label") == t("workspace.results")]
     assert len(list_toggles) == 1
-    # 连续阅读：文档式块，带滚动跟随锚点，且不是卡片
     assert _has_class(container, "library-reading-block")
     assert _has_class(container, "chunk-anchor")
     assert not _has_class(container, "chunk-sheet")
     assert not any(getattr(element, "text", "") in (t("files.export_working"), t("files.export_original"))
                    for element in container.descendants())
-    container.delete()
 
-    # 切到卡片管理：复用既有切片卡片
-    state["file_reading_mode"] = "cards"
-    with ui.column() as container:
-        render_files_right(state, refs, chunks, file_handlers)
-    assert _has_class(container, "chunk-sheet")
-    assert not _has_class(container, "library-reading-block")
+    # 调用实际按钮绑定，不再直接改 state 绕过切换入口。
+    for mode in ("cards", "reading"):
+        button = next(element for element in container.descendants()
+                      if isinstance(element, ui.button) and element.text == t("library.mode_" + mode))
+        _run(_click(button))
+        assert state["file_reading_mode"] == mode
+        assert state["source_pane_open"] == comparing
+        assert state["source_page"] is source
+        assert state["library_view"] == ("compare" if comparing else "reading")
+        assert _has_class(container, "chunk-sheet") == (mode == "cards")
+        assert _has_class(container, "library-reading-block") == (mode == "reading")
+        for element in container.descendants():
+            if isinstance(element, ui.button) and element.text in (t("library.mode_reading"), t("library.mode_cards")):
+                selected = element.text == t("library.mode_" + mode)
+                assert element._props["aria-pressed"] == str(selected).lower()
+                assert ("reader-mode-active" in element._classes) == selected
+        compare = next(element for element in container.descendants() if "reader-source-toggle" in element._classes)
+        assert compare._props["aria-pressed"] == str(comparing).lower()
     container.delete()
 
 

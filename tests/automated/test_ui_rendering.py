@@ -182,6 +182,7 @@ def test_ocr_provider_toggle_keeps_label_case():
     handlers = SimpleNamespace(
         test_ocr_connection=lambda *args: None,
         save_settings_form=lambda *args: None,
+        test_message="", test_failed=False, testing=False,
     )
     with ui.column() as container:
         settings_view._render_ocr_settings({"ocr_provider": "mineru"}, handlers)

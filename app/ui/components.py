@@ -11,6 +11,7 @@ from typing import Callable, Optional
 from functools import cache
 from html import unescape
 import inspect
+import json
 import logging
 import re
 from urllib.parse import quote
@@ -167,6 +168,17 @@ def _absolutize_image_srcs(html_text: str, base_url: str = "/working/") -> str:
         return f'{match[1]}{match[2]}{base_url}{quote(src, safe="/")}{match[2]}'
 
     return _IMG_SRC.sub(replace, html_text)
+
+
+async def write_clipboard(text: str) -> bool:
+    """等待浏览器确认写入；权限被拒或页面断开时不误报复制成功。"""
+    try:
+        result = await ui.run_javascript(f'''try {{
+            await navigator.clipboard.writeText({json.dumps(text)}); return true;
+        }} catch {{ return false; }}''', timeout=3)
+        return result is True
+    except Exception:
+        return False
 
 
 def help_hint(text: str, *, label: str | None = None):
@@ -493,7 +505,7 @@ def confirm_dialog(
         ).style("border-bottom: 1px solid var(--border-color)"):
             ui.label(title).classes("text-base font-semibold theme-text")
             close_button = ui.button(icon="close", on_click=dialog.close).props(
-                f'flat dense round aria-label="{cancel_text}"'
+                f'flat dense round aria-label="{t("knowledge.close")}"'
             ).classes("theme-text-muted")
 
         with ui.column().classes("w-full py-4"):

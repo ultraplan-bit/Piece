@@ -218,7 +218,7 @@ THEME_CSS = '''
     .library-reader-title { min-width: 0; }
     .reader-toolbar { gap: 8px; }
     .reader-view-switch { border: 1px solid var(--border-color); border-radius: 3px; padding: 1px; flex-shrink: 0; }
-    .reader-view-switch .q-btn { min-height: 25px; padding: 2px 8px; border-radius: 1px; font-size: 12px; }
+    .reader-view-switch .q-btn, .reader-source-toggle.q-btn { min-height: 25px; padding: 2px 8px; border-radius: 1px; font-size: 12px; }
     .reader-mode-active { background: var(--bg-hover); color: var(--text-primary); font-weight: 600; }
     .file-info-drawer {
         position: absolute;
@@ -389,6 +389,67 @@ THEME_CSS = '''
     .workspace-search .q-field__control { border-radius: var(--control-radius); }
     .workspace-search .q-field__native { font-size: 13px; }
     .workspace-document { padding: 28px clamp(16px, 4vw, 56px); }
+
+    /* 设置沿用桌面工作区的密度，分组靠对齐与分隔，不使用嵌套卡片。 */
+    .settings-workspace { container-type: inline-size; }
+    .settings-navigation .workspace-toolbar, .settings-workspace > .workspace-toolbar {
+        height: var(--toolbar-height); flex-shrink: 0; border-bottom: 1px solid var(--border-color);
+        align-items: center;
+    }
+    .settings-nav-heading { padding: 12px 8px 4px; color: var(--text-muted); font-size: 11px; font-weight: 600; }
+    .settings-nav-item.q-btn { width: 100%; min-height: 32px; padding: 5px 8px;
+        border-radius: var(--control-radius); color: var(--text-secondary); font-size: 13px; }
+    .settings-nav-item .q-btn__content { width: 100%; min-width: 0; flex-wrap: nowrap; gap: 6px; }
+    .settings-nav-active { background: var(--bg-hover); color: var(--text-primary) !important; font-weight: 600; }
+    .settings-dirty { font-size: 10px; color: var(--text-muted); flex-shrink: 0; font-weight: 400; }
+    .settings-scroll .q-scrollarea__content { padding: 0; }
+    .settings-form { --settings-label-width: 210px; max-width: 940px; padding: 24px 28px 36px; }
+    .settings-section-heading { width: 100%; gap: 5px; margin: 24px 0 10px; }
+    .settings-section-heading:first-child { margin-top: 0; }
+    .setting-row { width: 100%; flex-wrap: nowrap; align-items: flex-start; gap: 24px;
+        padding: 13px 0; border-bottom: 1px solid var(--border-color); }
+    .setting-label { width: var(--settings-label-width); flex-shrink: 0; gap: 5px; padding-top: 5px; }
+    .setting-title { font-size: 13px; line-height: 1.5; font-weight: 500; color: var(--text-primary); }
+    .setting-hint { font-size: 12px; line-height: 1.65; color: var(--text-muted); overflow-wrap: anywhere; }
+    .setting-control { flex: 1; min-width: 0; gap: 6px; }
+    .settings-form .q-field--dense .q-field__control, .settings-form .q-field--dense .q-field__marginal {
+        min-height: 34px; height: 34px; border-radius: var(--control-radius);
+    }
+    .settings-form .q-field--dense .q-field__native { min-height: 34px; padding-top: 3px; padding-bottom: 3px; font-size: 13px; }
+    .settings-number { width: 176px; max-width: 100%; }
+    .settings-form .q-btn { min-height: 30px; border-radius: var(--control-radius); font-size: 12px; }
+    .settings-form .q-btn-group { width: fit-content; max-width: 100%; padding: 2px; gap: 2px;
+        border: 1px solid var(--border-color); border-radius: var(--control-radius); background: var(--bg-panel); box-shadow: none; }
+    .settings-form .q-btn-group .q-btn { min-height: 28px; padding: 4px 10px; border-radius: 3px; font-size: 13px; }
+    .settings-form .q-btn-group .q-btn.bg-primary { background: var(--bg-hover) !important; color: var(--text-primary) !important; font-weight: 600; }
+    .settings-provider { flex-wrap: wrap; }
+    .settings-language { max-width: 280px; }
+    .settings-field-actions { width: 100%; padding-left: calc(var(--settings-label-width) + 24px); gap: 6px; margin: 4px 0 8px; }
+    .settings-connection-test { width: 100%; align-items: center; flex-wrap: nowrap; gap: 10px; padding: 18px 0; }
+    .settings-advanced { margin-top: 12px; border-top: 1px solid var(--border-color); }
+    .settings-advanced > .q-expansion-item__container > .q-item { min-height: 40px; padding: 8px 0; font-size: 13px; color: var(--text-secondary); }
+    .settings-advanced .q-item__section--avatar { min-width: 28px; }
+    .settings-advanced .q-item__section--avatar .q-icon { font-size: 18px; }
+    .settings-privacy-note { padding: 12px 0 0; line-height: 1.6; }
+    .settings-path { overflow-wrap: anywhere; user-select: text; }
+    .settings-effect-note { flex-shrink: 0; width: 100%; padding: 10px 20px; font-size: 12px; line-height: 1.65;
+        color: var(--text-secondary); background: var(--bg-panel); border-bottom: 1px solid var(--border-color); white-space: pre-line; }
+    .settings-save-bar { flex-shrink: 0; min-height: 62px; padding: 12px 20px; background: var(--bg-panel);
+        border-top: 1px solid var(--border-color); }
+    .settings-save-bar .q-btn { border-radius: var(--control-radius); font-size: 12px; }
+    .results-splitter.tool-full-width > .q-splitter__before,
+    .results-splitter.tool-full-width > .q-splitter__separator { display: none; }
+    .results-splitter.tool-full-width > .q-splitter__after { width: 100%; }
+    @container (max-width: 650px) {
+        .settings-form { padding: 20px 18px 28px; }
+        .setting-row { flex-direction: column; gap: 9px; }
+        .setting-label { width: 100%; padding-top: 0; }
+        .setting-control { width: 100%; flex: auto; }
+        .settings-field-actions { padding-left: 0; }
+    }
+    @media (pointer: coarse) {
+        .settings-nav-item.q-btn, .settings-workspace .q-btn { min-height: 44px; }
+    }
     .knowledge-title { font-size: 26px; font-weight: 600; line-height: 1.4; }
     .knowledge-metadata { border-bottom: 1px solid var(--border-color); padding-bottom: 12px; }
     .knowledge-links { border-top: 1px solid var(--border-color); }
@@ -692,16 +753,9 @@ def init_theme(dark_mode, theme: str):
         dark_mode: NiceGUI dark_mode 对象
         theme: 主题名称 ('light', 'dark', 'pink')
     """
-    if theme == "dark":
-        dark_mode.enable()
-    elif theme == "pink":
-        dark_mode.disable()
-        ui.colors(primary=PINK_PRIMARY)
-        # 用 ui.query 而非「延迟 100ms 跑 JS」：query 的 class 随首帧一起下发，
-        # 否则页面会先以默认蓝色强调色渲染约 100ms 再突变成粉色。
-        ui.query("body").classes("theme-pink")
-    else:  # light
-        dark_mode.disable()
+    # 在页面初始化时注册主题控制元素，不能等进入可刷新的设置页后才创建。
+    # 共用切换入口，body 的主题 class 也会随首帧下发。
+    apply_theme(dark_mode, theme)
 
 
 def apply_theme(dark_mode, theme: str):

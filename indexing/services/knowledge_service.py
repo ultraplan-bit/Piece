@@ -222,8 +222,15 @@ def apply(data, *, actor="internal"):
                 raise _locate(exc, "relations", index, item) from None
             if existing and (not updating or existing["id"] != item.id):
                 if updating or any(existing[field] != values[field] for field in RELATION_FIELDS):
-                    raise BusinessError("KNOWLEDGE_CONFLICT", "相同关系与适用条件已存在且内容不同，请读取后显式修订",
-                                        data={**_locator("relations", index, item), "id": existing["id"]})
+                    # 冲突回执带上已有关系的可读摘要和版本，调用方可直接决定是复用还是修订，不必再读一次。
+                    titles = dict(cursor.execute("SELECT id,title FROM knowledge_objects WHERE id IN (?,?)",
+                                                 (existing["source_id"], existing["target_id"])).fetchall())
+                    summary = {key: existing[key] for key in ("id", "revision", *RELATION_FIELDS)}
+                    summary["display"] = _relation_display(existing, titles)
+                    raise BusinessError("KNOWLEDGE_CONFLICT",
+                                        f"相同关系与适用条件已存在且内容不同（{summary['display']}，revision {existing['revision']}），"
+                                        "请读取后显式修订",
+                                        data={**_locator("relations", index, item), "id": existing["id"], "existing": summary})
                 report("relations", dict(existing), "reused", item.ref, submitted=item)
                 continue
             values["revision"] = before["revision"] + 1 if before else 1
@@ -308,18 +315,27 @@ def _relation_display(relation, titles):
     return f"{source} —{relation['predicate']}{end} {target}"
 
 
+def _detect_kind(cursor, record_id):
+    """按 UUID 在三张表中探测记录类型；全部缺失时报 NOT_FOUND，不猜。"""
+    for kind, table in TABLES.items():
+        if cursor.execute(f"SELECT 1 FROM {table} WHERE id=?", (record_id,)).fetchone():
+            return kind
+    raise BusinessError("NOT_FOUND", f"知识记录不存在：{record_id}", data={"id": record_id})
+
+
 def get_record(**kwargs):
     query = _validate(models.GetInput, kwargs)
     with get_db_cursor() as cursor:
         cursor.execute("BEGIN")
-        item = _record(cursor, query.kind, query.id)
-        if query.kind == "evidence":
+        kind = query.kind or _detect_kind(cursor, query.id)
+        item = _record(cursor, kind, query.id)
+        if kind == "evidence":
             item = _evidence_states(cursor, [item])[0]
-        result = {"library_id": _library_id(cursor), "kind": query.kind, "record": item}
-        if query.kind in ("object", "relation"):
-            result["evidence"] = _evidence_page(cursor, query.kind, query.id, query.limit, query.offset)
+        result = {"library_id": _library_id(cursor), "kind": kind, "record": item}
+        if kind in ("object", "relation"):
+            result["evidence"] = _evidence_page(cursor, kind, query.id, query.limit, query.offset)
             result["has_evidence"] = result["evidence"]["total"] > 0
-        if query.kind == "relation":
+        if kind == "relation":
             result["record"]["symmetric"] = item["predicate"] in SYMMETRIC
             titles = dict(cursor.execute("SELECT id,title FROM knowledge_objects WHERE id IN (?,?)",
                                          (item["source_id"], item["target_id"])).fetchall())

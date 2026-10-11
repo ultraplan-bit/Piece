@@ -28,7 +28,7 @@ def render_app_header(current_view: dict, switch_view: Callable, callbacks: dict
         with ui.button(t("sidebar.tools"), icon="tune", color=None).props("flat dense no-caps").classes("app-tools theme-text-secondary"):
             with ui.menu().props("auto-close"):
                 for group, items in (
-                    ("tools_integrations", (("mcp_config", "settings_input_component"), ("skills", "extension"))),
+                    ("tools_integrations", (("zotero", "local_library"), ("mcp_config", "settings_input_component"), ("skills", "extension"))),
                     ("tools_diagnostics", (("recall_test", "manage_search"), ("logs", "description"))),
                 ):
                     ui.label(t(f"sidebar.{group}")).classes("px-4 pt-2 pb-1 text-xs theme-text-muted")

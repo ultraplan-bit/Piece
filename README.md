@@ -77,12 +77,12 @@
 
 ### 3. 导入资料
 
-在「文件库」页面点击 **+ → 上传文件**，选择要导入的文件，等待处理完成，就能看到知识卡片。支持 **PDF、Word、PPT、Excel（`.xlsx`）、Markdown、TXT、HTML 和 EPUB**。
+在「资料库」页面点击 **+ → 上传文件**，选择要导入的文件，等待处理完成，就能看到知识卡片。支持 **PDF、Word、PPT、Excel（`.xlsx`）、Markdown、TXT、HTML 和 EPUB**。
 
 - **网页和电子书**：网页在浏览器里「另存为」HTML 后导入，Piece 会只取正文区，并把标题、作者、来源地址记为文件属性；用 SingleFile 一类扩展保存的单文件网页还能保留图片。EPUB 电子书直接导入，按章节成卡，书名、作者等信息一并带入；带 DRM 的电子书无法导入。
 - **扫描件、复杂公式或表格**：在「设置 → PDF 解析」中配置 PaddleOCR 服务、MinerU 或自定义多模态模型，按页面提示填写地址、密钥并测试连接。普通文字版 PDF 可以先直接导入。
 - **Word / PPT**：建议安装 Microsoft Office 或 LibreOffice；`.doc`、`.ppt`、`.rtf`、`.odt`、`.odp` 等格式必须有可用的转换工具。
-- **已有的 Obsidian 笔记或 Zotero 文献**：同一菜单里的 **导入本机目录** 可整库导入 Obsidian vault（自动跳过 `.obsidian`、模板和纯链接的索引页）；**从 Zotero 导入** 会把带 PDF 的条目连同作者、年份、DOI 等属性一并导入，需要 Zotero 7 或更新版本正在运行，并在 Zotero 的「设置 → 高级」中勾选「允许本机其他应用程序与 Zotero 通信」。两者都是一次性复制，不会改动原库。
+- **已有的 Obsidian 笔记或 Zotero 文献**：同一菜单里的 **导入本机目录** 可整库导入 Obsidian vault（自动跳过 `.obsidian`、模板和纯链接的索引页）；**从 Zotero 导入** 打开文献工作区，先查询、选择条目，再预览并勾选要导入的 PDF。作者、年份、DOI 与附件来源一并保留，需要 Zotero 7+ 运行并开启「设置 → 高级 → 允许本机其他应用程序与 Zotero 通信」。导入是一次性复制，不改动原库。
 
 导入后可以打开「召回测试」，输入一个相关问题，看看能否找到想要的内容。
 
@@ -94,14 +94,17 @@ MCP 可以理解为 AI 访问知识库的连接方式。打开 Piece 的 **MCP �
 
 - **只想查资料**：选择检索服务 `piece-kb`。
 - **还想让 AI 写笔记、改卡片**：再启用索引服务 `piece-index`。
+- **查阅或整理 Zotero 文献**：单独选择 `piece-zotero`；先在「设置 → Zotero 文献库」启用它并重启带 MCP 的 Piece。默认端口为 8688，密钥独立。
 
 不要分享配置里的访问密钥。修改密钥或端口后，需完全退出并重启 Piece，再更新客户端配置。
 
 **方式二：Skill 导出**
 
-如果你的 AI 能运行本机命令行，也可以在 **Skill 导出** 页面导出并安装工作流：`piece-search` 用于查资料，`piece-index` 用于导入和整理资料，`piece-wiki` 用于编译和维护 Markdown 页面，`piece-graph` 用于维护图实体、语义关系和证据。移动程序或更换数据目录后，请重新导出。
+如果你的 AI 能运行本机命令行，也可以在 **Skill 导出** 页面导出并安装工作流：`piece-search` 用于查资料，`piece-index` 用于导入和整理资料，`piece-wiki` 用于编译和维护 Markdown 页面，`piece-graph` 用于维护图实体、语义关系和证据，`piece-zotero` 用于 Zotero 文献查阅与协作。移动程序或更换数据目录后，请重新导出。
 
 **Wiki** 提供页面搜索、正文、引用、页面链接与历史；**知识图谱** 提供实体、关系表格、有界邻域和证据核查。分别使用 `piece wiki`、`piece graph` CLI，也可通过现有两个 MCP 服务读写。两边身份与生命周期独立，页面链接不是语义关系，同名不会自动关联，搜索不会跨功能合并。
+
+MCP 写入优先使用索引服务里的意图工具 `knowledge_object_add` / `knowledge_object_update` / `knowledge_relation_add` / `knowledge_relation_update` 和 `wiki_page_add` / `wiki_page_update`：参数扁平，证据用 `CHUNK_ID:行号` 或 `CHUNK_ID:grep=子串` 内联，`request_key` 自动生成并回传。它们与 CLI 的 `graph object add`、`wiki page add` 共用同一套组装逻辑；一次提交多条记录或需要字段级控制时再用 `knowledge_apply` / `wiki_apply` 批次工具。新建关系撞上同端点、同谓词的已有关系时，回执带已有关系的摘要和版本，并直接给出 `knowledge_relation_update` 的调用参数。检索服务的 `knowledge-get` / `wiki-get` 只给 UUID 即可，`kind` 省略时按 UUID 探测。
 
 Wiki 正文及元数据保存在配置 `data_path` 下的 `wiki/` Markdown 文件中；SQLite 只保留可重建的页面索引和独立审计。页面内链使用 `[标题](piece://wiki/页面UUID)`，改标题或文件名不改变身份。外部编辑后显式运行 `piece wiki rebuild-index` 刷新索引，不会重写 MD 或调用模型。
 
@@ -111,26 +114,29 @@ Wiki 正文及元数据保存在配置 `data_path` 下的 `wiki/` Markdown 文�
 
 用 `--out` 可把切出的引文直接落成可提交的证据文件；匹配不唯一时先用 `--lines` 收窄，不猜第一条。
 
-知识页的写入用意图命令，默认读回，并落一份本地请求文件：
+知识页的写入用意图命令，一条命令完成，默认读回，不写任何临时文件：
 
 ```bash
-piece chunk extract CHUNK_ID --lines 2-3 --out evidence.json
 piece wiki page add --kind concept --title "增量维护" \
   --summary "只修改明确变化的内容" \
-  --evidence-file evidence.json --request-file object-request.json
+  --evidence CHUNK_ID:2-3
 ```
 
-页面更新用 `wiki page update UUID --expected-revision N --expected-content-hash HASH`，哈希从最新读回取得，不能只改版本号绕过外部修改冲突。图实体用 `graph object add/update`，关系用 `graph relation add/update`；每次新操作使用新的请求文件，已有记录仅按各自 UUID 定位。
+`--evidence CHUNK_ID:LOCATOR` 可重复，LOCATOR 为行号 `N` / `N-M`、`grep=子串` 或 `re=正则`；服务按定位切出精确引文并带回哈希，匹配不唯一就拒绝提交。`--stance` 给一次作用于全部证据，给多次按顺序逐条对应。仍可用两段式 `chunk extract --out evidence.json` 再 `--evidence-file evidence.json`。
+
+页面更新用 `wiki page update UUID --expected-revision N --expected-content-hash HASH`，哈希从最新读回取得，不能只改版本号绕过外部修改冲突。图实体用 `graph object add/update`，关系用 `graph relation add/update`；已有记录仅按各自 UUID 定位。
 
 图谱批次在 SQLite 事务内提交；Wiki 批次按页面写入，可能部分成功。检查 `partial`、`errors` 和 `index_status`；文件已保存但索引失败时保留文件并显式重建索引，不重新生成或覆盖正文。
 
-`--request-file` 保存本次操作的完整正文、证据和自动生成的请求键；文件已存在时只有目标与内容都相同才允许复用，绝不覆盖。`--dry-run` 只预检但同样写这份文件，确认后可原样正式提交：
+每次写入 CLI 自动生成请求键并回传 `data.request_key`，服务端按键保存回执。需要本地留档时加 `--save-request`（自动存到数据目录 `requests/`）或 `--request-file 路径`；文件已存在时只有目标与内容都相同才允许复用，绝不覆盖。`--dry-run` 只预检，确认后去掉它原样重跑即可提交。多条记录的批次直接经 stdin 传入：
 
 ```bash
-piece wiki apply --input object-request.json --read-back
+piece wiki apply --input - --read-back <<'JSON'
+{"reason": "...", "pages": [...], "evidence": [...]}
+JSON
 ```
 
-请求文件是本地敏感材料，删除在线记录不会删除它。写入返回的 `read_back` 最多含 20 条受影响记录；`READ_BACK_INCOMPLETE` 表示数据已提交但读回不完整或状态已变，不要重提。可恢复的错误附带 `next_command` / `next_argv`，用于在同一实例上继续只读核查；提交结果未知时先用 `wiki request --input object-request.json --read-back` 查询，无需手抄请求键。
+请求文件是本地敏感材料，删除在线记录不会删除它。写入返回的 `read_back` 最多含 20 条受影响记录；`READ_BACK_INCOMPLETE` 表示数据已提交但读回不完整或状态已变，不要重提。可恢复的错误附带 `next_command` / `next_argv`，用于在同一实例上继续只读核查；提交结果未知时先用 `wiki request KEY --read-back` 查询（有请求文件时 `--input 文件` 由 CLI 取键）。
 
 AI 客户端自己取得的网页、公众号文章、视频字幕等内容也能直接存进知识库：MCP 用索引服务里的 `import_markdown` 工具，Skill 用 `piece file import-markdown` 从 stdin 或文件传入正文。Piece 会保留原件、自动切片，并把标题和来源地址记为文件属性。
 
@@ -139,6 +145,26 @@ AI 客户端自己取得的网页、公众号文章、视频字幕等内容也�
 > 帮我找出资料中关于这个问题的说明，并标明出处。
 
 Piece 负责提供资料，聊天和回答仍在你常用的 AI 客户端中进行。
+
+### Zotero 协作
+
+可直接查询本机个人 Zotero 库，读取书目、笔记、PDF 批注和可用全文，不要求先导入 Piece，也不要求条目有 PDF。需要深入核对时，再选择附件导入；相同内容复用已有文件，并保留多个 Zotero 来源。
+
+```bash
+piece zotero status --json
+piece zotero search "关键词" --collection-key COLLECTION_KEY --limit 20 --json
+piece zotero children ITEM_KEY --item-type attachment --json
+piece zotero preview --attachment-key ATTACHMENT_KEY --collection-mode none --server-id SERVER_ID --json
+piece zotero import --attachment-key ATTACHMENT_KEY --collection-mode none --server-id SERVER_ID --wait --json
+```
+
+用实际返回的 key 和 `server_id` 替换占位符；旧版没有实例标识时省略 `--server-id`。搜索默认只匹配标题、作者和年份，`--scope everything` 另搜摘要、笔记、批注和已索引全文；集合筛选不包含子集合；全文接口返回索引覆盖信息，不能替代 PDF 原页。
+
+独立 MCP 服务 **`piece-zotero`** 提供 Zotero 查阅、`zotero_import`、授权、变更预览与执行；原有 `piece-kb` 和 `piece-index` 不注册 Zotero 工具。MCP 导入每次最多 50 个附件，必须明确范围，并可在同一服务用 `zotero_check_tasks` 查询索引终态。通过 `piece mcp-config --service zotero --include-secrets --json` 取得客户端配置，注意保管返回的密钥。独立 **`piece-zotero` Skill** 可在 Skill 导出页选取，也可用 `piece skill export piece-zotero --dir 目标目录` 导出。
+
+前端入口是 **工具 → Zotero 文献库**（资料库的“从 Zotero 导入”也进入这里）：分页查询和查阅条目、笔记、批注及已有全文，导出引用，查看 Piece 来源关联；选定文献后预览并勾选具体附件导入。导入结果区区分受理、重复与失败，可刷新索引状态。写入前先在 **设置 → Zotero 文献库** 开启允许修改，再预览具体差异、请求授权并确认执行；待核对结果保留原计划，不重新创建。
+
+修改 Zotero 需要 **10.0.5+**，且用户显式启用配置 `zotero_write_enabled`（默认 `false`），再在 Zotero 弹窗授权。先预览具体字段、标签、集合或笔记变更，确认后按 `plan_id` 执行；key 仅留在进程内存，计划有效 15 分钟。不会自动删除文献、覆盖附件、同步全库或保存回答。详见 [Zotero CLI 操作说明](skills/piece-zotero/SKILL.md)。不要向外转发 Zotero 本机端口。
 
 ## 用顺手的几个小技巧
 

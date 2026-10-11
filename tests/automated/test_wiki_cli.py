@@ -252,6 +252,23 @@ def test_relation_update_partial_and_id_owner(endpoint, capsys, tmp_path):
     assert payload["evidence"][0]["stance"] == "contradicts"
 
 
+def test_relation_add_conflict_offers_update_of_existing_relation(endpoint, capsys, tmp_path):
+    """同端点/谓词/条件的关系已存在且内容不同：恢复命令指向对已有关系的 relation update，不是换条件再建。"""
+    existing = {"id": RELATION_UUID, "revision": 3, "source_id": SOURCE_UUID, "predicate": "depends_on",
+                "target_id": TARGET_UUID, "description": "旧说明", "qualifier": "", "basis": "explicit",
+                "status": "active", "display": "甲 —depends_on→ 乙"}
+    endpoint.routes["/api/v1/knowledge/apply"] = lambda *args: failure(
+        "KNOWLEDGE_CONFLICT", {"section": "relations", "index": 0, "ref": "item", "id": RELATION_UUID, "existing": existing})
+    code, result, _ = invoke(endpoint, capsys, "graph", "relation", "add", "--source", SOURCE_UUID,
+                             "--predicate", "depends_on", "--target", TARGET_UUID, "--description", "新说明",
+                             "--basis", "inference", "--request-file", str(tmp_path / "request.json"))
+    assert code == 1 and result["error"]["code"] == "KNOWLEDGE_CONFLICT"
+    assert result["data"]["existing"] == existing
+    assert result["data"]["next_argv"][-7:-1] == ["graph", "relation", "update", RELATION_UUID, "--expected-revision", "3"]
+    assert "existing" in result["data"]["recovery_hint"]
+    assert sum(call["path"].endswith("/apply") for call in endpoint.calls) == 1
+
+
 @pytest.mark.parametrize("stance", ["supports", "contradicts", "context"])
 def test_stance_accepts_three_kinds(endpoint, capsys, tmp_path, stance):
     rf = tmp_path / f"request-{stance}.json"
@@ -269,11 +286,149 @@ def test_stance_rejects_unknown_value(endpoint, capsys, tmp_path):
     assert code == 2 and _apply_calls(endpoint) == []
 
 
-def test_high_level_write_requires_request_file(endpoint, capsys, tmp_path):
+def test_high_level_write_without_request_file_submits_and_returns_key(endpoint, capsys, tmp_path):
+    """不传 --request-file 也能提交：CLI 自生成键并回传，恢复走服务端请求日志。"""
+    endpoint.routes["/api/v1/knowledge/apply"] = _fake_apply
+    endpoint.routes["/api/v1/knowledge/get"] = _get_route()
     code, result, _ = invoke(endpoint, capsys, "graph", "object", "add", "--kind", "entity",
                              "--title", "实体", "--evidence-file", str(_evidence_file(tmp_path)),
-                             "--reason", "缺少请求文件")
+                             "--reason", "不落盘")
+    assert code == 0 and result["success"]
+    key = _apply_calls(endpoint)[0]["payload"]["request_key"]
+    assert key and result["data"]["request_key"] == key
+    assert "request_file" not in result["data"], "未要求保存时不应报告文件路径"
+    assert not (endpoint.config / "requests").exists(), "未要求保存时不得自动落盘"
+
+
+def test_lost_response_without_request_file_recovers_by_key(endpoint, capsys, tmp_path):
+    import socket
+
+    def disconnect(handler, payload):
+        handler.connection.shutdown(socket.SHUT_RDWR)
+        handler.connection.close()
+
+    endpoint.routes["/api/v1/knowledge/apply"] = disconnect
+    code, result, _ = invoke(endpoint, capsys, "graph", "object", "add", "--kind", "concept",
+                             "--title", "概念", "--evidence-file", str(_evidence_file(tmp_path)), "--reason", "丢响应")
+    assert code == 3 and result["data"]["outcome_unknown"]
+    key = result["data"]["request_key"]
+    argv = result["data"]["next_argv"]
+    assert "graph" in argv and "request" in argv and key in argv and "--read-back" in argv
+    assert "--input" not in argv, "没有请求文件时直接按键恢复"
+
+
+def test_save_request_auto_names_file_under_data_dir(endpoint, capsys, tmp_path):
+    endpoint.routes["/api/v1/knowledge/apply"] = _fake_apply
+    endpoint.routes["/api/v1/knowledge/get"] = _get_route()
+    code, result, _ = invoke(endpoint, capsys, "graph", "object", "add", "--kind", "entity",
+                             "--title", "实体", "--evidence-file", str(_evidence_file(tmp_path)),
+                             "--save-request", "--reason", "自动保存")
+    assert code == 0 and result["success"]
+    saved = Path(result["data"]["request_file"])
+    assert saved.exists() and saved.parent == (endpoint.config / "requests").resolve()
+    assert saved.name.startswith("graph-object-add-")
+    wrapper = json.loads(saved.read_text(encoding="utf-8"))
+    assert wrapper["request"]["request_key"] == _apply_calls(endpoint)[0]["payload"]["request_key"]
+
+
+def test_save_request_and_request_file_are_mutually_exclusive(endpoint, capsys, tmp_path):
+    code, result, _ = invoke(endpoint, capsys, "graph", "object", "add", "--kind", "entity", "--title", "实体",
+                             "--request-file", str(tmp_path / "r.json"), "--save-request")
     assert code == 2 and _apply_calls(endpoint) == []
+
+
+# ---------------------------------------------------------------------------
+# 2b. 内联证据 --evidence CHUNK_ID:LOCATOR 与逐条 --stance
+# ---------------------------------------------------------------------------
+
+def test_inline_evidence_resolves_via_extract_without_touching_disk(endpoint, capsys, tmp_path):
+    endpoint.routes["/api/v1/chunk/extract"] = _extract_route(_one_match())
+    endpoint.routes["/api/v1/knowledge/apply"] = _fake_apply
+    endpoint.routes["/api/v1/knowledge/get"] = _get_route()
+    code, result, _ = invoke(endpoint, capsys, "graph", "object", "add", "--kind", "concept", "--title", "概念",
+                             "--evidence", "9:2-3", "--reason", "内联证据")
+    assert code == 0 and result["success"]
+    extract = next(call for call in endpoint.calls if call["path"] == "/api/v1/chunk/extract")
+    assert extract["payload"] == {"chunk_id": 9, "lines": "2-3", "max_matches": 2}
+    payload = _apply_calls(endpoint)[0]["payload"]
+    assert payload["evidence"] == [{**EVIDENCE, "object": {"ref": "item"}, "stance": "supports"}]
+    assert [p.name for p in tmp_path.iterdir()] == [endpoint.config.name], "内联证据不得写任何文件"
+
+
+@pytest.mark.parametrize("spec,expected", [
+    ("9:grep=关键句", {"chunk_id": 9, "grep": "关键句", "regex": False, "context": 0, "max_matches": 2}),
+    ("9:re=V_\\{DD\\}", {"chunk_id": 9, "grep": "V_\\{DD\\}", "regex": True, "context": 0, "max_matches": 2}),
+    ("9:12", {"chunk_id": 9, "lines": "12", "max_matches": 2}),
+])
+def test_inline_evidence_locator_forms(endpoint, capsys, spec, expected):
+    endpoint.routes["/api/v1/chunk/extract"] = _extract_route(_one_match())
+    endpoint.routes["/api/v1/knowledge/apply"] = _fake_apply
+    endpoint.routes["/api/v1/knowledge/get"] = _get_route()
+    invoke(endpoint, capsys, "graph", "object", "add", "--kind", "concept", "--title", "概念", "--evidence", spec)
+    extract = next(call for call in endpoint.calls if call["path"] == "/api/v1/chunk/extract")
+    assert extract["payload"] == expected
+
+
+@pytest.mark.parametrize("spec", ["9", "abc:1-2", "0:1", "9:", "9:grep=", ":1-2"])
+def test_inline_evidence_rejects_malformed_spec_before_any_request(endpoint, capsys, spec):
+    code, result, _ = invoke(endpoint, capsys, "graph", "object", "add", "--kind", "concept", "--title", "概念",
+                             "--evidence", spec)
+    assert code == 2 and result["error"]["code"] == "INVALID_ARGUMENT"
+    assert not any(call["path"] in {"/api/v1/chunk/extract", "/api/v1/knowledge/apply"} for call in endpoint.calls)
+
+
+@pytest.mark.parametrize("matches,truncated", [([], False), (_one_match() + _one_match(), False), (_one_match(), True)])
+def test_inline_evidence_refuses_ambiguous_match_and_offers_chunk_get(endpoint, capsys, matches, truncated):
+    endpoint.routes["/api/v1/chunk/extract"] = _extract_route(matches, truncated=truncated)
+    code, result, _ = invoke(endpoint, capsys, "graph", "object", "add", "--kind", "concept", "--title", "概念",
+                             "--evidence", "9:grep=关键句")
+    assert code != 0 and result["error"]["code"] == "EVIDENCE_SELECTION_REQUIRED"
+    assert result["data"]["next_argv"][-4:] == ["chunk", "get", "9", "--json"]
+    assert _apply_calls(endpoint) == [], "匹配不唯一时不得提交"
+
+
+def test_inline_and_file_evidence_combine_in_order(endpoint, capsys, tmp_path):
+    inline = {**EVIDENCE, "source_chunk_id": 10, "quote": "内联引文"}
+    endpoint.routes["/api/v1/chunk/extract"] = _extract_route(_one_match(inline))
+    endpoint.routes["/api/v1/knowledge/apply"] = _fake_apply
+    endpoint.routes["/api/v1/knowledge/get"] = _get_route()
+    invoke(endpoint, capsys, "graph", "object", "add", "--kind", "concept", "--title", "概念",
+           "--evidence-file", str(_evidence_file(tmp_path)), "--evidence", "10:1")
+    evidence = _apply_calls(endpoint)[0]["payload"]["evidence"]
+    assert [item["quote"] for item in evidence] == [EVIDENCE["quote"], "内联引文"], "文件证据在前，内联证据在后"
+
+
+def test_per_evidence_stance_maps_in_order(endpoint, capsys, tmp_path):
+    ev1 = _evidence_file(tmp_path, name="e1.json")
+    ev2 = _evidence_file(tmp_path, {**EVIDENCE, "quote": "反方引文"}, name="e2.json")
+    endpoint.routes["/api/v1/knowledge/apply"] = _fake_apply
+    endpoint.routes["/api/v1/knowledge/get"] = _get_route()
+    invoke(endpoint, capsys, "graph", "object", "add", "--kind", "concept", "--title", "概念",
+           "--evidence-file", str(ev1), "--evidence-file", str(ev2),
+           "--stance", "supports", "--stance", "contradicts")
+    stances = [item["stance"] for item in _apply_calls(endpoint)[0]["payload"]["evidence"]]
+    assert stances == ["supports", "contradicts"]
+
+
+def test_single_stance_still_applies_to_all_evidence(endpoint, capsys, tmp_path):
+    ev1 = _evidence_file(tmp_path, name="e1.json")
+    ev2 = _evidence_file(tmp_path, {**EVIDENCE, "quote": "另一条"}, name="e2.json")
+    endpoint.routes["/api/v1/knowledge/apply"] = _fake_apply
+    endpoint.routes["/api/v1/knowledge/get"] = _get_route()
+    invoke(endpoint, capsys, "graph", "object", "add", "--kind", "concept", "--title", "概念",
+           "--evidence-file", str(ev1), "--evidence-file", str(ev2), "--stance", "context")
+    assert [item["stance"] for item in _apply_calls(endpoint)[0]["payload"]["evidence"]] == ["context", "context"]
+
+
+def test_stance_count_mismatch_is_rejected(endpoint, capsys, tmp_path):
+    ev1 = _evidence_file(tmp_path, name="e1.json")
+    ev2 = _evidence_file(tmp_path, {**EVIDENCE, "quote": "另一条"}, name="e2.json")
+    ev3 = _evidence_file(tmp_path, {**EVIDENCE, "quote": "第三条"}, name="e3.json")
+    code, result, _ = invoke(endpoint, capsys, "graph", "object", "add", "--kind", "concept", "--title", "概念",
+                             "--evidence-file", str(ev1), "--evidence-file", str(ev2), "--evidence-file", str(ev3),
+                             "--stance", "supports", "--stance", "contradicts")
+    assert code == 2 and result["error"]["code"] == "INVALID_ARGUMENT"
+    assert _apply_calls(endpoint) == []
 
 
 # ---------------------------------------------------------------------------

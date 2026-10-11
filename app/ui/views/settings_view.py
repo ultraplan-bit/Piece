@@ -19,7 +19,8 @@ MINERU_TOKEN_URL = "https://mineru.net/apiManage/docs"
 SETTING_ITEMS = (
     ("appearance", "settings.appearance"), ("embedding", "settings.embedding"),
     ("ocr", "settings_ocr.title"), ("office", "settings_office.title"),
-    ("mcp", "settings.mcp"), ("storage", "settings.storage"), ("webdav", "settings.webdav"),
+    ("mcp", "settings.mcp"), ("zotero", "zotero.title"),
+    ("storage", "settings.storage"), ("webdav", "settings.webdav"),
 )
 
 
@@ -163,6 +164,9 @@ def render_settings_right(selected_setting: dict, settings_form: dict, settings_
             if group == "mcp" and callbacks.get("open_mcp_config"):
                 ui.button(t("settings_mcp.open_config"), icon="arrow_outward", color=None,
                           on_click=callbacks["open_mcp_config"]).props("flat dense no-caps")
+            if group == "zotero" and callbacks.get("open_zotero"):
+                ui.button(t("zotero.open_library"), icon="arrow_outward", color=None,
+                          on_click=callbacks["open_zotero"]).props("flat dense no-caps")
             if group == "webdav" and callbacks.get("open_cloud_sync"):
                 ui.button(t("settings_webdav.open_sync"), icon="arrow_outward", color=None,
                           on_click=callbacks["open_cloud_sync"]).props("flat dense no-caps")
@@ -174,6 +178,7 @@ def render_settings_right(selected_setting: dict, settings_form: dict, settings_
                     "appearance": lambda: _render_appearance_settings(settings_form, settings_handlers, apply_theme_callback),
                     "embedding": lambda: _render_embedding_settings(settings_form, settings_handlers),
                     "mcp": lambda: _render_mcp_settings(settings_form, settings_handlers),
+                    "zotero": lambda: _render_zotero_settings(settings_form, settings_handlers),
                     "storage": lambda: _render_storage_settings(settings_form, settings_handlers),
                     "webdav": lambda: _render_webdav_settings(settings_form, settings_handlers),
                     "ocr": lambda: _render_ocr_settings(settings_form, settings_handlers),
@@ -194,6 +199,10 @@ def render_settings_right(selected_setting: dict, settings_form: dict, settings_
             changed = settings_handlers.changed_fields(group)
             if group == "mcp" and changed & {"mcp_port", "mcp_api_key", "mcp_index_api_key", "mcp_auth_enabled"}:
                 confirm_dialog(t("settings_mcp.apply_title"), t("settings_mcp.apply_message"),
+                               lambda: settings_handlers.save_settings_form(group, notify=False),
+                               confirm_text=t("settings.save_group"))
+            elif group == "zotero":
+                confirm_dialog(t("zotero.settings_confirm"), t("zotero.settings_confirm_text"),
                                lambda: settings_handlers.save_settings_form(group, notify=False),
                                confirm_text=t("settings.save_group"))
             elif group == "storage":
@@ -310,13 +319,23 @@ def _render_mcp_settings(form, handlers):
         _number_field(form, "mcp_max_images_per_call", t("settings_mcp.max_images"), 1, 20)
 
 
+def _render_zotero_settings(form, handlers):
+    _section(t("zotero.local_title"), t("zotero.local_hint"))
+    _switch_field(form, "zotero_write_enabled", t("zotero.enable_write"), hint=t("zotero.write_hint"))
+    _section(t("zotero.mcp_title"), t("zotero.mcp_hint"))
+    _switch_field(form, "mcp_zotero_enabled", t("zotero.enable_mcp"), hint=t("zotero.mcp_restart"))
+    _number_field(form, "mcp_zotero_port", t("zotero.mcp_port"), 1024, 65535)
+    _render_mcp_api_key(form, handlers, "zotero")
+    _switch_field(form, "mcp_zotero_auth_enabled", t("zotero.mcp_auth"), hint=t("zotero.mcp_auth_hint"))
+
+
 async def _copy_text(text, success):
     copied = await write_clipboard(text)
     ui.notify(success if copied else t("settings.copy_failed"), type="positive" if copied else "warning")
 
 
 def _render_mcp_api_key(form, handlers, service):
-    key = {"retrieval": "mcp_api_key", "index": "mcp_index_api_key"}[service]
+    key = {"retrieval": "mcp_api_key", "index": "mcp_index_api_key", "zotero": "mcp_zotero_api_key"}[service]
     field = _text_field(form, key, t(f"settings_mcp.{service}_api_key"), password=True, readonly=True)
     with ui.row().classes("settings-field-actions"):
         ui.button(t("settings_mcp.copy_key"), icon="content_copy", color=None,

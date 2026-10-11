@@ -4,8 +4,6 @@ import asyncio
 
 import pytest
 
-from indexing.services.errors import BusinessError
-
 
 def _find(container, kind):
     """按文档顺序收集指定类型的元素。"""
@@ -107,37 +105,14 @@ def test_folder_dialog_rejects_empty_path(page):
     assert calls == []
 
 
-def test_zotero_dialog_shows_enable_hint_then_previews(page):
-    from app.ui import import_dialogs
-    state = {"enabled": False, "calls": []}
+def test_zotero_import_entry_opens_workbench_without_importing(page):
+    from app.ui.handlers.file_handlers import FileHandlers
 
-    def preview(keys, mode):
-        state["calls"].append((keys, mode))
-        if not state["enabled"]:
-            raise BusinessError("ZOTERO_DISABLED", "Zotero 拒绝了本机 API 访问")
-        return {"zotero": {"zotero_version": "10.0.2"}, "items_total": 3,
-                "collections": [{"key": "AAAA", "name": "顶层", "path": "顶层", "item_count": 2},
-                                {"key": "BBBB", "name": "子集", "path": "顶层/子集", "item_count": 1}],
-                "importable_count": 2, "skipped_count": 1,
-                "items": [{"filename": "Lin - 2024 - A.pdf"}, {"filename": "Wu - 2023 - B.pdf"}], "skipped": []}
+    calls = []
 
-    imported = []
-    dialog = import_dialogs.zotero_import_dialog(preview, lambda keys, mode: imported.append((keys, mode)))
-    _run(dialog.refresh_preview)
-    assert state["calls"] == [(None, "path")]
-    assert any("允许本机其他应用程序" in text for text in _labels(dialog))
-    assert not _find(dialog, "Checkbox")
+    async def open_zotero():
+        calls.append("open")
 
-    state["enabled"] = True
-    _run(_click(_buttons(dialog)["重试"]))
-    labels = _labels(dialog)
-    assert any("10.0.2" in text and "3" in text for text in labels)
-    assert any("Lin - 2024 - A.pdf" in text for text in labels)
-    checkboxes = _find(dialog, "Checkbox")
-    assert [c.text for c in checkboxes] == ["顶层  (2)", "顶层/子集  (1)"]
-    checkboxes[1].value = True
-    _find(dialog, "Select")[0].value = "top"
-    _run(_click(_buttons(dialog)["开始导入"]))
-    # 导入前按当前勾选重新预览一次，再把同样的范围交给导入回调
-    assert state["calls"][-1] == (["BBBB"], "top")
-    assert imported == [(["BBBB"], "top")]
+    handler = FileHandlers(state={}, ui_refs={"open_zotero": open_zotero})
+    _run(handler.handle_import_zotero)
+    assert calls == ["open"]

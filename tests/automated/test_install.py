@@ -108,13 +108,13 @@ def test_slim_install_lists_and_exports_skills(tmp_path, slim_venv):
     listing = _piece(slim_venv, "skill", "list", "--json")
     assert listing.code == 0, listing.stdout + listing.stderr
     assert [s["id"] for s in json.loads(listing.stdout)["data"]["skills"]] == [
-        "piece-graph", "piece-index", "piece-search", "piece-wiki",
+        "piece-graph", "piece-index", "piece-search", "piece-wiki", "piece-zotero",
     ]
 
     out_dir = tmp_path / "skills"
     exported = _piece(slim_venv, "skill", "export", "--dir", str(out_dir), "--json")
     assert exported.code == 0, exported.stdout + exported.stderr
-    for skill in ("piece-search", "piece-wiki", "piece-graph"):
+    for skill in ("piece-search", "piece-wiki", "piece-graph", "piece-zotero"):
         content = (out_dir / skill / "SKILL.md").read_text(encoding="utf-8")
         console = slim_venv / ("Scripts/piece.exe" if os.name == "nt" else "bin/piece")
         assert content.count(f'"{console.as_posix()}"') == 1

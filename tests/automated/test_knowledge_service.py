@@ -320,11 +320,16 @@ def test_relation_qualifier_variants_and_update_uniqueness(knowledge_base):
     knowledge.apply(_batch(relations=[{"id": r1, "expected_revision": 1, "description": "一改"}]))
     assert knowledge.get_record(kind="relation", id=r1)["record"]["description"] == "一改"
 
-    # 更新到与另一条相同的三元组与适用条件 → 冲突。
+    # 更新到与另一条相同的三元组与适用条件 → 冲突，回执带已有关系的可读摘要与版本。
     with pytest.raises(BusinessError) as exc:
         knowledge.apply(_batch(relations=[{"id": r1, "expected_revision": 2, "qualifier": "条件二"}]))
     assert exc.value.code == "KNOWLEDGE_CONFLICT"
     assert exc.value.data["id"] == r2
+    existing = exc.value.data["existing"]
+    assert existing["id"] == r2 and existing["revision"] == 1 and existing["qualifier"] == "条件二"
+    assert existing["description"] == "二" and existing["predicate"] == "related_to"
+    assert {existing["source_id"], existing["target_id"]} == {a, b} and "related_to" in existing["display"]
+    assert "revision 1" in str(exc.value)
 
 
 # --------------------------------------------------------------------------- #

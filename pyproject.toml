@@ -37,7 +37,7 @@ dependencies = [
 gui = [
     "nicegui==3.3.1",
 ]
-# 两个 MCP 服务及其 FastMCP 框架。
+# MCP 服务及其 FastMCP 框架。
 mcp = [
     "fastmcp==2.14.4",
 ]

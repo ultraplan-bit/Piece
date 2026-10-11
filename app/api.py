@@ -212,6 +212,19 @@ Names = Annotated[list[Annotated[str, Field(min_length=1, max_length=200)]], Fie
 Text = Annotated[str, Field(max_length=200000)]
 Key = Annotated[str, Field(min_length=1, max_length=180)] | None
 
+# Zotero 稳定对象键（条目/附件/集合 key）。显式范围必须非空，空列表在 schema 层
+# 就报错，避免把「空范围」静默当成「整库」。selectors 之间互斥由服务层校验；
+# 单次键列表上限与服务端 MAX_KEYS 一致（50）。
+ZoteroKey = Annotated[str, Field(min_length=1, max_length=180)]
+ZoteroKeys = Annotated[list[ZoteroKey], Field(min_length=1, max_length=50)]
+ZoteroCollectionKeys = Annotated[list[Annotated[str, Field(min_length=1, max_length=200)]], Field(min_length=1, max_length=50)]
+# Zotero-Server-ID 标识具体库实例，长度不固定，只做有界校验。
+ZoteroServerId = Annotated[str, Field(min_length=1, max_length=200)]
+# 全文接口的 limit 是字符预算，不受列表分页的 100 上限约束，上限与服务契约一致。
+ZoteroFulltextLimit = Annotated[int, Field(strict=True, ge=1, le=50000)]
+# 单次写入变更批次，上限与服务契约一致；逐项字段由服务层校验，未知字段服务会拒绝。
+ZoteroChanges = Annotated[list[dict[str, Any]], Field(min_length=1, max_length=50)]
+
 
 def create_api(runtime):
     from indexing.services import file_service as files, chunk_service as chunks, task_service as tasks
@@ -224,6 +237,7 @@ def create_api(runtime):
     from indexing import wiki_models as wm
     from retrieval.service import search
     from app.logging_config import get_log_buffer
+    from indexing.services import zotero_write_service
 
     app = FastAPI(title="Piece local API", version="1", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(LocalSecurity, runtime=runtime)
@@ -285,6 +299,11 @@ def create_api(runtime):
                 if data.get("task_ids"):
                     return envelope(data, "已受理，尚未完成；请查询任务状态")
                 if data.get("partial") or data.get("index_status") in {"stale", "failed"}:
+                    errors = data.get("errors") or []
+                    if not data.get("committed") and errors and isinstance(errors[0], dict) and errors[0].get("code"):
+                        # 零写入不是"部分提交"：透出首条错误的真实失败码，调用方按冲突码重读后可重新提交。
+                        first = errors[0]
+                        return envelope(data, first.get("message", "未写入任何记录，请按 errors 处理后重试"), code=first["code"])
                     # 部分提交或索引未更新：committed 只表示至少一条已写入，不预设失败原因，逐页回执以 errors 为准。
                     return envelope(data, data.get("message", "部分提交：committed 只表示至少一条已写入，请按 errors 与逐页回执核对，不要整批重发"), code="PARTIAL_FAILURE")
             return envelope(data)
@@ -436,17 +455,70 @@ def create_api(runtime):
              lambda **payload: wiki.delete(payload, actor="api:write"))
     # 重建派生索引只刷新搜索/链接索引，不重新生成正文；仍需写权限，读凭据不得触发。
     register("wiki/rebuild-index", "write", empty, wiki.rebuild_index)
+    # 本地恢复副本：列举只读；清理是本地文件删除，默认 dry_run，正式删除要 confirmed，不动页面与审计。
+    register("wiki/list-recovery", "read", wm.RecoveryListInput, wiki.list_recovery)
+    register("wiki/purge-recovery", "write", wm.RecoveryPurgeInput, wiki.purge_recovery)
     register("config/show", "admin", empty, config_service.show_config)
     register("config/update", "admin", _model("ConfigPatch", patch=(dict[str, Any], ...)), config_service.update_config)
     register("config/test", "admin", _model("ConfigTest", component=(Literal["embedding", "ocr", "office", "webdav"], ...)), config_service.test_config)
     register("sync/status", "admin", empty, maintenance.sync_status)
     register("sync/run", "admin", _model("SyncRun", confirmed=(bool, False)), maintenance.run_sync_job)
-    # Zotero 导入读取本机附件路径并复制入库，与 file/import 同为管理权限
-    zotero_scope = {"collection_keys": (Names | None, None), "collection_mode": (Literal["path", "top", "none"], "path"), "base_url": (str | None, None)}
+    # 旧导入入口支持整库和本机地址；具体范围校验与导入规则由服务层共享。
+    zotero_scope = {
+        "collection_keys": (ZoteroCollectionKeys | None, None),
+        "item_keys": (ZoteroKeys | None, None),
+        "attachment_keys": (ZoteroKeys | None, None),
+        "collection_mode": (Literal["path", "top", "none"], "path"),
+        "base_url": (str | None, None),
+        "server_id": (ZoteroServerId | None, None),
+    }
     register("zotero/preview", "admin", _model("ZoteroPreview", **zotero_scope), zotero_service.preview_import)
     register("zotero/import", "admin", _model("ZoteroImport", **zotero_scope, collections=(Names | None, None)), zotero_service.import_library)
+
+    # Zotero 本地库读取：只读角色即可，不要求先导入 Piece；server_id 可选，
+    # 省略时由服务使用默认实例。列表接口都带分页，不整库塞进上下文。
+    zotero_server = {"server_id": (ZoteroServerId | None, None)}
+    register("zotero/status", "read", _model("ZoteroStatus", **zotero_server), zotero_service.status)
+    register("zotero/search", "read", _model(
+        "ZoteroSearch", query=(str, ""), collection_key=(ZoteroKey | None, None), tag=(str | None, None),
+        item_type=(str | None, None), limit=(Limit, 20), offset=(Offset, 0),
+        scope=(Literal["title_creator_year", "everything"], "title_creator_year"), **zotero_server),
+        zotero_service.search)
+    register("zotero/collections", "read", _model(
+        "ZoteroCollections", parent_key=(ZoteroKey | None, None), limit=(Limit, 50), offset=(Offset, 0), **zotero_server),
+        zotero_service.list_collections)
+    register("zotero/tags", "read", _model(
+        "ZoteroTags", collection_key=(ZoteroKey | None, None), limit=(Limit, 50), offset=(Offset, 0), **zotero_server),
+        zotero_service.list_tags)
+    register("zotero/item", "read", _model(
+        "ZoteroItem", item_key=(ZoteroKey, ...), **zotero_server), zotero_service.get_item)
+    register("zotero/children", "read", _model(
+        "ZoteroChildren", item_key=(ZoteroKey, ...), item_type=(str | None, None), limit=(Limit, 20),
+        offset=(Offset, 0), **zotero_server), zotero_service.get_children)
+    register("zotero/fulltext", "read", _model(
+        "ZoteroFulltext", attachment_key=(ZoteroKey, ...), offset=(Offset, 0),
+        limit=(ZoteroFulltextLimit, 12000), **zotero_server), zotero_service.get_fulltext)
+    register("zotero/citations", "read", _model(
+        "ZoteroCitations", item_keys=(ZoteroKeys, ...), format=(str, "bib"), style=(str, "apa"),
+        locale=(str, "en-US"), **zotero_server), zotero_service.export_citations)
+    register("zotero/links", "read", _model(
+        "ZoteroLinks", item_keys=(ZoteroKeys | None, None), attachment_keys=(ZoteroKeys | None, None),
+        limit=(Limit, 100), offset=(Offset, 0), **zotero_server), zotero_service.get_links)
+
+    # Zotero 写入：管理权限，且服务层另有独立默认关闭开关
+    # （AppSettings.zotero_write_enabled）与 Zotero >= 10.0.5 版本要求。
+    # apply 只接受 preview 返回的 plan_id，不直接接收可篡改的变更对象；
+    # 授权与错误响应不包含本地写入 key。
+    register("zotero/authorize", "admin", _model(
+        "ZoteroAuthorize", server_id=(ZoteroServerId, ...)), zotero_write_service.authorize)
+    register("zotero/changes/preview", "admin", _model(
+        "ZoteroChangesPreview", changes=(ZoteroChanges, ...), server_id=(ZoteroServerId, ...)),
+        zotero_write_service.preview_changes)
+    register("zotero/changes/apply", "admin", _model(
+        "ZoteroChangesApply", plan_id=(str, ...), confirmed=(bool, False)),
+        zotero_write_service.apply_changes)
     register("logs", "admin", _model("Logs", level=(str | None, None), limit=(Limit, 100)), get_log_buffer)
-    register("mcp-config", "admin", _model("McpConfig", service=(Literal["retrieval", "index"], "retrieval"), include_secrets=(bool, False)), maintenance.mcp_config)
+    register("mcp-config", "admin", _model("McpConfig", service=(Literal["retrieval", "index", "zotero"], "retrieval"), include_secrets=(bool, False)), maintenance.mcp_config)
 
     @app.post("/api/v1/shutdown")
     async def shutdown(request: Request):

@@ -129,35 +129,89 @@ def _error(exc, **context):
 
 
 def _scan():
-    # ponytail: 显式操作时扫描平面 Wiki 目录；库大到扫描成为瓶颈时再引入文件清单，不做常驻监听。
-    pages, errors, duplicate_ids, evidence_owners = {}, [], set(), {}
+    """扫描平面 Wiki 目录；按文件内容哈希复用已解析结果，外部改动逐次检测。
+
+    每次都重新读取并哈希每个 .md 的字节（实测约为完整解析 2% 的开销），只有哈希变化才
+    重新解析 frontmatter。**不能**改用 (size, mtime_ns) 做签名：实测该文件系统上同尺寸
+    的快速改写有约 96% 概率得到相同的 mtime_ns，会漏掉外部编辑。缓存命中不影响写入安全：
+    _atomic_write/_capture_original 仍以真实字节校验哈希。
+    """
     root = wiki_path()
+    pages, errors, duplicate_ids, evidence_owners = {}, [], set(), {}
     if not root.exists():
+        _scan_cache.clear()
         return pages, errors
-    for path in sorted(root.iterdir(), key=lambda p: p.name):
-        if path.suffix.lower() != ".md":
-            continue
+    cache = _scan_cache.setdefault(str(root), {})
+    seen = set()
+    entries = []
+    with os.scandir(root) as iterator:
+        for entry in iterator:
+            if entry.name.lower().endswith(".md"):
+                entries.append(entry.name)
+    for name in sorted(entries):
+        seen.add(name)
         try:
-            record = _decode(_bytes(path), path)
-            page_id = record["id"]
-            if page_id in pages or page_id in duplicate_ids:
-                duplicate_ids.add(page_id)
-                errors.append({"code": "DUPLICATE_PAGE_ID", "page_id": page_id, "path": path.name,
-                               "message": "多个文件声明同一页面身份；拒绝猜测真源"})
-                continue
-            pages[page_id] = record
-            for item in record["evidence"]:
-                previous = evidence_owners.get(item["id"])
-                if previous is not None:
-                    duplicate_ids.update((previous, page_id))
-                    errors.append({"code": "DUPLICATE_EVIDENCE_ID", "page_id": page_id, "path": path.name,
-                                   "message": "证据身份在多个页面重复"})
-                evidence_owners[item["id"]] = page_id
+            # 扫描热路径不走 _path()：它对每个文件做 resolve()+is_symlink()（实测 800 页约 2.3s，
+            # 占热扫描 70%）。这里只做等价的边界检查；写入路径仍经 _path() 完整校验。
+            if any(char in name for char in ("/", "\\", ":", "\x00")):
+                raise BusinessError("UNSAFE_PATH", "Wiki 文件只能位于 Wiki 目录内", data={"path": name})
+            path = root / name
+            if path.is_symlink() or not path.is_file():
+                raise BusinessError("UNSAFE_PATH", "Wiki 文件不能是链接或越过目录边界", data={"path": name})
+            with path.open("rb") as stream:
+                data = stream.read(MAX_FILE_BYTES + 1)
+            if len(data) > MAX_FILE_BYTES:
+                raise BusinessError("FILE_INVALID", "Wiki 文件超过 8 MiB 上限", data={"path": name})
         except BusinessError as exc:
-            errors.append(_error(exc, path=path.name))
+            cache.pop(name, None)
+            errors.append(_error(exc, path=name))
+            continue
+        except FileNotFoundError:
+            cache.pop(name, None)
+            errors.append(_error(BusinessError("FILE_MISSING", "Wiki 文件缺失；不会返回数据库旧正文", data={"path": name}), path=name))
+            continue
+        except OSError:
+            cache.pop(name, None)
+            errors.append(_error(BusinessError("FILE_READ_FAILED", "Wiki 文件无法读取", data={"path": name}), path=name))
+            continue
+        digest = _hash(data)
+        cached = cache.get(name)
+        if cached is not None and cached[0] == digest:
+            record, issue = cached[1], cached[2]
+        else:
+            record, issue = None, None
+            try:
+                record = _decode(data, root / name)
+            except BusinessError as exc:
+                issue = _error(exc, path=name)
+            cache[name] = (digest, record, issue)
+        if issue is not None or record is None:
+            errors.append(dict(issue) if issue is not None else {"code": "FILE_INVALID", "path": name})
+            continue
+        page_id = record["id"]
+        if page_id in pages or page_id in duplicate_ids:
+            duplicate_ids.add(page_id)
+            errors.append({"code": "DUPLICATE_PAGE_ID", "page_id": page_id, "path": name,
+                           "message": "多个文件声明同一页面身份；拒绝猜测真源"})
+            continue
+        pages[page_id] = record
+        for item in record["evidence"]:
+            previous = evidence_owners.get(item["id"])
+            if previous is not None:
+                duplicate_ids.update((previous, page_id))
+                errors.append({"code": "DUPLICATE_EVIDENCE_ID", "page_id": page_id, "path": name,
+                               "message": "证据身份在多个页面重复"})
+            evidence_owners[item["id"]] = page_id
+    for name in [name for name in cache if name not in seen]:
+        del cache[name]
     for page_id in duplicate_ids:
         pages.pop(page_id, None)
     return pages, errors
+
+
+# 按 Wiki 根目录缓存 {文件名: (内容哈希, 解析结果或 None, 错误或 None)}。
+# 只在进程内有效；不做常驻监听，每次 _scan 仍读取并哈希每个文件，只是跳过未变化文件的解析。
+_scan_cache: dict[str, dict[str, tuple]] = {}
 
 
 def _indexed(cursor):
@@ -619,7 +673,18 @@ def get_record(**kwargs):
     with get_db_cursor() as cursor:
         indexes = _indexed(cursor)
         current_library = _library_id(cursor)
-    if query.kind == "evidence":
+    kind = query.kind
+    if kind is None:
+        # 省略 kind 时按 UUID 探测：先看扫描到的页面与证据，再看数据库登记；都没有按页面走 NOT_FOUND。
+        if query.id in pages:
+            kind = "page"
+        elif any(item["id"] == query.id for page in pages.values() for item in page["evidence"]):
+            kind = "evidence"
+        else:
+            with get_db_cursor() as cursor:
+                known_evidence = cursor.execute("SELECT 1 FROM wiki_evidence WHERE id=?", (query.id,)).fetchone()
+            kind = "evidence" if known_evidence else "page"
+    if kind == "evidence":
         page, evidence = _find_evidence(query.id, pages, errors)
         with get_db_cursor() as cursor:
             item = evidence_states(cursor, [evidence])[0]
@@ -900,3 +965,116 @@ def file_reference_count(file_id):
     pages, scan_errors = _scan()
     return sum(item["source_library_id"] == current_library and item["source_file_id"] == file_id
                for page in pages.values() for item in page["evidence"])
+
+
+# ==================== 本地恢复副本管理 ====================
+# 每次更新/删除都会把被替换的原文件留在 .wiki-recovery-<operation_id>.bak，之前没有任何列举或清理入口，
+# 副本只增不减。这里按操作记录把副本归类：
+#   - needed：对应操作仍 pending 且未执行，副本是尚未提交内容的唯一来源，不能清理；
+#   - releasable：操作已 applied/abandoned，审计表里已有 before_json 快照，副本只是额外保险；
+#   - orphan：找不到对应操作记录（审计被清理或文件来自另一个库），谨慎起见默认不清理。
+# 清理仍是本地文件删除，默认 dry_run，正式删除需 confirmed；绝不触碰页面正文或审计表。
+
+RECOVERY_PATTERN = re.compile(r"^\.wiki-recovery-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.bak$")
+
+
+def _recovery_entries():
+    """扫描恢复副本并关联操作记录；pending 操作按当前文件状态判断是否仍需要副本。"""
+    root = wiki_path()
+    if not root.exists():
+        return []
+    names = []
+    with os.scandir(root) as iterator:
+        for entry in iterator:
+            match = RECOVERY_PATTERN.match(entry.name)
+            if match and entry.is_file(follow_symlinks=False):
+                names.append((entry.name, str(UUID(match.group(1)))))
+    if not names:
+        return []
+    with get_db_cursor() as cursor:
+        marks = ",".join("?" for _ in names)
+        operations = {row["id"]: dict(row) for row in cursor.execute(
+            f"SELECT * FROM wiki_operations WHERE id IN ({marks})", [operation_id for _, operation_id in names])}
+    pages, scan_errors = None, None
+    items = []
+    for name, operation_id in sorted(names):
+        path = root / name
+        try:
+            stat = path.stat()
+            size, modified = stat.st_size, datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+        except OSError:
+            size, modified = None, None
+        item = {"operation_id": operation_id, "path": str(path), "name": name, "size": size, "modified_at": modified,
+                "page_id": None, "request_key": None, "state": None, "created_at": None, "reason": None}
+        operation = operations.get(operation_id)
+        if operation is None:
+            item.update(status="orphan", hint="没有对应的操作记录；不自动清理，请人工核对后再决定")
+        else:
+            item.update(page_id=operation["page_id"], request_key=operation["request_key"], state=operation["state"],
+                        created_at=operation["created_at"], reason=operation["reason"],
+                        operation_kind="delete" if operation["after_hash"] is None else "update")
+            if operation["state"] == "pending":
+                if pages is None:
+                    pages, scan_errors = _scan()
+                if _is_applied(operation, pages, scan_errors):
+                    item.update(status="releasable", hint="操作已落盘但审计未结算；wiki rebuild-index 会结算，副本可释放")
+                else:
+                    item.update(status="needed", hint="操作尚未提交，副本是原文件的唯一保留；请先原键重试或人工合并")
+            else:
+                item.update(status="releasable", hint="操作已结算，审计表保留 before 快照；副本只是额外保险")
+        items.append(item)
+    return items
+
+
+def list_recovery(**kwargs):
+    """只读列出本地恢复副本及其状态；不读取副本正文。"""
+    query = _validate(models.RecoveryListInput, kwargs)
+    entries = _recovery_entries()
+    counts = {"needed": 0, "releasable": 0, "orphan": 0, "total_bytes": 0}
+    for item in entries:
+        counts[item["status"]] += 1
+        counts["total_bytes"] += item["size"] or 0
+    items = [item for item in entries if query.status is None or item["status"] == query.status]
+    return {"recovery": items[query.offset:query.offset + query.limit], "total": len(items),
+            "limit": query.limit, "offset": query.offset, "counts": counts, "read_only": True,
+            "hint": "needed 的副本不能清理；purge 默认只清 releasable，orphan 须显式 include_orphans"}
+
+
+@serialized_mutation
+def purge_recovery(**kwargs):
+    """清理可释放的恢复副本；默认 dry_run 预览，正式删除需 confirmed。不动页面正文和审计表。"""
+    payload = _validate(models.RecoveryPurgeInput, kwargs)
+    entries = {item["operation_id"]: item for item in _recovery_entries()}
+    if payload.operation_ids is not None:
+        missing = [operation_id for operation_id in payload.operation_ids if operation_id not in entries]
+        if missing:
+            raise BusinessError("NOT_FOUND", "没有这些操作的恢复副本", data={"operation_ids": missing})
+        wanted = [entries[operation_id] for operation_id in payload.operation_ids]
+    else:
+        wanted = list(entries.values())
+    candidates, blocked = [], []
+    for item in wanted:
+        if item["status"] == "releasable" or (item["status"] == "orphan" and payload.include_orphans):
+            candidates.append(item)
+        elif payload.operation_ids is not None:
+            blocked.append({"operation_id": item["operation_id"], "status": item["status"], "hint": item["hint"]})
+    if blocked:
+        # 显式点名的副本不能静默跳过：仍被需要或无记录时拒绝整批，避免调用方以为已清理。
+        raise BusinessError("RECOVERY_REQUIRED", "指定的副本仍被未提交操作需要，或没有操作记录且未声明 include_orphans",
+                            data={"blocked": blocked})
+    impact = {"candidates": candidates, "count": len(candidates), "total_bytes": sum(item["size"] or 0 for item in candidates),
+              "include_orphans": payload.include_orphans, "deletes_pages": False, "touches_audit": False}
+    if payload.dry_run:
+        return {**impact, "dry_run": True, "committed": False}
+    if not payload.confirmed:
+        raise BusinessError("CONFIRMATION_REQUIRED", "清理恢复副本需要明确确认；副本删除后无法再从本地恢复被替换的旧内容", data=impact)
+    deleted, failed = [], []
+    for item in candidates:
+        try:
+            _path(item["name"]).unlink(missing_ok=True)
+            deleted.append(item["operation_id"])
+        except (OSError, BusinessError) as exc:
+            failed.append({"operation_id": item["operation_id"], "code": getattr(exc, "code", "FILE_DELETE_FAILED"),
+                           "message": str(exc)})
+    return {**impact, "dry_run": False, "committed": bool(deleted), "deleted_operation_ids": deleted,
+            "deleted_count": len(deleted), "failed": failed, "failed_count": len(failed)}

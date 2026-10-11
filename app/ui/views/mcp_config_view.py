@@ -17,13 +17,14 @@ from nicegui import ui
 from app.i18n import t
 from app.ui.components import write_clipboard as _write_clipboard
 from indexing.mcp.config import get_mcp_port
-from indexing.settings import get_settings
+from indexing.settings import get_settings, is_mcp_auth_enabled
 
 
-# 两个 MCP 服务：检索（读）与索引（建库维护）。key 用于取翻译文案。
+# 独立服务端点；key 用于取翻译文案。
 MCP_SERVICES = (
     {"name": "piece-kb", "key": "service_kb"},
     {"name": "piece-index", "key": "service_index"},
+    {"name": "piece-zotero", "key": "service_zotero"},
 )
 
 
@@ -611,15 +612,14 @@ def _client_docs(client: dict) -> str | None:
 def _get_config_json(client: dict, services: Iterable[str] | None = None) -> str:
     """生成客户端配置，按服务选择端口和密钥；未启用认证时不导出密钥。
 
-    services 为要写入配置的服务名集合，None 表示两个服务都写。
+    services 为要写入配置的服务名集合，None 保留原有检索与索引服务。
     """
     settings = get_settings()
-    ports = {"piece-kb": settings.mcp.port, "piece-index": get_mcp_port()}
-    kept = list(ports) if services is None else [name for name in ports if name in services]
-    api_keys = {
-        "piece-kb": settings.mcp.get_api_key("retrieval"),
-        "piece-index": settings.mcp.get_api_key("index"),
-    } if settings.mcp.auth_enabled else {}
+    ports = {"piece-kb": settings.mcp.port, "piece-index": get_mcp_port(), "piece-zotero": settings.mcp.zotero_port}
+    kept = ["piece-kb", "piece-index"] if services is None else [name for name in ports if name in services]
+    api_keys = {name: settings.mcp.get_api_key(service)
+                for name, service in (("piece-kb", "retrieval"), ("piece-index", "index"), ("piece-zotero", "zotero"))
+                if is_mcp_auth_enabled(service)}
 
     if client.get("format") == "bash":
         commands = []
@@ -644,16 +644,42 @@ def _get_config_json(client: dict, services: Iterable[str] | None = None) -> str
             sections.append(section)
         return "\n\n".join(sections)
 
+    config = json.loads(json.dumps(client["config"]))
+    if "piece-zotero" in kept:
+        _add_zotero_server(config)
     # 替换端口后再注入密钥，避免自定义密钥中的占位符被误替换。
-    config_str = json.dumps(client["config"])
+    config_str = json.dumps(config)
     config_str = config_str.replace("{port}", str(ports["piece-kb"]))
     config_str = config_str.replace("{index_port}", str(ports["piece-index"]))
+    config_str = config_str.replace("{zotero_port}", str(ports["piece-zotero"]))
     config = json.loads(config_str)
     for name in ports:
         if name not in kept:
             _remove_server(config, name)
     _add_auth_headers(config, {name: key for name, key in api_keys.items() if name in kept})
     return json.dumps(config, indent=2, ensure_ascii=False)
+
+
+def _add_zotero_server(node) -> bool:
+    """复用客户端的索引端点模板，保留它的字段和容器格式。"""
+    def clone(value):
+        return json.loads(json.dumps(value).replace("piece-index", "piece-zotero").replace("{index_port}", "{zotero_port}"))
+
+    if isinstance(node, dict):
+        if isinstance(node.get("piece-index"), dict):
+            node["piece-zotero"] = clone(node["piece-index"])
+            return True
+        for child in node.values():
+            if _add_zotero_server(child):
+                return True
+    elif isinstance(node, list):
+        for child in node:
+            if isinstance(child, dict) and child.get("name") == "piece-index":
+                node.append(clone(child))
+                return True
+            if _add_zotero_server(child):
+                return True
+    return False
 
 
 def _add_auth_headers(config, api_keys: dict[str, str]):
@@ -819,8 +845,8 @@ def _entry_key(client: dict) -> str:
 def _render_client_config(client: dict, selected_client: dict) -> None:
     """单个客户端的配置区：服务选择 → 配置入口 → 配置内容 → 三者区分说明。"""
     settings = get_settings()
-    ports = {"piece-kb": settings.mcp.port, "piece-index": get_mcp_port()}
-    # 先提供只读检索；写入服务由用户明确勾选，选择跨客户端和页面保留。
+    ports = {"piece-kb": settings.mcp.port, "piece-index": get_mcp_port(), "piece-zotero": settings.mcp.zotero_port}
+    # 先提供只读检索；其他服务由用户明确勾选，选择跨客户端和页面保留。
     kept = {"value": selected_client.setdefault("services", {"piece-kb"})}
 
     @ui.refreshable
@@ -860,8 +886,8 @@ def _render_client_config(client: dict, selected_client: dict) -> None:
             ui.label(t("mcp_config.services_heading")).classes(
                 "text-xs font-semibold theme-text-muted"
             )
-            auth_state = t("mcp_config.auth_on") if settings.mcp.auth_enabled else t("mcp_config.auth_off")
-            ui.label(t("mcp_config.auth_state", state=auth_state)).classes("text-xs theme-text-muted")
+            authentication = {"piece-kb": is_mcp_auth_enabled("retrieval"), "piece-index": is_mcp_auth_enabled("index"),
+                              "piece-zotero": is_mcp_auth_enabled("zotero")}
             for service in MCP_SERVICES:
                 name = service["name"]
                 purpose = t(f"mcp_config.{service['key']}_purpose")
@@ -871,9 +897,12 @@ def _render_client_config(client: dict, selected_client: dict) -> None:
                         value=name in kept["value"],
                         on_change=lambda e, n=name: toggle(n, e.value),
                     ).props("dense").classes("text-sm theme-text shrink-0")
-                    ui.label(f"{purpose} · http://localhost:{ports[name]}/mcp").classes(
+                    auth_state = t("mcp_config.auth_on" if authentication[name] else "mcp_config.auth_off")
+                    ui.label(f"{purpose} · {auth_state} · http://localhost:{ports[name]}/mcp").classes(
                         "text-xs theme-text-muted pt-1 min-w-0"
                     )
+            if not settings.mcp.zotero_enabled:
+                ui.label(t("zotero.mcp_off")).classes("text-xs theme-text-muted")
             # 配置基于当前运行进程的有效设置；改端口/密钥需重启服务再生效
             ui.label(t("mcp_config.settings_restart_hint")).classes("text-xs theme-text-muted")
 

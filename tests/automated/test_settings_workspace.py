@@ -210,7 +210,7 @@ def test_settings_and_tools_have_translations_for_literal_keys():
     root = Path(__file__).resolve().parents[2]
     files = [root / "app/ui/handlers/settings_handlers.py", root / "app/ui/pages.py", root / "app/ui/views/sidebar.py"]
     files.extend(root / f"app/ui/views/{name}_view.py" for name in
-                 ("settings", "mcp_config", "skill", "logs", "recall_test", "cloud_sync"))
+                 ("settings", "mcp_config", "skill", "logs", "recall_test", "cloud_sync", "zotero"))
     keys = {node.args[0].value for path in files for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "t"
             and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)}

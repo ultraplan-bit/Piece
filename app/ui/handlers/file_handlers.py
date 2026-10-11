@@ -15,7 +15,7 @@ from urllib.parse import urlencode
 
 from nicegui import ui, events
 
-from indexing.services import file_service, task_service, zotero_service
+from indexing.services import file_service, task_service
 from indexing.utils import await_completion, run_sync
 from indexing.services import chunk_service, collection_service, metadata_service, maintenance_service
 from app.i18n import t
@@ -29,7 +29,7 @@ from app.ui.components import (
     file_create_dialog,
     file_properties_dialog,
 )
-from app.ui.import_dialogs import folder_import_dialog, zotero_import_dialog
+from app.ui.import_dialogs import folder_import_dialog
 from app.ui.resource_tree import branch_key, document_key, is_tree_view, visible_tree_rows
 from app.utils import (
     format_size,
@@ -1352,24 +1352,10 @@ class FileHandlers:
                   type="positive" if accepted else "warning")
         await self.load_files()
 
-    def handle_import_zotero(self):
-        """从本机运行中的 Zotero 导入带 PDF 的条目。"""
-        zotero_import_dialog(on_preview=self._preview_zotero, on_import=self._import_zotero)
-
-    async def _preview_zotero(self, collection_keys, mode):
-        return await run_sync(zotero_service.preview_import, collection_keys, mode)
-
-    async def _import_zotero(self, collection_keys, mode):
-        try:
-            result = await run_sync(zotero_service.import_library, collection_keys, mode)
-        except ValueError as exc:
-            self._notify(str(exc), type="negative")
-            return
-        self._notify(t("import.zotero_done", accepted=result["accepted_count"], duplicates=result["duplicate_count"],
-                    failed=result["failed_count"], skipped=result["skipped_count"]),
-                  type="positive" if result["accepted_count"] else "warning")
-        await self.load_collections()
-        await self.load_files()
+    async def handle_import_zotero(self):
+        """打开 Zotero 工作区，由用户选择文献和附件后预览导入。"""
+        if callback := self.ui_refs.get("open_zotero"):
+            await callback()
 
     async def _do_create_file(self, filename: str):
         """执行创建文件"""

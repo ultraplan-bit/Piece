@@ -6,6 +6,7 @@ from nicegui import context, ui
 from app.i18n import t
 from app.ui.views.wiki_view import WikiWorkbench
 from app.ui.views.graph_view import GraphWorkbench
+from app.ui.views.zotero_view import ZoteroWorkbench
 from app.ui.views.sidebar import render_app_header
 from app.ui.components import confirm_dialog, workspace_controls
 from app.ui.file_drop import render_workspace_upload
@@ -106,6 +107,9 @@ def register_pages(port: int = 8689):
                 return
             if state.get("collection_edit"):
                 ui.notify(t("collections.finish_edit"), type="info")
+                return
+            if previous == "zotero" and zotero.busy:
+                ui.notify(t("zotero.operation_running"), type="info")
                 return
             if previous == "wiki" and wiki.editor and wiki.editor.busy:
                 ui.notify(wiki.text("saving"), type="info")
@@ -273,12 +277,25 @@ def register_pages(port: int = 8689):
                     '.chunk-anchor[data-file-id="{int(file_id)}"][data-chunk-id="{int(chunk_id)}"]');
                     target?.scrollIntoView({{block: 'center'}});''')
 
+        async def refresh_zotero_files():
+            await file_handlers.load_collections()
+            await file_handlers.load_files()
+
+        zotero = ZoteroWorkbench(open_file=open_task_file, refresh_files=refresh_zotero_files,
+                                 open_settings=lambda: open_settings("zotero"))
+
+        async def open_zotero_item(key, server_id):
+            await switch_view("zotero")
+            if current_view["value"] == "zotero":
+                await zotero.open_item(key, server_id)
+
         ui_refs.update(toggle_navigation=toggle_navigation, focus_catalog=focus_catalog,
                        focus_search=focus_search, open_task_file=open_task_file,
                        open_reader=open_reader, open_library=open_library,
                        open_recall_result=open_recall_result,
                        open_settings=open_settings, open_webdav_settings=lambda: open_settings("webdav"),
                        open_mcp_config=lambda: switch_view("mcp_config"),
+                       open_zotero=lambda: switch_view("zotero"), open_zotero_item=open_zotero_item,
                        open_cloud_sync=lambda: switch_view("cloud_sync"),
                        refresh_settings=lambda: right_column.refresh(),
                        set_library_view=set_library_view)
@@ -306,6 +323,8 @@ def register_pages(port: int = 8689):
                                 wiki.render_middle()
                             elif view == "graph":
                                 graph.render_middle()
+                            elif view == "zotero":
+                                zotero.render_middle()
                             elif view == "recall_test":
                                 render_recall_test_middle(recall_state=recall_state, ui_refs=ui_refs)
                             elif view == "cloud_sync":
@@ -334,6 +353,8 @@ def register_pages(port: int = 8689):
                                             f'flat dense round size=sm aria-label="{t("knowledge.return_file")}"'
                                         ).classes("theme-text-muted").tooltip(t("knowledge.return_file"))
                                 (wiki if view == "wiki" else graph).render_right(controls=controls)
+                            elif view == "zotero":
+                                zotero.render_right()
                             elif view == "recall_test":
                                 render_recall_test_right(recall_state=recall_state, ui_refs=ui_refs)
                             elif view == "cloud_sync":

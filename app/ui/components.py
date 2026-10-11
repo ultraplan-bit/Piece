@@ -814,13 +814,17 @@ def file_properties_dialog(
         on_close: 关闭回调
     """
     # 用列表保存，键可重复编辑，保存时再收敛为字典
-    entries = [{"key": key, "value": _property_text(value)} for key, value in properties.items()]
+    protected = {key: value for key, value in properties.items() if key.startswith("zotero_")}
+    entries = [{"key": key, "value": _property_text(value)} for key, value in properties.items() if key not in protected]
 
     async def handle_save():
-        payload = {}
+        payload = dict(protected)
         for entry in entries:
             key = (entry["key"] or "").strip()
             value = (entry["value"] or "").strip()
+            if key.startswith("zotero_"):
+                ui.notify(t("zotero.sources_read_only"), type="warning")
+                return
             if key and value:
                 payload[key] = value
         result = on_save(payload)
@@ -839,6 +843,8 @@ def file_properties_dialog(
 
         with ui.column().classes("w-full gap-2 py-3"):
             ui.label(filename).classes("text-sm theme-text-secondary truncate")
+            if protected:
+                ui.label(t("zotero.sources_read_only")).classes("text-xs theme-text-muted")
 
             @ui.refreshable
             def rows():

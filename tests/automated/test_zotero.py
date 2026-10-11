@@ -107,8 +107,9 @@ def test_build_filename_and_metadata():
     assert metadata["tags"] == ["a"] and metadata["zotero_collections"] == ["顶层/子集"] and metadata["zotero_key"] == "K3"
 
 
-def test_preview_lists_importable_and_skipped(library):
+def test_preview_lists_importable_and_skipped(knowledge_base, library):
     preview = zotero.preview_import(client=library["client"])
+    assert preview["unavailable_count"] == 1 and preview["duplicate_count"] == 0
     assert preview["zotero"]["zotero_version"] == "10.0.2"
     assert [c["path"] for c in preview["collections"]] == ["顶层", "顶层/子集", "其他"]
     assert preview["items_total"] == 5 and preview["skipped_count"] == 2

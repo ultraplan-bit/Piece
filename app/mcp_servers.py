@@ -35,7 +35,7 @@ class _EmbeddedServer(DrainingServer):
 
 
 class MCPServerManager:
-    """保留两个 ASGI 应用及其 lifespan，只共享事件循环和进程资源。"""
+    """保留各 ASGI 应用及其 lifespan，只共享事件循环和进程资源。"""
 
     def __init__(self):
         self._servers: list[_EmbeddedServer] = []
@@ -55,7 +55,7 @@ class MCPServerManager:
     def stopping(self):
         return self._stopping
 
-    async def start(self, services: list[tuple["FastMCP", int]], host: str, *, runtime=None) -> None:
+    async def start(self, services: list[tuple["FastMCP", int]], host: str | dict[str, str], *, runtime=None) -> None:
         if self._tasks:
             return
 
@@ -67,7 +67,7 @@ class MCPServerManager:
                 application = _RuntimeGate(application, runtime)
             server = _EmbeddedServer(uvicorn.Config(
                 application,
-                host=host,
+                host=host[mcp.name] if isinstance(host, dict) else host,
                 port=port,
                 lifespan="on",
                 log_config=None,  # 复用应用日志，不重配全局 handler

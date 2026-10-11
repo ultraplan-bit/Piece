@@ -15,10 +15,11 @@ from indexing.services.errors import BusinessError
 from indexing.utils import run_sync
 
 
-SETTING_GROUPS = ("appearance", "embedding", "ocr", "office", "mcp", "storage", "webdav")
+SETTING_GROUPS = ("appearance", "embedding", "ocr", "office", "mcp", "zotero", "storage", "webdav")
 CONFIG_GROUPS = {
     "appearance": ("appearance",), "embedding": ("embedding", "performance"),
     "ocr": ("ocr",), "office": ("office",), "mcp": ("mcp",),
+    "zotero": ("mcp", "zotero_write_enabled"),
     "storage": ("data_path",), "webdav": ("webdav",),
 }
 
@@ -54,6 +55,7 @@ def _form_values(settings):
         **settings.appearance.model_dump(),
         **settings.performance.model_dump(),
         "data_path": settings.data_path,
+        "zotero_write_enabled": settings.zotero_write_enabled,
     }
     for group in ("mcp", "webdav", "office", "ocr"):
         values.update({f"{group}_{key}": value for key, value in getattr(settings, group).model_dump().items()
@@ -123,6 +125,10 @@ class SettingsHandlers:
             return {"base_url", "api_key", "model", "vector_dim", "max_tokens", "worker_concurrency"} | {
                 key for key in self.settings_form if key.startswith("embedding_")
             }
+        if group == "mcp":
+            return {key for key in self.settings_form if key.startswith("mcp_") and not key.startswith("mcp_zotero_")}
+        if group == "zotero":
+            return {"zotero_write_enabled"} | {key for key in self.settings_form if key.startswith("mcp_zotero_")}
         return {key for key in self.settings_form if key.startswith(f"{group}_")}
 
     def changed_fields(self, group=None):
@@ -211,7 +217,10 @@ class SettingsHandlers:
             data["embedding"].update({key: form[key] for key in data["embedding"]})
             data["performance"].update({key: form[key] for key in data["performance"]})
         if "mcp" in groups:
-            data["mcp"].update({key: form[f"mcp_{key}"] for key in data["mcp"]})
+            data["mcp"].update({key: form[f"mcp_{key}"] for key in data["mcp"] if not key.startswith("zotero_")})
+        if "zotero" in groups:
+            data["mcp"].update({key: form[f"mcp_{key}"] for key in data["mcp"] if key.startswith("zotero_")})
+            data["zotero_write_enabled"] = bool(form["zotero_write_enabled"])
         if "storage" in groups:
             data["data_path"] = str(form["data_path"] or "").strip()
             if not data["data_path"] or not Path(data["data_path"]).expanduser().is_absolute():
@@ -374,7 +383,7 @@ class SettingsHandlers:
 
     def regenerate_mcp_api_key(self, api_key_input, service: str = "retrieval"):
         """只生成草稿；保存并重启后才替换运行中的凭据。"""
-        field = {"retrieval": "mcp_api_key", "index": "mcp_index_api_key"}[service]
+        field = {"retrieval": "mcp_api_key", "index": "mcp_index_api_key", "zotero": "mcp_zotero_api_key"}[service]
         self.settings_form[field] = generate_api_key()
         api_key_input.set_value(self.settings_form[field])
         ui.notify(t("settings_mcp.key_regenerated"), type="info")

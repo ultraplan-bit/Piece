@@ -184,6 +184,12 @@ def test_api_hierarchy_scopes_and_validation(api):
         return api.post("/api/v1/" + path, json=payload).json()
     root = post("collection/create", name="父")["data"]["collection_id"]
     child = post("collection/create", name="子", parent_id=root)["data"]["collection_id"]
+    # 集合名全库唯一：同名冲突提示带上已有集合的路径与 ID，不能靠换父级绕过。
+    duplicate = post("collection/create", name="子")
+    assert duplicate["error"]["code"] == "PARTIAL_FAILURE" and duplicate["data"]["success"] is False
+    assert f"位于 父 / 子，ID {child}" in duplicate["message"] and "全库唯一" in duplicate["message"]
+    renamed = post("collection/rename", collection_id=root, name="子")
+    assert renamed["data"]["success"] is False and f"ID {child}" in renamed["message"]
     file_id = post("file/create", filename="文档", collections=["子"])["data"]["file_id"]
     assert post("collection/list", limit=1)["data"]["total"] == 2
     tree = post("collection/tree")["data"]

@@ -8,6 +8,24 @@ from types import SimpleNamespace
 import pytest
 
 
+def pytest_configure(config):
+    # 仓库没有 pytest.ini，标记在这里注册；slow 用例默认跳过，显式 --run-slow 才跑。
+    config.addinivalue_line("markers", "slow: 大数据量分页/性能验证，默认跳过，使用 --run-slow 运行")
+
+
+def pytest_addoption(parser):
+    parser.addoption("--run-slow", action="store_true", default=False, help="运行标记为 slow 的重量级用例")
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-slow"):
+        return
+    skip = pytest.mark.skip(reason="需要 --run-slow")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip)
+
+
 @pytest.fixture(autouse=True)
 def isolated_entry_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("PIECE_DATA_DIR", str(tmp_path / "uninitialized"))

@@ -966,6 +966,10 @@ def render_files_right(
                         if properties:
                             with ui.column().classes("gap-0.5 min-w-0"):
                                 for key, value in properties.items():
+                                    if key == "zotero_sources":
+                                        from app.ui.views.zotero_view import render_zotero_sources
+                                        render_zotero_sources(value, ui_refs.get("open_zotero_item"))
+                                        continue
                                     text = (
                                         ", ".join(str(item) for item in value)
                                         if isinstance(value, list)

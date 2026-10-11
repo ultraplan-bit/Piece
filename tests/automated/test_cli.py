@@ -129,6 +129,8 @@ def test_collection_tree_parent_move_and_direct_scope_commands(endpoint, capsys)
      {"kind": "entity", "status": "disputed", "limit": 2, "offset": 3}),
     (("search", "中文别名"), "search", {"query": "中文别名", "limit": 50, "offset": 0}),
     (("get", "object", "uuid"), "get", {"kind": "object", "id": "uuid", "limit": 50, "offset": 0}),
+    # kind 可省略：只传 UUID 时不发送 kind，由服务按 UUID 探测。
+    (("get", "uuid"), "get", {"id": "uuid", "limit": 50, "offset": 0}),
     (("graph", "uuid", "--depth", "2", "--predicate", "supports", "--status", "active"), "graph",
      {"root_id": "uuid", "depth": 2, "predicates": ["supports"], "statuses": ["active"], "max_nodes": 100, "max_edges": 300}),
     (("references", "library", "7"), "references", {"source_library_id": "library", "source_file_id": 7, "limit": 50, "offset": 0}),
@@ -171,11 +173,14 @@ def test_graph_apply_preserves_input_and_rejects_unsafe_arguments(endpoint, caps
     code, _, _ = invoke(endpoint, capsys, "graph", "apply", "--input", "-", "--request-id", "stable")
     assert code == 0 and endpoint.calls[-1]["payload"] == {**payload, "request_key": "stable"}
     endpoint.calls.clear()
-    code, _, _ = invoke(endpoint, capsys, "graph", "apply", "--input", str(source))
-    assert code == 2
+    code, result, _ = invoke(endpoint, capsys, "graph", "apply", "--input", str(source))
+    assert code == 0 and endpoint.calls[-1]["payload"]["reason"] == "增量"
+    generated = endpoint.calls[-1]["payload"]["request_key"]
+    assert generated and result["data"]["request_key"] == generated, "省略 --request-id 时 CLI 自生成并回传键"
     source.write_text(json.dumps({**payload, "request_key": "original"}), encoding="utf-8")
     code, _, _ = invoke(endpoint, capsys, "graph", "apply", "--input", str(source), "--request-id", "different")
     assert code == 2
+    endpoint.calls.clear()
     code, _, _ = invoke(endpoint, capsys, "graph", "apply", "--input", str(source), "--wait")
     assert code == 2 and endpoint.calls == []
 
@@ -527,14 +532,17 @@ def test_logs_mcp_config_and_search_diagnostics_contracts(endpoint, capsys):
 
     code, result, _ = invoke(endpoint, capsys, "zotero", "preview", "--zotero-collection", "ABCD1234", "--collection-mode", "top")
     assert code == 0 and endpoint.calls[-1]["path"] == "/api/v1/zotero/preview"
-    assert endpoint.calls[-1]["payload"] == {"collection_keys": ["ABCD1234"], "collection_mode": "top", "base_url": None}
+    assert endpoint.calls[-1]["payload"] == {"collection_keys": ["ABCD1234"], "item_keys": None, "attachment_keys": None,
+                                             "collection_mode": "top", "base_url": None, "server_id": None}
 
     endpoint.routes["/api/v1/zotero/import"] = lambda *a: make_envelope(True, "accepted", {"task_ids": [5], "accepted_count": 1})
     endpoint.routes["/api/v1/task/query"] = lambda *a: complete([5])
     code, result, _ = invoke(endpoint, capsys, "zotero", "import", "--collection", "论文", "--wait")
     assert code == 0 and result["success"] and result["data"]["task_ids"] == [5]
     import_call = next(c for c in endpoint.calls if c["path"] == "/api/v1/zotero/import")
-    assert import_call["payload"] == {"collection_keys": None, "collection_mode": "path", "base_url": None, "collections": ["论文"]}
+    assert import_call["payload"] == {"collection_keys": None, "item_keys": None, "attachment_keys": None,
+                                      "collection_mode": "path", "base_url": None, "server_id": None,
+                                      "collections": ["论文"]}
 
     body = endpoint.config / "props.json"
     body.write_text(json.dumps({"source": "obsidian"}), encoding="utf-8")
@@ -579,7 +587,7 @@ def test_skill_commands_stay_local(endpoint, capsys, tmp_path):
     code = cli.main(["skill", "list", "--data-dir", str(missing_dir), "--port", "1", "--json"])
     result = json.loads(capsys.readouterr().out)
     assert code == 0 and result["success"] is True
-    assert [s["id"] for s in result["data"]["skills"]] == ["piece-graph", "piece-index", "piece-search", "piece-wiki"]
+    assert [s["id"] for s in result["data"]["skills"]] == ["piece-graph", "piece-index", "piece-search", "piece-wiki", "piece-zotero"]
     assert result["data"]["warnings"] and "未找到该目标的配置" in result["data"]["warnings"][0]
     assert not missing_dir.exists()
 
@@ -598,6 +606,7 @@ def test_skill_commands_stay_local(endpoint, capsys, tmp_path):
         str(out_dir / "piece-index" / "SKILL.md"),
         str(out_dir / "piece-search" / "SKILL.md"),
         str(out_dir / "piece-wiki" / "SKILL.md"),
+        str(out_dir / "piece-zotero" / "SKILL.md"),
     ]
     assert not missing_dir.exists()  # 数据目录仍未创建
     content = (out_dir / "piece-search" / "SKILL.md").read_text(encoding="utf-8")

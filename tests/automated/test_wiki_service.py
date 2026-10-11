@@ -133,6 +133,41 @@ def test_crlf_changes_file_hash_even_when_body_unchanged(knowledge_base):
     assert wiki.apply(batch(pages=[old]))["errors"][0]["code"] == "CONTENT_CONFLICT"
 
 
+def test_scan_cache_detects_same_size_rewrite_within_one_mtime_tick(knowledge_base):
+    """缓存按内容哈希失效，而不是 (size, mtime)：同尺寸快速改写在本机约 96% 会得到相同 mtime_ns。"""
+    page_id = create(body="原文甲")
+    file = path(page_id)
+    assert read(page_id)["body"] == "原文甲"
+    before = file.stat()
+    # 同字节数、紧接着改写：强制 mtime 与大小都不变，模拟编辑器在同一时钟刻度内保存。
+    file.write_bytes(file.read_bytes().replace("原文甲".encode(), "原文乙".encode()))
+    os.utime(file, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = file.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns), "测试前提：stat 签名必须相同"
+    assert read(page_id)["body"] == "原文乙", "stat 不变时仍须读到外部改动"
+
+
+def test_scan_cache_reuses_parse_and_drops_removed_files(knowledge_base, monkeypatch):
+    ids = [create(title=f"页{i}", body=f"正文{i}") for i in range(3)]
+    wiki._scan_cache.clear()
+    wiki._scan()
+    calls = []
+    original = wiki._decode
+    monkeypatch.setattr(wiki, "_decode", lambda data, p: (calls.append(p.name), original(data, p))[1])
+    pages, errors = wiki._scan()
+    assert set(pages) == set(ids) and not errors
+    assert calls == [], "内容未变时不得重新解析任何文件"
+    target = path(ids[1])
+    target.write_bytes(target.read_bytes().replace("正文1".encode(), "外改1".encode()))
+    pages, _ = wiki._scan()
+    assert calls == [target.name], "只重新解析哈希变化的那一个文件"
+    assert pages[ids[1]]["body"] == "外改1"
+    target.unlink()
+    pages, _ = wiki._scan()
+    assert ids[1] not in pages and set(pages) == {ids[0], ids[2]}
+    assert target.name not in wiki._scan_cache[str(wiki.wiki_path())], "删除的文件要从缓存里清掉"
+
+
 def test_idempotent_retry_after_newer_revision(knowledge_base):
     page_id = create()
     payload = batch(pages=[update(page_id, title="第二版")])
@@ -519,3 +554,119 @@ def test_graph_rebuild_only_changes_derived_index(knowledge_base):
     assert graph.get_record(kind="object", id=node_id) == before
     assert graph.history(kind="object", id=node_id) == history
     assert not wiki.wiki_path().exists()
+
+
+# ---------------------------------------------------------------------------
+# 本地恢复副本：列举、分类与清理
+# ---------------------------------------------------------------------------
+
+def _recovery_files():
+    return sorted(p.name for p in wiki.wiki_path().glob(".wiki-recovery-*.bak"))
+
+
+def test_list_recovery_classifies_settled_and_pending_copies(knowledge_base, monkeypatch):
+    assert wiki.list_recovery() == {"recovery": [], "total": 0, "limit": 50, "offset": 0,
+                                    "counts": {"needed": 0, "releasable": 0, "orphan": 0, "total_bytes": 0},
+                                    "read_only": True, "hint": wiki.list_recovery()["hint"]}
+    page_id = create()
+    wiki.apply(batch(pages=[update(page_id, body="第二版")]))
+    deleted_id = create(title="待删")
+    delete(deleted_id)
+    assert len(_recovery_files()) == 2
+    listing = wiki.list_recovery()
+    assert listing["total"] == 2 and listing["counts"]["releasable"] == 2 and listing["counts"]["needed"] == 0
+    by_page = {item["page_id"]: item for item in listing["recovery"]}
+    assert by_page[page_id]["operation_kind"] == "update" and by_page[page_id]["state"] == "applied"
+    assert by_page[deleted_id]["operation_kind"] == "delete" and by_page[deleted_id]["status"] == "releasable"
+    assert all(item["size"] > 0 and item["request_key"] and item["path"].endswith(".bak") for item in listing["recovery"])
+    # 捕获原文件后发布失败：操作 pending 且未落盘，副本是旧内容唯一来源，必须标 needed。
+    original_link = os.link
+    def fail_publish(source, target):
+        if str(target).endswith(".md"):
+            raise OSError("simulated publish failure")
+        return original_link(source, target)
+    monkeypatch.setattr(wiki.os, "link", fail_publish)
+    failed = wiki.apply(batch(pages=[update(page_id, body="第三版")]))
+    assert not failed["committed"] and failed["errors"][0]["code"] == "FILE_WRITE_FAILED"
+    monkeypatch.setattr(wiki.os, "link", original_link)
+    needed = wiki.list_recovery(status="needed")
+    assert needed["total"] == 1 and needed["recovery"][0]["page_id"] == page_id
+    assert needed["counts"] == {"needed": 1, "releasable": 2, "orphan": 0, "total_bytes": needed["counts"]["total_bytes"]}
+    assert wiki.list_recovery(limit=1)["total"] == 3 and len(wiki.list_recovery(limit=1)["recovery"]) == 1
+    # needed 副本在 purge 中被跳过；点名清理它则整批拒绝。
+    preview = wiki.purge_recovery()
+    assert preview["dry_run"] and not preview["committed"] and preview["count"] == 2
+    assert {item["status"] for item in preview["candidates"]} == {"releasable"}
+    needed_id = needed["recovery"][0]["operation_id"]
+    with pytest.raises(BusinessError) as exc:
+        wiki.purge_recovery(operation_ids=[needed_id], dry_run=False, confirmed=True)
+    assert exc.value.code == "RECOVERY_REQUIRED" and exc.value.data["blocked"][0]["operation_id"] == needed_id
+    assert len(_recovery_files()) == 3
+
+
+def test_purge_recovery_requires_confirmation_and_only_deletes_bak_files(knowledge_base):
+    page_id = create(body="原文")
+    wiki.apply(batch(pages=[update(page_id, body="改后")]))
+    assert len(_recovery_files()) == 1
+    before_pages = wiki.list_pages()
+    history_before = wiki.history(id=page_id)
+    assert history_before["history"][0]["recovery_path"]  # 清理前历史带恢复副本指针
+    with pytest.raises(BusinessError) as exc:
+        wiki.purge_recovery(dry_run=False)
+    assert exc.value.code == "CONFIRMATION_REQUIRED" and exc.value.data["count"] == 1
+    assert len(_recovery_files()) == 1
+    result = wiki.purge_recovery(dry_run=False, confirmed=True)
+    assert result["committed"] and result["deleted_count"] == 1 and result["failed"] == []
+    assert not result["deletes_pages"] and not result["touches_audit"]
+    assert _recovery_files() == []
+    assert wiki.list_pages() == before_pages and read(page_id)["body"] == "改后"
+    # 副本删除只影响历史里的 recovery_path 指针；审计快照（before/after）原样保留。
+    history_after = wiki.history(id=page_id)
+    assert [item["before"] for item in history_after["history"]] == [item["before"] for item in history_before["history"]]
+    assert history_after["history"][0]["before"]["body"] == "原文"
+    assert "recovery_path" not in history_after["history"][0]
+    assert wiki.list_recovery()["total"] == 0
+    assert wiki.purge_recovery(dry_run=False, confirmed=True)["deleted_count"] == 0
+
+
+def test_purge_recovery_orphans_require_explicit_opt_in(knowledge_base):
+    create()
+    orphan = wiki.wiki_path() / f".wiki-recovery-{uuid4()}.bak"
+    orphan.write_bytes(b"orphan copy")
+    listing = wiki.list_recovery()
+    assert listing["counts"]["orphan"] == 1 and listing["recovery"][0]["status"] == "orphan"
+    assert listing["recovery"][0]["page_id"] is None
+    assert wiki.purge_recovery()["count"] == 0
+    assert wiki.purge_recovery(include_orphans=True)["count"] == 1
+    with pytest.raises(BusinessError) as exc:
+        wiki.purge_recovery(operation_ids=[listing["recovery"][0]["operation_id"]])
+    assert exc.value.code == "RECOVERY_REQUIRED"
+    with pytest.raises(BusinessError) as exc:
+        wiki.purge_recovery(operation_ids=[str(uuid4())])
+    assert exc.value.code == "NOT_FOUND"
+    assert wiki.purge_recovery(include_orphans=True, dry_run=False, confirmed=True)["deleted_count"] == 1
+    assert not orphan.exists() and wiki.list_pages()["total"] == 1
+    # 非恢复副本命名的隐藏文件既不被列出也不被删除。
+    stray = wiki.wiki_path() / ".wiki-notes.bak"
+    stray.write_bytes(b"keep")
+    assert wiki.list_recovery()["total"] == 0
+    wiki.purge_recovery(include_orphans=True, dry_run=False, confirmed=True)
+    assert stray.exists()
+
+
+def test_zero_write_batch_is_not_partial_failure_at_entrypoints(knowledge_base):
+    """一页都没写入时，MCP/API 信封应透出真实冲突码而不是 PARTIAL_FAILURE。"""
+    from indexing.mcp import server as index
+    page_id = create()
+    stale = update(page_id, body="过期")
+    wiki.apply(batch(pages=[update(page_id, body="抢先")]))
+    result = wiki.apply(batch(pages=[stale]))
+    assert not result["committed"] and result["partial"] and result["errors"][0]["code"] == "VERSION_CONFLICT"
+    envelope = index._write_envelope(result, "部分")
+    assert not envelope["success"] and envelope["error"]["code"] == "VERSION_CONFLICT"
+    assert envelope["data"] is result and envelope["message"] == result["errors"][0]["message"]
+    # 至少写入一页的批次仍然是 PARTIAL_FAILURE。
+    mixed = {"committed": True, "partial": True, "index_status": "stale",
+             "errors": [{"code": "CONTENT_CONFLICT", "message": "x"}]}
+    assert index._write_envelope(mixed, "部分")["error"]["code"] == "PARTIAL_FAILURE"
+    assert index._write_envelope({"committed": True, "partial": False, "index_status": "current"}, "部分")["success"]

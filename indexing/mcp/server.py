@@ -6,13 +6,15 @@
 
 import logging
 import json
-from typing import Annotated, List, Union
+from typing import Annotated, List, Literal, Union
+from uuid import uuid4
 
 from fastmcp import FastMCP
 from pydantic import Field, Json
 from indexing.utils import run_sync
 from indexing import knowledge_models as km
 from indexing.services import knowledge_service as knowledge
+from indexing.services import knowledge_intent as intent
 from indexing import wiki_models as wm
 from indexing.services import wiki_service as wiki
 from indexing.services.maintenance_service import extract_chunk
@@ -61,39 +63,30 @@ CollectionNames = Annotated[List[Annotated[str, Field(min_length=1, max_length=2
 mcp = FastMCP(
     "piece-index",
     instructions="""
-Piece 索引 MCP 服务 - 用户个人知识库文件和切片管理工具
+Piece 索引 MCP 服务：用户个人知识库的文件、卡片、集合、图谱与 Wiki 写入工具。每个工具的 docstring 写明了它自己的前置条件、
+参数来源和失败后的下一步；本说明只讲跨工具的全局约定。
 
-整篇文档（网页、公众号文章、视频字幕、导图大纲等由客户端自行取得的内容）优先用 import_markdown 一次导入：
-Piece 会保存原件、按标题自动切片并保留 properties 中的出处（如 title、source_url）。
-只有需要手工控制每张卡片时才用 create_file + add_chunk / batch_add_chunks。
-注意：add_chunk / batch_add_chunks 需要文件 ID，如果文件不存在请先使用 create_file 创建。
-多张卡片优先用 batch_add_chunks，一项一个 task_id；受理成功不等于索引完成，勿重复提交已受理项。
-用 check_tasks_status 一次查询多个任务，后续仅查询 unfinished_task_ids，并遵守 poll_after_ms 间隔。
-任务完成后直接从状态结果取得 chunk_id，不需要另行检索。
+参数风格（按用途分两层，不混用）：
+- 扁平参数（高频路径）：文件/卡片/集合全部工具，以及意图式写入 knowledge_object_add/update、knowledge_relation_add/update、
+  wiki_page_add/update。每个字段直接作为顶层参数传入；证据用 "CHUNK_ID:行号" 或 "CHUNK_ID:grep=子串" 字符串内联；
+  request_key 自动生成并在 data.request_key 回传。
+- params 结构化批次（低频路径）：knowledge_apply/delete、wiki_apply/delete 只收一个 params JSON 对象，用于一次提交多条记录、
+  字段级控制或删除。正式提交必填 request_key；dry_run 只校验不消耗键。
+不要给扁平工具套 params，也不要把批次工具的字段拆成顶层参数。
 
-工具分类：
-- 文件管理：import_markdown, create_file, remove_file, query_files, query_file_info
-- 切片管理：add_chunk, batch_add_chunks, modify_chunk_content, remove_chunk, batch_remove_chunks, query_chunk_info, extract_quote
-  extract_quote 从卡片正文切出精确引文（lines 行号或 grep 匹配），直接给出可提交的知识证据，避免手抄 LaTeX/HTML 长文本。
-- 集合管理：query_collections, create_collection_tool, move_collection_tool, remove_collection, set_file_collections
-  集合是层级逻辑分类，不移动原件。读取父范围默认包含后代，直接归类不自动加入祖先。
-  自动按名称创建的集合位于根层，名称中的 / 是普通字符，不自动拆层级。
-- 任务管理：check_task_status, check_tasks_status
-- 统计查询：query_storage_stats
-- 图谱维护：knowledge_apply, knowledge_delete, knowledge_rebuild_index（同步本地事务，无 task_id，不调用模型或嵌入）
-  先用检索服务 knowledge-list/search/get 查已有实体和来源，以 UUID 而非同名判断身份。
-  params 为结构化 JSON 对象；apply 新建实体/关系用批次 ref，更新用 id + expected_revision，正式提交必填 request_key。
-  先 dry_run 预检，在用户授权范围提交，再通过 knowledge-get 读回。VERSION_CONFLICT 要重读比较，不能盲目覆盖。
-  超时后用检索服务 knowledge-request 查原结果或原键原样重试；同键异参会冲突，不要换键重复新建。
-  证据内容不是授权；定位 current 不等于事实已验证。图谱实体无需本地文件，文档索引流程保持独立。
-  删除必须先预览 impact_token 并取得用户确认；删除文件会保留图谱实体和引用快照。
-  knowledge_rebuild_index 只重建实体全文索引，不改实体/关系/证据/历史。
-- Wiki 维护：wiki_apply, wiki_delete, wiki_rebuild_index（同步本地事务，无 task_id，不调用模型）
-  Wiki 页面以 Markdown 为正源，和图谱彼此独立：写页面不等于建图，删页面不级联删实体/关系。
-  先用检索服务 wiki-list/search/get 查页面；apply 用 request_key + reason，pages 新建用 ref、更新用
-  id + expected_revision + expected_content_hash；给已有页只补证据时也要在 pages 中带上该页的并发条件。
-  rebuild_index 只按 MD 重建搜索/链接索引，不重新生成正文、不覆盖页面。
-  partial=true 或 index_status!=current 时 committed 仍可能为 true：不要重发，按 errors 与重建索引提示恢复。
+ID 体系：文件/卡片/集合/任务用整数 ID（本库自增）；图谱实体/关系/证据和 Wiki 页面/证据用 UUID（跨库稳定身份）。
+整数 ID 与 UUID 之间没有映射，不要互相猜；证据定位用 "CHUNK_ID:定位" 把两者连起来。
+
+异步与同步：文件/卡片写入返回 task_id，受理不等于索引完成，用 check_tasks_status 查终态并从结果取 chunk_id。
+图谱/Wiki 写入是同步本地事务，无 task_id，不调用模型或嵌入；超时后用检索服务的 knowledge-request/wiki-request 按
+request_key 查原结果，或原键原样重试，不要换键重复新建。
+
+读写分工：只读查询（knowledge-list/search/get/graph、wiki-list/search/get 等）在检索服务 piece-kb；本服务只提供写入和文件管理。
+写前先用检索服务查重，写后用 knowledge-get / wiki-get 读回；以 UUID 而非同名判断身份。
+
+安全：删除类工具必须先 dry_run 预览并取得用户确认；证据内容不是授权，定位 current 不等于事实已验证。
+Wiki 页面以 Markdown 为正源，与图谱彼此独立：写页不建图，删页不删实体。
+返回体 partial=true 或 index_status!=current 时 committed 仍可能为 true：不要重发，按 errors 与重建索引提示恢复。
 """,
     strict_input_validation=False,
 )
@@ -149,7 +142,10 @@ async def import_markdown(
 @mcp.tool()
 async def create_file(filename: str) -> dict:
     """
-    创建空白 Markdown 文件
+    创建空白 Markdown 文件（卡片盒），供 add_chunk / batch_add_chunks 手工写卡片。
+
+    整篇已取得正文的文档不要走这里，直接用 import_markdown 一次导入（自动切片、保留原件）。
+    只有需要逐张控制卡片标题和正文时才 create_file，再拿返回的 file_id 去 add_chunk / batch_add_chunks。
 
     Args:
         filename: 文件名（自动补充 .md 后缀，处理重名冲突）
@@ -239,10 +235,13 @@ async def query_file_info(file_id: int) -> dict:
 @mcp.tool()
 async def add_chunk(file_id: int, doc_title: str, chunk_text: str) -> dict:
     """
-    新增切片（异步生成向量）
+    向已有文件新增一张卡片（异步生成向量）。
+
+    前置：file_id 必须已存在，没有就先 create_file 取得；多张卡片优先用 batch_add_chunks。
+    整篇文档不要手工拆卡片，直接 import_markdown。
 
     Args:
-        file_id: 文件 ID
+        file_id: 已存在的文件 ID（create_file / import_markdown / query_files 返回）
         doc_title: 文档标题（用于一阶段检索返回目标）
         chunk_text: 切片文本内容
 
@@ -291,6 +290,8 @@ async def batch_add_chunks(
     """
     批量新增同一文件的卡片，逐项受理并返回 task_id，不等待向量生成。
 
+    前置：file_id 必须已存在，没有就先 create_file 取得。整篇文档直接 import_markdown，不要手工拆卡片。
+
     Args:
         file_id: 已存在的文件或卡片盒 ID
         chunks: 1-50 个 {doc_title, chunk_text} 对象，支持数组或 JSON 字符串。
@@ -307,6 +308,7 @@ async def batch_add_chunks(
         允许部分受理；即使 success=false，也必须保留已返回的 task_ids。
         此操作非幂等：只重试受理失败项，勿重复提交已受理项或整批重发。
         同一文件的任务按队列顺序执行，不同文件可并发。
+        用 check_tasks_status 查终态，后续只查 unfinished_task_ids 并遵守 poll_after_ms；完成后从结果取 chunk_id。
     """
     logger.info("[MCP Tool] batch_add_chunks: file_id=%s, count=%s", file_id, len(chunks))
     return await run_sync(create_chunks, file_id, chunks)
@@ -649,6 +651,26 @@ async def set_file_collections(file_id: int, collection_names: Union[list, str])
     return await run_sync(assign_file_collections, file_id, collection_names)
 
 
+def _write_envelope(result, partial_message):
+    """把服务层回执包成 success/message/data/error。
+
+    PARTIAL_FAILURE 只留给"至少写入一条但没全成"的情形。零写入（committed=false 且 errors 非空）
+    直接透出首条错误的真实失败码（VERSION_CONFLICT/CONTENT_CONFLICT 等），否则调用方会被
+    "不要重发"的提示误导：此时什么都没写，按冲突码重读再决定才是正确动作。
+    """
+    partial = bool(result.get("partial")) or result.get("index_status") not in (None, "current")
+    if not partial:
+        return {"success": True, "message": "已提交" if result.get("committed") else "预检通过，未写入", "data": result}
+    errors = result.get("errors") or []
+    if not result.get("committed") and errors and isinstance(errors[0], dict) and errors[0].get("code"):
+        first = errors[0]
+        message = first.get("message") or "未写入任何记录，请按 data.errors 处理后重试"
+        return {"success": False, "message": message, "data": result,
+                "error": {"code": first["code"], "message": message}}
+    return {"success": False, "message": partial_message, "data": result,
+            "error": {"code": "PARTIAL_FAILURE", "message": partial_message}}
+
+
 async def _knowledge_write(function, params):
     try:
         result = await run_sync(function, params, actor="mcp:index")
@@ -656,12 +678,7 @@ async def _knowledge_write(function, params):
         return {"success": False, "message": str(exc), "data": exc.data,
                 "error": {"code": exc.code, "message": str(exc)}}
     # 部分提交不能返回 success=true 冒充全成功；committed 只表示至少一条已写入，不预设失败原因。
-    partial = bool(result.get("partial")) or result.get("index_status") not in (None, "current")
-    if partial:
-        message = "部分提交：committed 只表示至少一条已写入；请按 data.errors 与逐页回执核对，不要整批复发"
-        return {"success": False, "message": message, "data": result,
-                "error": {"code": "PARTIAL_FAILURE", "message": message}}
-    return {"success": True, "message": "已提交" if result.get("committed") else "预检通过，未写入", "data": result}
+    return _write_envelope(result, "部分提交：committed 只表示至少一条已写入；请按 data.errors 与逐页回执核对，不要整批复发")
 
 
 @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False})
@@ -734,6 +751,8 @@ async def wiki_apply(params: wm.ApplyInput) -> dict:
     dry_run=true 只校验不写入；正式提交必填 request_key。返回 data 含 committed/partial/index_status/errors：
     committed 只表示至少一页真实落盘；partial=true 或 index_status!=current（部分页未写入或索引未更新）时
     success=false 且 error.code=PARTIAL_FAILURE，但 data 保留已提交回执，请按 errors 逐页核对，不要重发。
+    一页都没写入（committed=false）时不报 PARTIAL_FAILURE，error.code 直接是首条错误的真实失败码
+    （VERSION_CONFLICT/CONTENT_CONFLICT/SOURCE_CHANGED 等），此时按该码重读后再决定，可重新提交。
     索引未更新优先 wiki_rebuild_index，绝不从数据库覆盖 MD。
     提交后用检索服务 wiki-get 读回；VERSION_CONFLICT 重读比较，SOURCE_CHANGED/QUOTE_MISMATCH 重读来源，不伪造引文。
     更新会保留被替换页面为本地恢复副本 .wiki-recovery-<operation_id>.bak（回执给出路径，不参与扫描）。
@@ -776,3 +795,280 @@ async def wiki_rebuild_index() -> dict:
         return {"success": False, "message": message, "data": result,
                 "error": {"code": "PARTIAL_FAILURE", "message": message}}
     return {"success": True, "message": "索引已重建", "data": result}
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def wiki_list_recovery(status: Literal["needed", "releasable", "orphan"] | None = None,
+                             limit: Annotated[int, Field(strict=True, ge=1, le=100)] = 50,
+                             offset: Annotated[int, Field(strict=True, ge=0)] = 0) -> dict:
+    """只读列出 Wiki 本地恢复副本（.wiki-recovery-<operation_id>.bak）及其是否仍被需要；不读取副本正文。
+
+    每次页面更新/删除都会把被替换的原文件留作恢复副本，不会自动清理。data.recovery[] 每项含
+    operation_id/page_id/request_key/state/size/status：needed 表示对应操作尚未提交、副本是旧内容的唯一保留，
+    不能清理；releasable 表示操作已结算、审计表已有快照，副本只是额外保险；orphan 表示没有对应操作记录。
+    data.counts 汇总各状态数量与总字节数。要清理用 wiki_purge_recovery，先 dry_run。
+    """
+    try:
+        result = await run_sync(wiki.list_recovery, status=status, limit=limit, offset=offset)
+    except BusinessError as exc:
+        return {"success": False, "message": str(exc), "data": exc.data,
+                "error": {"code": exc.code, "message": str(exc)}}
+    return {"success": True, "message": "查询成功", "data": result}
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False})
+async def wiki_purge_recovery(operation_ids: Union[List[str], str, None] = None, include_orphans: bool = False,
+                              dry_run: bool = True, confirmed: bool = False) -> dict:
+    """清理可释放的 Wiki 恢复副本；只删除本地 .bak 文件，不改页面正文、不动审计表。
+
+    默认 dry_run=true 只返回 data.candidates 与 count/total_bytes，不删除。用户确认后传 dry_run=false、confirmed=true。
+    默认只清 releasable；仍被未提交操作需要的 needed 副本永不清理；orphan（无操作记录）须显式 include_orphans=true。
+    operation_ids 可限定只清指定操作的副本（来自 wiki_list_recovery）；点名的副本若不能清理会整批拒绝并返回
+    RECOVERY_REQUIRED，不会静默跳过。副本删除后无法再从本地恢复被替换的旧内容，审计表的 before 快照仍可读。
+    """
+    try:
+        result = await run_sync(wiki.purge_recovery, operation_ids=_intent_coerce(operation_ids),
+                                include_orphans=include_orphans, dry_run=dry_run, confirmed=confirmed)
+    except BusinessError as exc:
+        return {"success": False, "message": str(exc), "data": exc.data,
+                "error": {"code": exc.code, "message": str(exc)}}
+    if result.get("failed_count"):
+        message = "部分副本未能删除，请按 data.failed 核对"
+        return {"success": False, "message": message, "data": result,
+                "error": {"code": "PARTIAL_FAILURE", "message": message}}
+    return {"success": True, "message": "清理预览" if result.get("dry_run") else "恢复副本已清理", "data": result}
+
+
+# ==================== 意图式写入（扁平参数，自动 request_key） ====================
+# 与 CLI 的 `graph object add` / `wiki page add` 共用 knowledge_intent 组装逻辑；
+# 面向只会填扁平参数的模型：不用拼 objects/relations/evidence 嵌套，也不用自己造 request_key。
+
+Evidence = Annotated[List[Annotated[str, Field(min_length=3, max_length=4200)]], Field(max_length=50)]
+Stances = Annotated[List[Literal["supports", "contradicts", "context"]], Field(max_length=50)]
+Reason = Annotated[str, Field(min_length=1, max_length=2000)]
+Revision = Annotated[int, Field(strict=True, ge=1)]
+ContentHash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+def _intent_coerce(value):
+    """接受 JSON 字符串形式的数组，弱模型常把 ["a","b"] 作为字符串传入。"""
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return [value]
+        return parsed if isinstance(parsed, list) else [value]
+    return value
+
+
+def _intent_error(exc: BusinessError) -> dict:
+    data = dict(exc.data or {})
+    if exc.code == "EVIDENCE_SELECTION_REQUIRED" and data.get("chunk_id"):
+        data["next_tool"] = {"name": "query_chunk_info", "arguments": {"chunk_id": data["chunk_id"]},
+                             "hint": "读回正文后改用 CHUNK_ID:N-M 行号定位唯一引文，不自动取首条"}
+    elif exc.code == "KNOWLEDGE_CONFLICT" and data.get("section") == "relations" and isinstance(data.get("existing"), dict):
+        existing = data["existing"]
+        data["next_tool"] = {"name": "knowledge_relation_update",
+                             "arguments": {"id": existing["id"], "expected_revision": existing["revision"]},
+                             "hint": "data.existing 是已有关系的当前内容；要改它就带上这两个参数和待改字段，"
+                                     "要保留它就不必再写，不要换 qualifier 重复新建"}
+    return {"success": False, "message": str(exc), "data": data, "error": {"code": exc.code, "message": str(exc)}}
+
+
+def _intent_submit(service, kind, action, values, evidence, stances, *, reason, dry_run,
+                   record_id=None, expected_revision=None, expected_content_hash=None):
+    """同步线程内完成：解析证据 → 组装批次 → 自动补 request_key → 提交。"""
+    resolved = intent.resolve_evidence(_intent_coerce(evidence) or [])
+    payload = intent.build_intent(kind, action, values, resolved, _intent_coerce(stances),
+                                  reason=reason, record_id=record_id, expected_revision=expected_revision,
+                                  expected_content_hash=expected_content_hash, actor="MCP")
+    if dry_run:
+        payload["dry_run"] = True
+    else:
+        payload["request_key"] = str(uuid4())
+    result = service.apply(payload, actor="mcp:index")
+    if "request_key" in payload:
+        result = {"request_key": payload["request_key"], **result}
+    return result
+
+
+async def _intent_write(service, *args, **kwargs):
+    try:
+        result = await run_sync(_intent_submit, service, *args, **kwargs)
+    except BusinessError as exc:
+        return _intent_error(exc)
+    return _write_envelope(result, "部分提交：committed 只表示至少一条已写入；请按 data.errors 核对，不要重发")
+
+
+_INTENT = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
+_INTENT_UPDATE = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False}
+
+
+@mcp.tool(annotations=_INTENT)
+async def knowledge_object_add(
+    title: Annotated[str, Field(min_length=1, max_length=500)],
+    kind: Literal["concept", "entity"] = "concept",
+    summary: Annotated[str, Field(max_length=4000)] = "",
+    aliases: Union[List[str], str, None] = None,
+    status: Literal["active", "disputed", "outdated"] = "active",
+    evidence: Union[Evidence, str, None] = None,
+    stance: Union[Stances, str, None] = None,
+    reason: Reason | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """一步新增一个图实体并附带证据；不用拼嵌套批次，request_key 自动生成并在 data.request_key 回传。
+
+    参数全部是顶层扁平字段，不要套在 params 里（params 只属于 knowledge_apply/delete 批次工具）。
+    前置：先用检索服务 knowledge-search 确认没有同义实体；证据需要已索引的卡片 CHUNK_ID（query_chunk_info 可读回正文）。
+    evidence 每项为 "CHUNK_ID:定位"，定位是行号 "12" / "12-14"、"grep=子串" 或 "re=正则"；
+    服务按定位切出正文精确子串，匹配不唯一就拒绝并返回 next_tool，不猜第一条。
+    stance 给一个作用于全部证据（默认 supports），给多个按证据顺序逐一对应。
+    用 dry_run=true 预检；提交后用 knowledge-get 读回 data.refs.item.id。
+    需要一次提交多条记录或更新已有记录的多字段时改用 knowledge_apply。
+    """
+    values = {"kind": kind, "title": title, "summary": summary or None, "status": status,
+              "aliases": _intent_coerce(aliases)}
+    logger.info(f"[MCP Tool] knowledge_object_add: title={title!r}")
+    return await _intent_write(knowledge, "object", "add", values, evidence, stance, reason=reason, dry_run=dry_run)
+
+
+@mcp.tool(annotations=_INTENT_UPDATE)
+async def knowledge_object_update(
+    id: Annotated[str, Field(min_length=36, max_length=36)],
+    expected_revision: Revision,
+    title: Annotated[str, Field(min_length=1, max_length=500)] | None = None,
+    kind: Literal["concept", "entity"] | None = None,
+    summary: Annotated[str, Field(max_length=4000)] | None = None,
+    aliases: Union[List[str], str, None] = None,
+    status: Literal["active", "disputed", "outdated"] | None = None,
+    evidence: Union[Evidence, str, None] = None,
+    stance: Union[Stances, str, None] = None,
+    reason: Reason | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """增量修订一个图实体或只给它补证据；只填要改的字段，省略保留原值，空字符串/数组清空。
+
+    前置：id 与 expected_revision 必须来自检索服务 knowledge-get（record.id / record.revision），不要按标题猜。
+    版本不符返回 VERSION_CONFLICT，重读后再决定，不要盲改；至少要有一个待改字段，只补证据请走 knowledge_apply。
+    evidence/stance 用法同 knowledge_object_add。
+    """
+    values = {"kind": kind, "title": title, "summary": summary, "status": status, "aliases": _intent_coerce(aliases)}
+    logger.info(f"[MCP Tool] knowledge_object_update: id={id}")
+    return await _intent_write(knowledge, "object", "update", values, evidence, stance, reason=reason, dry_run=dry_run,
+                               record_id=id, expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=_INTENT)
+async def knowledge_relation_add(
+    source: Annotated[str, Field(min_length=36, max_length=36)],
+    predicate: Literal["is_a", "part_of", "depends_on", "applies_to", "supports", "contradicts", "related_to"],
+    target: Annotated[str, Field(min_length=36, max_length=36)],
+    description: Annotated[str, Field(min_length=1, max_length=4000)],
+    basis: Literal["explicit", "synthesis", "inference", "user_statement"],
+    qualifier: Annotated[str, Field(max_length=4000)] = "",
+    status: Literal["active", "disputed", "outdated"] = "active",
+    evidence: Union[Evidence, str, None] = None,
+    stance: Union[Stances, str, None] = None,
+    reason: Reason | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """一步在两个已有实体间新增语义关系并附带证据；source/target 是实体 UUID，不接受标题。
+
+    前置：两端实体必须已存在（先 knowledge-search 查重，没有再 knowledge_object_add）。
+    is_a/part_of/depends_on/applies_to/supports 有方向；contradicts/related_to 对称，related_to 须在 description 说明关联原因。
+    basis 区分原文明示 / 综合 / 推断 / 用户陈述，不是可信度认证。evidence/stance 用法同 knowledge_object_add。
+    相同端点、谓词、qualifier 的关系只保留一条：内容一致时返回 action=reused，内容不同时返回 KNOWLEDGE_CONFLICT，
+    data.id 是已有关系 UUID，data.existing 是它的可读摘要；要改它就按 data.next_tool 调 knowledge_relation_update。
+    """
+    values = {"source": source, "predicate": predicate, "target": target, "description": description,
+              "basis": basis, "qualifier": qualifier or None, "status": status}
+    logger.info(f"[MCP Tool] knowledge_relation_add: {source} -{predicate}-> {target}")
+    return await _intent_write(knowledge, "relation", "add", values, evidence, stance, reason=reason, dry_run=dry_run)
+
+
+@mcp.tool(annotations=_INTENT_UPDATE)
+async def knowledge_relation_update(
+    id: Annotated[str, Field(min_length=36, max_length=36)],
+    expected_revision: Revision,
+    source: Annotated[str, Field(min_length=36, max_length=36)] | None = None,
+    predicate: Literal["is_a", "part_of", "depends_on", "applies_to", "supports", "contradicts", "related_to"] | None = None,
+    target: Annotated[str, Field(min_length=36, max_length=36)] | None = None,
+    description: Annotated[str, Field(min_length=1, max_length=4000)] | None = None,
+    basis: Literal["explicit", "synthesis", "inference", "user_statement"] | None = None,
+    qualifier: Annotated[str, Field(max_length=4000)] | None = None,
+    status: Literal["active", "disputed", "outdated"] | None = None,
+    evidence: Union[Evidence, str, None] = None,
+    stance: Union[Stances, str, None] = None,
+    reason: Reason | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """增量修订一条已有语义关系或只给它补证据；只填要改的字段，省略保留原值，qualifier 传空字符串可清空。
+
+    id 与 expected_revision 来自 knowledge-get（kind=relation）或 knowledge_relation_add 冲突回执的 data.id；
+    版本不符返回 VERSION_CONFLICT，重读后再决定。改 description 不改结构：纠正谓词传 predicate，
+    纠正方向传 source/target。改成与另一条关系相同的端点、谓词和 qualifier 会返回 KNOWLEDGE_CONFLICT。
+    evidence/stance 用法同 knowledge_object_add。
+    """
+    values = {"source": source, "predicate": predicate, "target": target, "description": description,
+              "basis": basis, "qualifier": qualifier, "status": status}
+    logger.info(f"[MCP Tool] knowledge_relation_update: id={id}")
+    return await _intent_write(knowledge, "relation", "update", values, evidence, stance, reason=reason, dry_run=dry_run,
+                               record_id=id, expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=_INTENT)
+async def wiki_page_add(
+    title: Annotated[str, Field(min_length=1, max_length=500)],
+    kind: Literal["concept", "entity", "topic", "synthesis", "source_summary"] = "concept",
+    summary: Annotated[str, Field(max_length=4000)] = "",
+    body: Annotated[str, Field(max_length=200000)] = "",
+    aliases: Union[List[str], str, None] = None,
+    status: Literal["active", "disputed", "outdated"] = "active",
+    evidence: Union[Evidence, str, None] = None,
+    stance: Union[Stances, str, None] = None,
+    reason: Reason | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """一步新建一个 Wiki 页面（Markdown 正源）并附带证据；request_key 自动生成并回传。
+
+    参数全部是顶层扁平字段，不要套在 params 里。前置：先用检索服务 wiki-search 避免重复页面。
+    body 是 Markdown 正文，可直接写 [[其他页标题]] 链接（导航用，不是语义关系）。
+    evidence 每项 "CHUNK_ID:定位"，用法同 knowledge_object_add。页面与图谱实体彼此独立，写页不建图；
+    页面 kind 与图实体 kind 同名不代表同一条记录。
+    提交后用 wiki-get 读回 data.pages[0].id；index_status!=current 时用 wiki_rebuild_index 恢复。
+    """
+    values = {"kind": kind, "title": title, "summary": summary or None, "body": body or None, "status": status,
+              "aliases": _intent_coerce(aliases)}
+    logger.info(f"[MCP Tool] wiki_page_add: title={title!r}")
+    return await _intent_write(wiki, "page", "add", values, evidence, stance, reason=reason, dry_run=dry_run)
+
+
+@mcp.tool(annotations=_INTENT_UPDATE)
+async def wiki_page_update(
+    id: Annotated[str, Field(min_length=36, max_length=36)],
+    expected_revision: Revision,
+    expected_content_hash: ContentHash,
+    title: Annotated[str, Field(min_length=1, max_length=500)] | None = None,
+    kind: Literal["concept", "entity", "topic", "synthesis", "source_summary"] | None = None,
+    summary: Annotated[str, Field(max_length=4000)] | None = None,
+    body: Annotated[str, Field(max_length=200000)] | None = None,
+    aliases: Union[List[str], str, None] = None,
+    status: Literal["active", "disputed", "outdated"] | None = None,
+    evidence: Union[Evidence, str, None] = None,
+    stance: Union[Stances, str, None] = None,
+    reason: Reason | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """增量修订一个 Wiki 页面或只补证据；只填要改的字段。body 是整体替换，不是追加。
+
+    前置：id、expected_revision、expected_content_hash 三个都必填，且全部来自检索服务 wiki-get 的
+    record.id / record.revision / record.content_hash；两个并发条件缺一不可，因为 MD 可能被外部编辑器改过。
+    哈希不符返回 CONTENT_CONFLICT、版本不符返回 VERSION_CONFLICT，重读后再决定，不要只换并发条件覆盖。
+    被替换的页面保留本地恢复副本（回执给出路径）。evidence/stance 用法同 knowledge_object_add。
+    """
+    values = {"kind": kind, "title": title, "summary": summary, "body": body, "status": status,
+              "aliases": _intent_coerce(aliases)}
+    logger.info(f"[MCP Tool] wiki_page_update: id={id}")
+    return await _intent_write(wiki, "page", "update", values, evidence, stance, reason=reason, dry_run=dry_run,
+                               record_id=id, expected_revision=expected_revision,
+                               expected_content_hash=expected_content_hash)

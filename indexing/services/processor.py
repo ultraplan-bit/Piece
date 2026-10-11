@@ -29,7 +29,7 @@ from .chunking import ChunkerFactory, PageChunker
 from .chunking.utils import strip_obsidian_noise
 from .converter import convert_to_markdown, iter_pdf_pages
 from .embedding_client import get_embeddings_model
-from .metadata_service import parse_frontmatter
+from .metadata_service import decode_metadata, parse_frontmatter
 from .mineru_client import iter_mineru_pdf_pages
 from .ocr_client import iter_ocr_pdf_pages
 from .office_convert import (
@@ -274,6 +274,11 @@ def _publish_file(task_id, file_id, working_path, metadata):
         cursor.execute("UPDATE files SET file_path = ?, status = 'indexed', working_dirty = 0, updated_at = ? WHERE id = ?",
                        (str(working_path), task_service.now_marker(), file_id))
         if metadata:
+            # 普通属性沿用 frontmatter；来源由导入服务登记，不能被正文里的旧副本覆盖。
+            current = cursor.execute("SELECT metadata FROM files WHERE id = ?", (file_id,)).fetchone()
+            sources = decode_metadata(current["metadata"]).get("zotero_sources") if current else None
+            if sources:
+                metadata = {**metadata, "zotero_sources": sources}
             cursor.execute("UPDATE files SET metadata = ? WHERE id = ?", (json.dumps(metadata, ensure_ascii=False), file_id))
         cursor.execute("DELETE FROM staged_chunks WHERE task_id = ?", (task_id,))
         task_service.update_task_status(task_id, "completed", progress=100,

@@ -185,7 +185,8 @@ class SearchInput(ListInput):
 
 
 class GetInput(Input):
-    kind: RecordKind
+    """kind 省略时按 UUID 在实体/关系/证据三张表中探测；UUID 全局唯一，不会歧义。"""
+    kind: RecordKind | None = None
     id: Uuid
     limit: Limit = 50
     offset: Offset = 0

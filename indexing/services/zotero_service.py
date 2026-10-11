@@ -1,107 +1,275 @@
-"""Zotero 文献库一次性导入：通过 Zotero 7+ 的本机 Local API 读取元数据与附件路径。
-
-只读、零新增依赖（httpx 已有）。一个带 PDF 附件的 Zotero 条目对应一个 Piece 文件：
-附件按 API 给出的本机绝对路径交给 file_service.import_file 复制入库，条目元数据随
-登记写入 files.metadata，Zotero 集合树按路径拼接映射到 Piece 的扁平集合。
-"""
+"""Zotero 本机查阅和按需导入；书目、附件来源与 Piece 文件内容分别管理。"""
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-import httpx
-
+from ..database import get_db_cursor
 from . import collection_service, file_service
 from .errors import BusinessError
+from .zotero_client import (
+    DEFAULT_BASE_URL, USER_PREFIX, PERSONAL_LIBRARY, ZoteroClient,
+    item_key as _key, item_keys as _keys, pagination,
+)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "http://127.0.0.1:23119/api"
-USER_PREFIX = "/users/0"
-PAGE_SIZE = 100
 PDF_TYPE = "application/pdf"
 MAX_ABSTRACT = 500
 COLLECTION_MODES = ("path", "top", "none")
-_ENABLE_HINT = "请在 Zotero 的「设置 → 高级 → 允许本机其他应用程序与 Zotero 通信」中开启"
 _INVALID_NAME_CHARS = re.compile(r'[/\\:<>"|?*\x00-\x1f]+')
-# Zotero 在 creatorSummary 里加了双向隔离控制符，自行拼作者串时不引入
 _WHITESPACE = re.compile(r"\s+")
 
 
-class ZoteroClient:
-    """Zotero Local API 的最小只读客户端（阻塞调用，由上层放到线程池执行）。"""
+@contextmanager
+def _client_scope(client=None, *, base_url=None, server_id=None, timeout=30.0):
+    owned = client is None
+    client = client or ZoteroClient(base_url, server_id=server_id, timeout=timeout)
+    try:
+        client.bind(server_id)
+        yield client
+    finally:
+        if owned:
+            client.close()
 
-    def __init__(self, base_url: str | None = None, *, timeout: float = 30.0, transport=None):
-        self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
-        self._client = httpx.Client(timeout=timeout, transport=transport)
 
-    def close(self) -> None:
-        self._client.close()
+def status(server_id=None, *, client=None) -> dict:
+    """只探测，不弹授权框；缓存的授权仍可能已在 Zotero 中撤销。"""
+    from ..settings import get_settings
+    from .zotero_write_service import authorization_status
+    enabled = get_settings().zotero_write_enabled
+    try:
+        with _client_scope(client, server_id=server_id) as local:
+            info = local.probe()
+    except BusinessError as exc:
+        return {"connected": False, "write_enabled": enabled,
+                "error": {"code": exc.code, "message": str(exc)}}
+    return {**info, "connected": True, "write_enabled": enabled,
+            "authorization": authorization_status(info["server_id"]),
+            "capabilities": {"read": True, "write": info["write_supported"] and enabled,
+                             "group_libraries": False, "search_scope": "title_creator_year",
+                             "search_scopes": sorted(SEARCH_SCOPES)}}
 
-    def __enter__(self):
-        return self
 
-    def __exit__(self, *exc):
-        self.close()
+def _summary(item: dict) -> dict:
+    data = item.get("data") or {}
+    names = ("itemType", "title", "creators", "date", "DOI", "url", "tags", "collections",
+             "parentItem", "contentType", "linkMode", "annotationType", "annotationPageLabel")
+    result = {"key": item.get("key"), "version": item.get("version"),
+              "data": {name: data[name] for name in names if name in data}, "meta": item.get("meta", {})}
+    truncated = []
+    for name in ("abstractNote", "note", "annotationText", "annotationComment"):
+        if name in data:
+            value = str(data[name])
+            result["data"][name] = value[:1000]
+            if len(value) > 1000:
+                truncated.append(name)
+    if truncated:
+        result["truncated_fields"] = truncated
+    result["source_kind"] = {"note": "user_note", "annotation": "user_annotation",
+                             "attachment": "attachment"}.get(data.get("itemType"), "bibliographic_metadata")
+    return result
 
-    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> httpx.Response:
-        url = f"{self.base_url}{path}"
+
+SEARCH_SCOPES = {"title_creator_year": "titleCreatorYear", "everything": "everything"}
+
+
+def search(query="", collection_key=None, tag=None, item_type=None, limit=20, offset=0,
+           server_id=None, scope="title_creator_year", *, client=None) -> dict:
+    """scope=everything 走 Zotero 本地 quicksearch-everything：覆盖全部字段、笔记与已索引全文；
+    是否真的搜到附件正文取决于 Zotero 自己的全文索引是否完整，结果不等于“全文无此内容”。"""
+    pagination(limit, offset)
+    if not isinstance(query, str) or len(query) > 1000:
+        raise BusinessError("INVALID_INPUT", "query 必须是不超过 1000 字符的文本")
+    if scope not in SEARCH_SCOPES:
+        raise BusinessError("INVALID_INPUT", f"scope 只能是 {', '.join(SEARCH_SCOPES)}")
+    params = {"q": query, "qmode": SEARCH_SCOPES[scope]}
+    if tag is not None:
+        if not isinstance(tag, str) or not tag.strip() or len(tag) > 1000:
+            raise BusinessError("INVALID_INPUT", "tag 必须是不超过 1000 字符的非空标签筛选条件")
+        params["tag"] = tag
+    if item_type is not None:
+        if not isinstance(item_type, str) or not re.fullmatch(r"[A-Za-z]{1,50}", item_type):
+            raise BusinessError("INVALID_INPUT", "item_type 必须是单个 Zotero 条目类型")
+        params["itemType"] = item_type
+    with _client_scope(client, server_id=server_id) as local:
+        info = local.probe()
+        path = f"{USER_PREFIX}/items/top"
+        if collection_key is not None:
+            local.collection(collection_key)
+            path = f"{USER_PREFIX}/collections/{collection_key}/items/top"
+        page = local.page(path, params, limit=limit, offset=offset)
+    everything = scope == "everything"
+    return {**page, "items": [_summary(item) for item in page["items"]], "zotero": info,
+            "search_scope": scope, "fulltext_searched": everything,
+            "notes_searched": everything, "annotations_searched": everything,
+            "collection_includes_descendants": False}
+
+
+def list_collections(parent_key=None, limit=50, offset=0, server_id=None, *, client=None) -> dict:
+    pagination(limit, offset)
+    with _client_scope(client, server_id=server_id) as local:
+        info = local.probe()
+        path = f"{USER_PREFIX}/collections"
+        if parent_key is not None:
+            local.collection(parent_key)
+            path += f"/{parent_key}/collections"
+        return {**local.page(path, limit=limit, offset=offset), "zotero": info}
+
+
+def list_tags(collection_key=None, limit=50, offset=0, server_id=None, *, client=None) -> dict:
+    pagination(limit, offset)
+    with _client_scope(client, server_id=server_id) as local:
+        info = local.probe()
+        path = f"{USER_PREFIX}/tags"
+        if collection_key is not None:
+            local.collection(collection_key)
+            # Local API 没有 /collections/{key}/tags 路由（Web API 才有），只有 /items/tags 形式。
+            path = f"{USER_PREFIX}/collections/{collection_key}/items/tags"
+        return {**local.page(path, limit=limit, offset=offset), "zotero": info}
+
+
+def get_item(item_key, server_id=None, *, client=None) -> dict:
+    _key(item_key)
+    with _client_scope(client, server_id=server_id) as local:
+        info = local.probe()
+        item = local.item(item_key)
+    return {"zotero": info, "item": item, "source_kind": _summary(item)["source_kind"]}
+
+
+def get_children(item_key, item_type=None, limit=20, offset=0, server_id=None, *, client=None) -> dict:
+    _key(item_key)
+    pagination(limit, offset)
+    if item_type not in {None, "note", "attachment", "annotation"}:
+        raise BusinessError("INVALID_INPUT", "子项类型仅支持 note、attachment、annotation")
+    with _client_scope(client, server_id=server_id) as local:
+        info = local.probe()
+        parent = local.item(item_key)
+        if item_type == "annotation" and parent["data"].get("itemType") != "attachment":
+            raise BusinessError("INVALID_INPUT", "读取批注请先取得 PDF 附件 key，不能用文献条目 key 代替")
+        page = local.page(f"{USER_PREFIX}/items/{item_key}/children",
+                          {"itemType": item_type} if item_type else None, limit=limit, offset=offset)
+    return {**page, "items": [_summary(item) for item in page["items"]],
+            "zotero": info, "parent": _summary(parent)}
+
+
+def get_fulltext(attachment_key, offset=0, limit=12000, server_id=None, *, client=None) -> dict:
+    _key(attachment_key)
+    pagination(limit, offset, maximum=50000)
+    with _client_scope(client, server_id=server_id) as local:
+        info = local.probe()
+        attachment = local.item(attachment_key)
+        if attachment["data"].get("itemType") != "attachment":
+            raise BusinessError("INVALID_INPUT", "全文接口需要附件 key")
         try:
-            response = self._client.get(url, params=params)
-        except httpx.HTTPError as exc:
-            raise BusinessError("ZOTERO_UNAVAILABLE",
-                                f"无法连接 Zotero（{self.base_url}）：{exc}；请确认 Zotero 7 及以上版本正在运行") from exc
-        if response.status_code == 403:
-            raise BusinessError("ZOTERO_DISABLED", f"Zotero 拒绝了本机 API 访问；{_ENABLE_HINT}")
-        if response.status_code == 404:
-            raise BusinessError("NOT_FOUND", f"Zotero 中不存在该对象：{path}")
-        if not (200 <= response.status_code < 300):
-            raise BusinessError("ZOTERO_ERROR", f"Zotero 返回 {response.status_code}：{response.text[:200]}")
-        return response
+            response = local._get(f"{USER_PREFIX}/items/{attachment_key}/fulltext")
+        except BusinessError as exc:
+            if exc.code == "NOT_FOUND":
+                # 直接给出可执行的替代路径：先按同一附件预览导入，确认后再 import，由 Piece 解析实际 PDF。
+                raise BusinessError(
+                    "ZOTERO_FULLTEXT_UNAVAILABLE",
+                    "附件没有可用的 Zotero 全文索引；可改为把实际 PDF 导入 Piece 后再读正文：先 zotero_preview_import，"
+                    "确认后用相同范围 zotero_import，索引完成后用检索服务读取",
+                    data={"attachment_key": attachment_key, "parent_item_key": attachment["data"].get("parentItem"),
+                          "next_tool": {"name": "zotero_preview_import",
+                                        "arguments": {"attachment_keys": [attachment_key],
+                                                      **({"server_id": server_id} if server_id else {})},
+                                        "hint": "预览只列出将导入的附件，不写入；确认后用相同 attachment_keys 调 zotero_import"},
+                          "next_command": f"zotero preview --attachment-key {attachment_key}"
+                                          + (f" --server-id {server_id}" if server_id else "") + " --json"},
+                ) from None
+            raise
+        value = local.json(response)
+        if not isinstance(value, dict) or not isinstance(value.get("content"), str):
+            raise BusinessError("ZOTERO_ERROR", "Zotero 全文响应格式异常")
+    content = value["content"]
+    coverage = {name: value[name] for name in ("indexedChars", "totalChars", "indexedPages", "totalPages") if name in value}
+    complete = None
+    for unit in ("Pages", "Chars"):
+        indexed, total = coverage.get(f"indexed{unit}"), coverage.get(f"total{unit}")
+        if type(total) is int and total > 0 and type(indexed) is int:
+            complete = indexed >= total
+            break
+    return {"zotero": info, "attachment_key": attachment_key, "parent_item_key": attachment["data"].get("parentItem"),
+            "source_kind": "zotero_indexed_fulltext", "content": content[offset:offset + limit],
+            "offset": offset, "limit": limit, "text_length": len(content),
+            "next_offset": offset + limit if offset + limit < len(content) else None,
+            "coverage": coverage, "complete": complete, "version": response.headers.get("Last-Modified-Version"),
+            "notice": "这是 Zotero 已索引文本，不保证覆盖完整 PDF；公式、表格和原页需用实际附件核对。"}
 
-    def probe(self) -> Dict[str, Any]:
-        """确认 Local API 可用，并取回版本信息。"""
-        response = self._get("/")
-        return {
-            "base_url": self.base_url,
-            "zotero_version": response.headers.get("X-Zotero-Version"),
-            "api_version": response.headers.get("Zotero-API-Version"),
-            "schema_version": response.headers.get("Zotero-Schema-Version"),
-        }
 
-    def _paged(self, path: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        """按 Total-Results 分页取全；Local API 默认不分页，但大库仍分批更稳。"""
-        items: List[Dict[str, Any]] = []
-        start = 0
-        while True:
-            response = self._get(path, {**(params or {}), "limit": PAGE_SIZE, "start": start})
-            page = response.json()
-            if not isinstance(page, list):
-                raise BusinessError("ZOTERO_ERROR", f"Zotero 响应格式异常：{path}")
-            items.extend(page)
-            total = response.headers.get("Total-Results")
-            start += len(page)
-            if not page or total is None or start >= int(total):
-                break
-        return items
+def export_citations(item_keys, format="bib", style="apa", locale="en-US", server_id=None, *, client=None) -> dict:
+    keys = _keys(item_keys, name="item_keys")
+    if format not in {"bib", "citation", "bibtex", "ris", "csljson"}:
+        raise BusinessError("INVALID_INPUT", "format 仅支持 bib、citation、bibtex、ris、csljson")
+    if not isinstance(style, str) or not re.fullmatch(r"[a-z0-9-]{1,200}", style):
+        raise BusinessError("INVALID_INPUT", "style 需要 Zotero 引用样式名，不接受 URL")
+    if not isinstance(locale, str) or not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", locale):
+        raise BusinessError("INVALID_INPUT", "locale 格式无效，例如 zh-CN 或 en-US")
+    with _client_scope(client, server_id=server_id) as local:
+        info = local.probe()
+        for key in keys:
+            item = local.item(key)
+            if item["data"].get("itemType") in {"note", "annotation", "attachment"}:
+                raise BusinessError("INVALID_INPUT", "引用导出需要文献条目 key，而不是笔记或附件 key")
+        params = {"itemKey": ",".join(keys), "format": "json" if format == "citation" else format,
+                  "style": style, "locale": locale, "limit": len(keys)}
+        if format == "citation":
+            params["include"] = "citation"
+        # /items?itemKey= 会连带返回附件、笔记子项，再按 limit 截断就会漏掉排序靠后的文献；/items/top 只返回顶层条目。
+        response = local._get(f"{USER_PREFIX}/items/top", params)
+        content = local.json(response) if format in {"citation", "csljson"} else response.text
+        returned = len(content) if isinstance(content, list) else None
+    result = {"zotero": info, "item_keys": keys, "format": format, "content": content}
+    if returned is not None and returned != len(keys):
+        result["warning"] = f"Zotero 返回 {returned} 条，与请求的 {len(keys)} 条不一致，请核对条目"
+    return result
 
-    def top_items(self) -> List[Dict[str, Any]]:
-        return self._paged(f"{USER_PREFIX}/items/top")
 
-    def attachments(self) -> List[Dict[str, Any]]:
-        return self._paged(f"{USER_PREFIX}/items", {"itemType": "attachment"})
+def _source_links(server_id, *, item_keys=None, attachment_keys=None, limit=100, offset=0) -> dict:
+    if not server_id:
+        return {"links": [], "total": 0, "identity_verified": False,
+                "notice": "旧版 Zotero 无稳定实例标识；不能仅凭 key 判断已有关联，请按附件内容查重。"}
+    field, values = ("item_key", item_keys) if item_keys is not None else ("attachment_key", attachment_keys)
+    placeholders = ",".join("?" for _ in values)
+    sql = f"""WITH sources AS (
+        SELECT f.id AS file_id, f.filename, f.status, f.file_hash,
+               CASE WHEN s.type='object' THEN s.value ELSE '{{}}' END AS source
+        FROM files f, json_each(CASE WHEN json_valid(f.metadata) THEN f.metadata ELSE '{{}}' END, '$.zotero_sources') s
+    ) SELECT * FROM sources WHERE json_extract(source, '$.server_id')=?
+        AND json_extract(source, '$.library_type')='user' AND json_extract(source, '$.library_id')=0
+        AND json_extract(source, '$.{field}') IN ({placeholders})"""
+    params = (server_id, *values)
+    with get_db_cursor() as cursor:
+        cursor.execute("BEGIN")
+        total = cursor.execute(f"SELECT COUNT(*) FROM ({sql})", params).fetchone()[0]
+        rows = cursor.execute(sql + " ORDER BY file_id LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
+    links = [{**dict(row), "source": json.loads(row["source"])} for row in rows]
+    return {"links": links, "total": total, "limit": limit, "offset": offset,
+            "has_more": offset + len(links) < total,
+            "next_offset": offset + len(links) if offset + len(links) < total else None,
+            "identity_verified": True}
 
-    def collections(self) -> List[Dict[str, Any]]:
-        return self._paged(f"{USER_PREFIX}/collections")
 
-    def attachment_file_url(self, key: str) -> str:
-        """附件在本机的 file:// 地址（纯文本）。"""
-        return self._get(f"{USER_PREFIX}/items/{key}/file/view/url").text.strip()
+def get_links(item_keys=None, attachment_keys=None, limit=100, offset=0, server_id=None, *, client=None) -> dict:
+    if (item_keys is None) == (attachment_keys is None):
+        raise BusinessError("INVALID_INPUT", "请明确指定 item_keys 或 attachment_keys，不能同时指定")
+    if item_keys is not None:
+        item_keys = _keys(item_keys, name="item_keys")
+    if attachment_keys is not None:
+        attachment_keys = _keys(attachment_keys, name="attachment_keys")
+    pagination(limit, offset)
+    with _client_scope(client, server_id=server_id) as local:
+        info = local.probe()
+        return {"zotero": info, **_source_links(info["server_id"], item_keys=item_keys,
+                                               attachment_keys=attachment_keys, limit=limit, offset=offset)}
 
 
 def file_url_to_path(url: str) -> Optional[Path]:
@@ -240,7 +408,7 @@ def _pdf_attachments(attachments: Iterable[Dict[str, Any]]) -> Dict[str, List[Di
     linked_url 只是网址没有文件；imported_* 与 linked_file 在磁盘上都有文件。
     """
     grouped: Dict[str, List[Dict[str, Any]]] = {}
-    for attachment in attachments:
+    for attachment in {entry["key"]: entry for entry in attachments}.values():
         data = attachment["data"]
         if data.get("contentType") != PDF_TYPE or data.get("linkMode") == "linked_url":
             continue
@@ -250,37 +418,73 @@ def _pdf_attachments(attachments: Iterable[Dict[str, Any]]) -> Dict[str, List[Di
 
 def _attachment_path(client: ZoteroClient, attachment: Dict[str, Any]) -> Optional[Path]:
     href = (attachment.get("links") or {}).get("enclosure", {}).get("href")
-    if not href:
-        try:
-            href = client.attachment_file_url(attachment["key"])
-        except BusinessError:
+    if href and urlparse(href).scheme == "file":
+        return file_url_to_path(href)
+    try:
+        return file_url_to_path(client.attachment_file_url(attachment["key"]))
+    except BusinessError as exc:
+        if exc.code == "NOT_FOUND":
             return None
-    return file_url_to_path(href)
+        raise
 
 
-def _plan(client: ZoteroClient, collection_keys: Optional[List[str]], collection_mode: str) -> Dict[str, Any]:
-    """读取文库并算出导入计划；preview 与 import 共用，保证预览即所得。"""
+def _selection(collection_keys, item_keys, attachment_keys):
+    if sum(value is not None for value in (collection_keys, item_keys, attachment_keys)) > 1:
+        raise BusinessError("INVALID_INPUT", "collection_keys、item_keys、attachment_keys 只能指定一种范围")
+    for name, values in (("collection_keys", collection_keys), ("item_keys", item_keys), ("attachment_keys", attachment_keys)):
+        if values is not None and (not isinstance(values, list) or not 1 <= len(values) <= 50):
+            raise BusinessError("INVALID_INPUT", f"{name} 需要明确指定 1 至 50 个 key，空范围不会退回全库")
+    return (_keys(item_keys, name="item_keys") if item_keys is not None else None,
+            _keys(attachment_keys, name="attachment_keys") if attachment_keys is not None else None)
+
+
+def _selected_items(client, item_keys, attachment_keys):
+    if item_keys is None and attachment_keys is None:
+        return client.top_items(), _pdf_attachments(client.attachments())
+    items, attachments = {}, []
+    for key in item_keys or attachment_keys:
+        item = client.item(key)
+        data = item["data"]
+        if attachment_keys is not None and data.get("itemType") != "attachment":
+            raise BusinessError("INVALID_INPUT", f"{key} 不是附件，请使用 item_keys 选择文献")
+        if data.get("itemType") == "attachment":
+            attachments.append(item)
+            parent = client.item(data["parentItem"]) if data.get("parentItem") else item
+            items[parent["key"]] = parent
+        else:
+            items[key] = item
+            if data.get("itemType") not in {"note", "annotation"}:
+                attachments.extend(client.children(key, "attachment"))
+    return list(items.values()), _pdf_attachments(attachments)
+
+
+def _plan(client: ZoteroClient, collection_keys: Optional[List[str]], collection_mode: str,
+          item_keys=None, attachment_keys=None, max_items=None) -> Dict[str, Any]:
+    """只计算显式范围的计划；旧导入入口未指定范围时仍支持整库。"""
     if collection_mode not in COLLECTION_MODES:
         raise BusinessError("INVALID_INPUT", f"collection_mode 只能是 {', '.join(COLLECTION_MODES)}")
+    item_keys, attachment_keys = _selection(collection_keys, item_keys, attachment_keys)
+    if max_items is not None and (type(max_items) is not int or max_items < 1):
+        raise BusinessError("INVALID_INPUT", "max_items 必须是正整数")
     info = client.probe()
     collections = client.collections()
     paths = _collection_paths(collections)
-    selected = _descendants(collections, collection_keys) if collection_keys else None
-    if collection_keys:
+    selected = _descendants(collections, collection_keys) if collection_keys is not None else None
+    if collection_keys is not None:
         unknown = [key for key in collection_keys if key not in paths]
         if unknown:
             raise BusinessError("NOT_FOUND", f"Zotero 集合不存在：{', '.join(unknown)}")
-    attachments = _pdf_attachments(client.attachments())
-    top_items = client.top_items()
+    top_items, attachments = _selected_items(client, item_keys, attachment_keys)
 
     entries: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
+    relevant_collections = set()
     for item in top_items:
         data = item["data"]
         item_collections = [key for key in data.get("collections") or [] if key in paths]
         if selected is not None and not (set(item_collections) & selected):
             continue
-        # 独立附件条目没有父条目，在附件列表里以自身 key 成组
+        relevant_collections.update(item_collections)
         pdfs = attachments.get(item["key"], [])
         summary = {"key": item["key"], "title": data.get("title") or "", "item_type": data.get("itemType")}
         if not pdfs:
@@ -294,95 +498,110 @@ def _plan(client: ZoteroClient, collection_keys: Optional[List[str]], collection
             names = ["/".join(paths[key]) for key in item_collections if paths.get(key)]
         names = [name[:200] for name in dict.fromkeys(names) if name]
         for index, attachment in enumerate(pdfs):
+            if max_items is not None and len(entries) >= max_items:
+                scope = "集合" if collection_keys is not None else ("条目" if item_keys is not None else "附件")
+                raise BusinessError(
+                    "IMPORT_LIMIT_EXCEEDED",
+                    f"所选{scope}展开后的 PDF 附件超过单批上限 {max_items} 个；范围本身有效，请缩小范围或分批："
+                    "改选子集合、用 zotero_search 分页后按 item_keys/attachment_keys 逐批导入",
+                    data={"max_items": max_items, "scope": scope, "counted_at_least": len(entries) + 1,
+                          "collection_keys": collection_keys, "collection_mode": collection_mode})
             disambiguator = ""
             if len(pdfs) > 1:
-                # 同一条目多个 PDF：附件自身标题（如 Full Text PDF / Submitted Version）通常能区分，否则编号
                 disambiguator = _clean_name_part(str(attachment["data"].get("title") or ""))[:40] or str(index + 1)
+            metadata = build_metadata(item, ["/".join(paths[key]) for key in item_collections if paths.get(key)])
+            metadata["zotero_sources"] = [{
+                "server_id": info["server_id"], "library_type": "user", "library_id": 0,
+                "item_key": item["key"], "attachment_key": attachment["key"],
+                "item_version": item.get("version", 0), "attachment_version": attachment.get("version", 0),
+            }]
             entries.append({
-                **summary,
-                "attachment_key": attachment["key"],
-                "filename": build_filename(item, disambiguator=disambiguator),
-                "collections": names,
-                "metadata": build_metadata(item, ["/".join(paths[key]) for key in item_collections if paths.get(key)]),
-                "_attachment": attachment,
+                **summary, "attachment_key": attachment["key"],
+                "item_version": item.get("version"), "attachment_version": attachment.get("version"),
+                "filename": build_filename(item, disambiguator=disambiguator), "collections": names,
+                "metadata": metadata, "_attachment": attachment,
             })
+    visible_collections = [c for c in collections if item_keys is None and attachment_keys is None
+                           or c["key"] in relevant_collections]
     return {
         "zotero": info,
         "collections": [{"key": c["key"], "name": c["data"].get("name"), "path": "/".join(paths[c["key"]]),
-                         "item_count": (c.get("meta") or {}).get("numItems")} for c in collections],
-        "entries": entries,
-        "skipped": skipped,
-        "items_total": len(top_items),
+                         "item_count": (c.get("meta") or {}).get("numItems")} for c in visible_collections],
+        "entries": entries, "skipped": skipped, "items_total": len(top_items),
     }
 
 
-def preview_import(collection_keys: Optional[List[str]] = None, collection_mode: str = "path",
-                   *, base_url: Optional[str] = None, client: Optional[ZoteroClient] = None) -> Dict[str, Any]:
-    """只读预览：Zotero 是否可达、有哪些集合、哪些条目会导入、哪些会跳过。"""
-    owned = client is None
-    client = client or ZoteroClient(base_url)
+def _inspect_attachment(client, entry):
+    path = _attachment_path(client, entry["_attachment"])
     try:
-        plan = _plan(client, collection_keys, collection_mode)
-    finally:
-        if owned:
-            client.close()
+        if path is None or not path.is_file():
+            return {"available": False, "reason": "file_missing"}
+        if path.stat().st_size > file_service.get_max_file_size():
+            return {"available": False, "reason": "FILE_TOO_LARGE"}
+        fingerprint = file_service.calculate_file_hash_from_path(path)
+    except OSError:
+        return {"available": False, "reason": "file_unreadable"}
+    file_id = file_service.check_file_hash_exists(fingerprint)
+    existing = file_service.get_file_by_id(file_id) if file_id else None
+    return {"available": True, "file_hash": fingerprint, "file_id": file_id,
+            "duplicate": file_id is not None, "file_status": existing["status"] if existing else None}
+
+
+def preview_import(collection_keys: Optional[List[str]] = None, collection_mode: str = "path",
+                   *, base_url: Optional[str] = None, client: Optional[ZoteroClient] = None,
+                   item_keys=None, attachment_keys=None, server_id=None, max_items=None) -> Dict[str, Any]:
+    """只读预览选定附件的可用性和内容去重结果，不创建 Piece 文件。"""
+    with _client_scope(client, base_url=base_url, server_id=server_id) as local:
+        plan = _plan(local, collection_keys, collection_mode, item_keys, attachment_keys, max_items)
+        items = [{**{k: v for k, v in entry.items() if k not in ("_attachment", "metadata")},
+                  **_inspect_attachment(local, entry)} for entry in plan["entries"]]
     return {
-        "zotero": plan["zotero"],
-        "collections": plan["collections"],
-        "items_total": plan["items_total"],
-        "importable_count": len(plan["entries"]),
-        "skipped_count": len(plan["skipped"]),
-        "items": [{k: v for k, v in e.items() if k not in ("_attachment", "metadata")} for e in plan["entries"]],
-        "skipped": plan["skipped"],
+        "zotero": plan["zotero"], "collections": plan["collections"], "items_total": plan["items_total"],
+        "importable_count": sum(item["available"] for item in items),
+        "unavailable_count": sum(not item["available"] for item in items),
+        "duplicate_count": sum(bool(item.get("duplicate")) for item in items),
+        "skipped_count": len(plan["skipped"]), "items": items, "skipped": plan["skipped"],
     }
 
 
 def import_library(collection_keys: Optional[List[str]] = None, collection_mode: str = "path",
                    collections: Optional[List[str]] = None, *, base_url: Optional[str] = None,
-                   client: Optional[ZoteroClient] = None) -> Dict[str, Any]:
-    """按预览计划逐条导入；重复文件由内容哈希去重，重跑安全。
-
-    ``collections`` 是额外附加到每个文件的 Piece 集合名（须已存在）；
-    由 Zotero 集合映射出的集合名不存在时自动创建。
-    """
-    owned = client is None
-    client = client or ZoteroClient(base_url)
-    try:
-        plan = _plan(client, collection_keys, collection_mode)
+                   client: Optional[ZoteroClient] = None, item_keys=None, attachment_keys=None,
+                   server_id=None, max_items=None) -> Dict[str, Any]:
+    """复制选定 PDF 入库并返回任务；不把受理当作索引完成，也不写回 Zotero。"""
+    with _client_scope(client, base_url=base_url, server_id=server_id) as local:
+        plan = _plan(local, collection_keys, collection_mode, item_keys, attachment_keys, max_items)
         fixed_ids = collection_service.resolve_collection_ids(collections) if collections else []
-        items: List[Dict[str, Any]] = []
-        failures: List[Dict[str, Any]] = []
-        task_ids: List[int] = []
+        items, failures, task_ids = [], [], []
         duplicates = 0
-        for entry in plan["entries"]:
+        for index, entry in enumerate(plan["entries"]):
             summary = {k: v for k, v in entry.items() if k not in ("_attachment", "metadata")}
-            path = _attachment_path(client, entry["_attachment"])
-            if path is None or not path.is_file():
-                failures.append({**summary, "reason": "file_missing", "path": str(path) if path else None})
-                continue
             try:
+                path = _attachment_path(local, entry["_attachment"])
+                if path is None or not path.is_file():
+                    failures.append({**summary, "reason": "file_missing"})
+                    continue
                 ids = collection_service.resolve_collection_ids(entry["collections"], create=True) + fixed_ids
                 result = file_service.import_file(path, filename=entry["filename"], collection_ids=ids,
                                                   metadata=entry["metadata"])
             except BusinessError as exc:
                 failures.append({**summary, "reason": exc.code, "message": str(exc)})
+                if exc.code in {"ZOTERO_INSTANCE_CHANGED", "ZOTERO_UNAVAILABLE", "ZOTERO_DISABLED"}:
+                    failures.extend({"key": rest["key"], "attachment_key": rest["attachment_key"],
+                                     "reason": "not_attempted"} for rest in plan["entries"][index + 1:])
+                    break
+                continue
+            except OSError:
+                failures.append({**summary, "reason": "file_unreadable"})
                 continue
             duplicates += bool(result.get("duplicate"))
-            # 重复文件若仍在途也会带回任务 ID，供调用方等待；但不算本次新受理
             task_ids.extend(t for t in result.get("task_ids", []) if t not in task_ids)
+            file_info = file_service.get_file_by_id(result["file_id"]) or {}
             items.append({**summary, "file_id": result["file_id"], "duplicate": result.get("duplicate", False),
-                          "task_id": result.get("task_id")})
-    finally:
-        if owned:
-            client.close()
+                          "task_id": result.get("task_id"), "file_status": file_info.get("status", "missing"),
+                          "file_hash": file_info.get("file_hash")})
     return {
-        "zotero": plan["zotero"],
-        "items": items,
-        "failures": failures,
-        "skipped": plan["skipped"],
-        "task_ids": task_ids,
-        "accepted_count": len(items) - duplicates,
-        "duplicate_count": duplicates,
-        "failed_count": len(failures),
-        "skipped_count": len(plan["skipped"]),
+        "zotero": plan["zotero"], "items": items, "failures": failures, "skipped": plan["skipped"],
+        "task_ids": task_ids, "accepted_count": len(items) - duplicates, "duplicate_count": duplicates,
+        "failed_count": len(failures), "skipped_count": len(plan["skipped"]),
     }

@@ -14,7 +14,7 @@
 
 ## 最小新增
 
-以下仅演示结构，须换成用户真实要求保存的内容，不把示例当成用户说过的话。保存为 `new.json`：
+以下仅演示结构，须换成用户真实要求保存的内容，不把示例当成用户说过的话：
 
 ```json
 {
@@ -28,11 +28,15 @@
 }
 ```
 
-```text
-<PIECE> graph apply --input new.json --dry-run --json
-<PIECE> graph apply --input new.json --request-id UNIQUE_NEW_KEY --json
-<PIECE> graph get object RETURNED_UUID --json
+批次直接经 stdin 传入，不必写文件；`--request-id` 省略时 CLI 自动生成并回传 `data.request_key`：
+
+```bash
+<PIECE> graph apply --input - --read-back --json <<'JSON'
+{ ...上面的批次... }
+JSON
 ```
+
+先预检就加 `--dry-run`；确认后去掉它原样重跑。需要留档时改成文件路径：`--input new.json --request-id UNIQUE_NEW_KEY`。然后 `graph get object RETURNED_UUID --json` 核对。
 
 保存 `data.refs.concept.id/revision` 与 `data.evidence[].id`。正式结果包含 `committed=true`、各类记录的 `id/action/revision` 和 `counts.created/updated/reused`；实体和关系还带 `submitted_fields`，只列显式提交的字段名，不代表值一定变化或语义正确。旧请求缺少此项时不猜测。不通过搜索相似标题猜本次结果。
 

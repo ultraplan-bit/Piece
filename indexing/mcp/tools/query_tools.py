@@ -49,6 +49,7 @@ def list_files(
                         "file_size": int,
                         "status": str,
                         "original_file_type": str | None,
+                        "properties": dict,  # frontmatter 属性（title/source_url 等），已解码，与 query_file_info 同形
                         "created_at": str,
                         "updated_at": str
                     },
@@ -98,10 +99,14 @@ def list_files(
 
         # 读范围与 API/GUI 共用，明确的空集合范围不能扩为全库。
         from indexing.services.collection_service import resolve_collection_ids
+        from indexing.services.metadata_service import decode_metadata
         scope = None if collections is None else resolve_collection_ids(collections)
         result = get_files_list_paginated(limit=limit, offset=offset, status=status,
                                           collection_ids=scope, include_descendants=include_descendants,
                                           uncategorized=uncategorized, name=name)
+        # 与 query_file_info 一致：对外只给解码后的 properties，不暴露库里的 JSON 字符串。
+        for item in result["files"]:
+            item["properties"] = decode_metadata(item.pop("metadata", None))
 
         logger.info(
             f"[MCP] 查询文件列表: limit={limit}, offset={offset}, "

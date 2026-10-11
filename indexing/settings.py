@@ -66,7 +66,7 @@ class EmbeddingSettings(BaseModel):
     max_tokens: int = Field(default=8192, ge=1)  # 模型最大上下文长度
 
 
-McpService = Literal["retrieval", "index"]
+McpService = Literal["retrieval", "index", "zotero"]
 
 
 class McpSettings(BaseModel):
@@ -79,6 +79,10 @@ class McpSettings(BaseModel):
     # AI 仍可显式传 false 跳过
     include_images_default: bool = False
     max_images_per_call: int = 6  # 单次 get-docs 返回的插图数量上限
+    zotero_enabled: bool = False
+    zotero_port: int = Field(default=8688, ge=1, le=65535)
+    zotero_api_key: str = Field(default_factory=generate_api_key, min_length=32)
+    zotero_auth_enabled: bool = True
 
     def get_api_key(self, service: McpService = "retrieval") -> str:
         """读取指定服务的有效密钥，旧配置无需迁移即可继续使用。"""
@@ -86,6 +90,8 @@ class McpSettings(BaseModel):
             return self.api_key
         if service == "index":
             return self.api_key if self.index_api_key is None else self.index_api_key
+        if service == "zotero":
+            return self.zotero_api_key
         raise ValueError(f"未知 MCP 服务: {service}")
 
 
@@ -243,10 +249,12 @@ class AppSettings(BaseModel):
     webdav: WebDAVSettings = WebDAVSettings()
     performance: PerformanceSettings = PerformanceSettings()
     data_path: str = Field(default_factory=lambda: str(DEFAULT_DATA_PATH))
+    # 独立于 Piece 写入权限；启用后仍需 Zotero 10.0.5+ 的本地授权。
+    zotero_write_enabled: bool = False
 
     @model_validator(mode="after")
     def protect_management_key(self):
-        if self.api.admin_key in {self.mcp.get_api_key("retrieval"), self.mcp.get_api_key("index")}:
+        if self.api.admin_key in {self.mcp.get_api_key(service) for service in ("retrieval", "index", "zotero")}:
             raise ValueError("管理 API 密钥必须与 MCP 凭据分离")
         return self
 
@@ -281,8 +289,8 @@ def load_settings() -> AppSettings:
             settings = AppSettings.model_validate(data)
         except Exception:
             raise RuntimeError(f"配置无法读取或校验失败：{config_path}；请检查配置，原文件未改动") from None
-        if "api" not in data and not save_settings(settings):
-            raise RuntimeError("无法保存本地 API 管理凭据")
+        if ("api" not in data or "zotero_api_key" not in data.get("mcp", {})) and not save_settings(settings):
+            raise RuntimeError("无法保存本地服务凭据")
         return settings
     settings = AppSettings()
     settings.mcp.api_key = generate_api_key()
@@ -405,7 +413,8 @@ def get_parser_max_size() -> Optional[int]:
 def is_mcp_auth_enabled(service: McpService = "retrieval") -> bool:
     """检查指定 MCP 服务是否启用认证。"""
     config = get_settings().mcp
-    return config.auth_enabled and bool(config.get_api_key(service))
+    enabled = config.zotero_auth_enabled if service == "zotero" else config.auth_enabled
+    return enabled and bool(config.get_api_key(service))
 
 
 def get_db_path() -> Path:

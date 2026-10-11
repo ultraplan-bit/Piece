@@ -1,11 +1,14 @@
 """阶段 B 跨入口验收：临时新库、真实本机 HTTP/CLI 与 MCP 协议，不调用外部模型。"""
 
 import asyncio
+import io
 import json
 import socket
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -14,6 +17,7 @@ import pytest
 from indexing import knowledge_models as km
 from indexing.services import knowledge_service as knowledge
 from indexing.services import knowledge_common
+from indexing.services.errors import BusinessError
 from indexing import wiki_models as wm
 from indexing.services import wiki_service as wiki
 
@@ -218,22 +222,37 @@ def test_mcp_protocol_schema_validation_and_partial_updates(api, mcp_servers):
             writes = {tool.name: tool for tool in await writer.list_tools() if tool.name.startswith("knowledge_")}
             assert set(reads) == {"knowledge-" + name for name in (
                 "list", "search", "get", "graph", "references", "lint", "history", "request")}
-            assert set(writes) == {"knowledge_apply", "knowledge_delete", "knowledge_rebuild_index"}
+            intents = {"knowledge_object_add", "knowledge_object_update", "knowledge_relation_add", "knowledge_relation_update"}
+            assert set(writes) == {"knowledge_apply", "knowledge_delete", "knowledge_rebuild_index"} | intents
             for tool in reads.values():
                 assert tool.annotations.readOnlyHint and tool.annotations.idempotentHint
                 assert not tool.annotations.openWorldHint and not tool.annotations.destructiveHint
                 assert "params" in tool.inputSchema["properties"]
-            for tool in writes.values():
-                assert not tool.annotations.readOnlyHint
-                assert tool.annotations.idempotentHint and not tool.annotations.openWorldHint
-            for name in ("knowledge_apply", "knowledge_delete"):
+            for name, tool in writes.items():
+                assert not tool.annotations.readOnlyHint and not tool.annotations.openWorldHint
+                # 意图工具每次自动生成新 request_key，不能宣称幂等；批次工具按键幂等。
+                assert tool.annotations.idempotentHint is (name not in intents)
+            for name in ("knowledge_apply", "knowledge_delete", "knowledge_object_update", "knowledge_relation_update"):
                 assert writes[name].annotations.destructiveHint
-            assert not writes["knowledge_rebuild_index"].annotations.destructiveHint
+            for name in ("knowledge_rebuild_index", "knowledge_object_add", "knowledge_relation_add"):
+                assert not writes[name].annotations.destructiveHint
+            # 意图工具参数扁平：没有 params 包装，证据是字符串数组，schema 直接列出字段。
+            flat = writes["knowledge_object_add"].inputSchema
+            assert "params" not in flat["properties"] and {"title", "kind", "evidence", "stance"} <= set(flat["properties"])
+            assert flat["required"] == ["title"]
+            relation_update = writes["knowledge_relation_update"].inputSchema
+            assert "params" not in relation_update["properties"]
+            assert set(relation_update["required"]) == {"id", "expected_revision"}
+            assert {"source", "predicate", "target", "description", "basis", "qualifier", "status", "evidence"} <= set(relation_update["properties"])
+            # knowledge-get 的 kind 可省略：schema 不再把它列为必填。
+            get_schema = json.dumps(reads["knowledge-get"].inputSchema)
+            assert '"required": ["id"]' in get_schema and '"required": ["kind", "id"]' not in get_schema
             wiki_reads = {tool.name for tool in await reader.list_tools() if tool.name.startswith("wiki-")}
             wiki_writes = {tool.name for tool in await writer.list_tools() if tool.name.startswith("wiki_")}
             assert wiki_reads == {"wiki-" + name for name in (
                 "list", "search", "get", "references", "lint", "history", "request")}
-            assert wiki_writes == {"wiki_apply", "wiki_delete", "wiki_rebuild_index"}
+            assert wiki_writes == {"wiki_apply", "wiki_delete", "wiki_rebuild_index", "wiki_page_add", "wiki_page_update",
+                                   "wiki_list_recovery", "wiki_purge_recovery"}
             for tool in (await reader.list_tools()):
                 if tool.name.startswith("wiki-"):
                     assert tool.annotations.readOnlyHint and tool.annotations.idempotentHint
@@ -295,6 +314,8 @@ def test_mcp_protocol_schema_validation_and_partial_updates(api, mcp_servers):
     ("wiki_apply", "apply", wm.ApplyInput, {"reason": "预检", "dry_run": True, "pages": [{"ref": "x", "kind": "entity", "title": "x"}]}),
     ("wiki_delete", "delete", wm.DeleteInput, {"kind": "evidence", "id": str(uuid4()), "expected_content_hash": "0" * 64}),
     ("wiki_rebuild_index", "rebuild_index", None, None),
+    ("wiki_list_recovery", "list_recovery", "kwargs", {}),
+    ("wiki_purge_recovery", "purge_recovery", "kwargs", {}),
 ])
 def test_knowledge_mcp_offloads_database_io(mcp_servers, monkeypatch, tool_name, backend, model, payload):
     index, retrieval = mcp_servers
@@ -307,10 +328,12 @@ def test_knowledge_mcp_offloads_database_io(mcp_servers, monkeypatch, tool_name,
         return {"committed": False}
 
     monkeypatch.setattr(owner, backend, service)
-    server = index if backend in {"apply", "delete", "rebuild_index"} else retrieval
+    server = index if backend in {"apply", "delete", "rebuild_index", "list_recovery", "purge_recovery"} else retrieval
     target = getattr(server, tool_name)
     if model is None:
         asyncio.run(target.fn())
+    elif model == "kwargs":
+        asyncio.run(target.fn(**payload))
     else:
         asyncio.run(target.fn(model.model_validate(payload)))
     assert len(calls) == 1 and calls[0][0] != main_thread
@@ -575,6 +598,249 @@ def test_cli_extract_out_and_atomic_object_add_read_back(api, knowledge_base, ht
     assert "read_back" not in cached
     assert evidence["quote"] not in json.dumps(cached, ensure_ascii=False)
     assert "公式概念" not in json.dumps(cached, ensure_ascii=False)
+
+
+def test_cli_inline_evidence_single_command_writes_and_reads_back(api, knowledge_base, http_cli, tmp_path):
+    """零文件写入：--evidence CHUNK_ID:LOCATOR 由服务切引文，不传请求文件，CLI 自生成键。"""
+    imported = _post(api, "file/import-markdown", filename="内联证据来源",
+                     content="# 来源\n\n第一行正文\n增量维护依赖稳定身份。\n第三行反方观点")
+    knowledge_base.drain()
+    chunk = _post(api, "chunk/list", file_id=imported["file_id"])["chunks"][0]
+    before = sorted(p.name for p in tmp_path.iterdir())
+
+    code, added = http_cli("graph", "object", "add", "--kind", "concept", "--title", "稳定身份",
+                           "--evidence", f"{chunk['id']}:grep=稳定身份",
+                           "--evidence", f"{chunk['id']}:5",
+                           "--stance", "supports", "--stance", "contradicts", "--reason", "内联证据端到端")
+    assert code == 0 and added["success"] and added["data"]["committed"] is True, added
+    assert added["data"]["read_back"]["complete"] is True
+    assert "request_file" not in added["data"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == before, "不得在数据目录留下请求或证据文件"
+
+    oid = next(r for r in added["data"]["read_back"]["records"] if r["kind"] == "object")["record"]["id"]
+    stored = _post(api, "knowledge/get", kind="object", id=oid)
+    quotes = {item["quote"]: item["stance"] for item in stored["evidence"]["items"]}
+    assert quotes == {"增量维护依赖稳定身份。": "supports", "第三行反方观点": "contradicts"}
+    assert all(item["location_status"] == "current" for item in stored["evidence"]["items"])
+    # 自生成键可直接用于只读查询回执。
+    code, recovered = http_cli("graph", "request", added["data"]["request_key"], "--read-back")
+    assert code == 0 and recovered["data"]["read_back"]["records"][0]["record"]["id"] == oid
+
+
+def test_cli_inline_evidence_ambiguous_match_refuses_to_write(api, knowledge_base, http_cli):
+    imported = _post(api, "file/import-markdown", filename="歧义来源",
+                     content="# 来源\n\n关键词出现一次\n关键词出现两次")
+    knowledge_base.drain()
+    chunk = _post(api, "chunk/list", file_id=imported["file_id"])["chunks"][0]
+    code, result = http_cli("graph", "object", "add", "--kind", "concept", "--title", "不该写入",
+                            "--evidence", f"{chunk['id']}:grep=关键词")
+    assert code != 0 and result["error"]["code"] == "EVIDENCE_SELECTION_REQUIRED"
+    assert result["data"]["match_count"] == 2
+    assert result["data"]["next_argv"][-4:] == ["chunk", "get", str(chunk["id"]), "--json"]
+    assert _post(api, "knowledge/list")["total"] == 0
+
+
+def test_mcp_intent_tools_flat_params_auto_key_and_shared_builder(api, knowledge_base, mcp_servers):
+    """索引 MCP 意图工具：扁平参数、内联证据、自动 request_key，与 CLI 共用组装逻辑。"""
+    from fastmcp import Client
+    index, retrieval = mcp_servers
+    imported = _post(api, "file/import-markdown", filename="意图来源",
+                     content="# 来源\n\n第一行正文\n增量维护依赖稳定身份。\n第三行反方观点")
+    knowledge_base.drain()
+    chunk = _post(api, "chunk/list", file_id=imported["file_id"])["chunks"][0]
+    locator = f"{chunk['id']}:grep=稳定身份"
+
+    async def scenario():
+        async with Client(index.mcp) as writer, Client(retrieval.mcp) as reader:
+            # dry_run 不消耗键、不写入。
+            preview = (await writer.call_tool("knowledge_object_add", {
+                "title": "稳定身份", "evidence": [locator], "dry_run": True})).data
+            assert preview["success"] and preview["data"]["dry_run"] and "request_key" not in preview["data"]
+            assert (await reader.call_tool("knowledge-list", {"params": {}})).data["total"] == 0
+
+            # 正式提交：键自动生成并回传；证据经 extract 切出精确子串；stance 逐条对应；JSON 字符串数组也接受。
+            added = (await writer.call_tool("knowledge_object_add", {
+                "title": "稳定身份", "kind": "concept", "aliases": '["身份稳定"]',
+                "evidence": [locator, f"{chunk['id']}:5"], "stance": ["supports", "contradicts"],
+                "reason": "意图工具端到端"})).data
+            assert added["success"] and added["data"]["committed"], added
+            key = added["data"]["request_key"]
+            oid = added["data"]["refs"]["item"]["id"]
+            assert (await reader.call_tool("knowledge-request", {"params": {"request_key": key}})).data["refs"]["item"]["id"] == oid
+            record = (await reader.call_tool("knowledge-get", {"params": {"kind": "object", "id": oid}})).data
+            assert record["record"]["aliases"] == ["身份稳定"]
+            quotes = {item["quote"]: item["stance"] for item in record["evidence"]["items"]}
+            assert quotes == {"增量维护依赖稳定身份。": "supports", "第三行反方观点": "contradicts"}
+            assert all(item["location_status"] == "current" for item in record["evidence"]["items"])
+
+            # 同参数再提交是新键新记录，不复用旧回执（意图工具不幂等）。
+            again = (await writer.call_tool("knowledge_object_add", {"title": "稳定身份", "kind": "entity"})).data
+            assert again["success"] and again["data"]["request_key"] != key
+            other = again["data"]["refs"]["item"]["id"]
+
+            # update：只改一个字段，其他保留；版本错给 VERSION_CONFLICT。
+            renamed = (await writer.call_tool("knowledge_object_update", {
+                "id": oid, "expected_revision": 1, "title": "稳定身份（修订）"})).data
+            assert renamed["success"] and renamed["data"]["objects"][0]["submitted_fields"] == ["title"]
+            stale = (await writer.call_tool("knowledge_object_update", {
+                "id": oid, "expected_revision": 1, "summary": "过期"})).data
+            assert not stale["success"] and stale["error"]["code"] == "VERSION_CONFLICT"
+            record = (await reader.call_tool("knowledge-get", {"params": {"kind": "object", "id": oid}})).data["record"]
+            assert record["title"] == "稳定身份（修订）" and record["aliases"] == ["身份稳定"] and record["revision"] == 2
+
+            # 图谱 Update 要求至少一个待改字段：只补证据被拒（与模型契约一致）。
+            only_evidence = (await writer.call_tool("knowledge_object_update", {
+                "id": oid, "expected_revision": 2, "evidence": [f"{chunk['id']}:3"]})).data
+            assert not only_evidence["success"] and only_evidence["error"]["code"] == "INVALID_ARGUMENT"
+
+            # relation：UUID 端点，带证据。
+            related = (await writer.call_tool("knowledge_relation_add", {
+                "source": oid, "predicate": "related_to", "target": other,
+                "description": "同名不同类型，需要区分", "basis": "user_statement"})).data
+            assert related["success"] and related["data"]["refs"]["item"]["kind"] == "relation"
+            rid = related["data"]["refs"]["item"]["id"]
+
+            # 相同端点/谓词/qualifier 但内容不同 → KNOWLEDGE_CONFLICT，回执带已有关系摘要和可直接调用的修订入口。
+            conflict = (await writer.call_tool("knowledge_relation_add", {
+                "source": oid, "predicate": "related_to", "target": other,
+                "description": "另一种说法", "basis": "inference"})).data
+            assert not conflict["success"] and conflict["error"]["code"] == "KNOWLEDGE_CONFLICT"
+            assert conflict["data"]["id"] == rid
+            existing = conflict["data"]["existing"]
+            assert existing["id"] == rid and existing["revision"] == 1 and existing["predicate"] == "related_to"
+            assert existing["description"] == "同名不同类型，需要区分" and existing["basis"] == "user_statement"
+            assert "related_to" in existing["display"] and "稳定身份（修订）" in existing["display"]
+            assert "related_to" in conflict["message"] and "revision 1" in conflict["message"]
+            assert conflict["data"]["next_tool"]["name"] == "knowledge_relation_update"
+            assert conflict["data"]["next_tool"]["arguments"] == {"id": rid, "expected_revision": 1}
+            # 内容完全相同 → reused，不报冲突。
+            same = (await writer.call_tool("knowledge_relation_add", {
+                "source": oid, "predicate": "related_to", "target": other,
+                "description": "同名不同类型，需要区分", "basis": "user_statement"})).data
+            assert same["success"] and same["data"]["relations"][0]["action"] == "reused"
+
+            # relation update：按冲突回执给的 id/expected_revision 修订；只改一个字段，端点与谓词保留。
+            revised = (await writer.call_tool("knowledge_relation_update", {
+                **conflict["data"]["next_tool"]["arguments"], "description": "另一种说法", "basis": "inference",
+                "evidence": [f"{chunk['id']}:3"], "stance": "context"})).data
+            assert revised["success"] and revised["data"]["committed"], revised
+            assert sorted(revised["data"]["relations"][0]["submitted_fields"]) == ["basis", "description"]
+            relation = (await reader.call_tool("knowledge-get", {"params": {"kind": "relation", "id": rid}})).data
+            assert relation["record"]["description"] == "另一种说法" and relation["record"]["basis"] == "inference"
+            assert relation["record"]["predicate"] == "related_to" and relation["record"]["revision"] == 2
+            assert {relation["record"]["source_id"], relation["record"]["target_id"]} == {oid, other}
+            assert [item["stance"] for item in relation["evidence"]["items"]] == ["context"]
+            # 过期版本拒绝；空更新拒绝。
+            stale_relation = (await writer.call_tool("knowledge_relation_update", {
+                "id": rid, "expected_revision": 1, "status": "disputed"})).data
+            assert not stale_relation["success"] and stale_relation["error"]["code"] == "VERSION_CONFLICT"
+            empty_relation = (await writer.call_tool("knowledge_relation_update", {"id": rid, "expected_revision": 2})).data
+            assert not empty_relation["success"] and empty_relation["error"]["code"] == "INVALID_ARGUMENT"
+
+            # knowledge-get 省略 kind：按 UUID 自动探测，响应报告实际类型。
+            by_uuid = (await reader.call_tool("knowledge-get", {"params": {"id": rid}})).data
+            assert by_uuid["kind"] == "relation" and by_uuid["record"]["id"] == rid
+            assert (await reader.call_tool("knowledge-get", {"params": {"id": oid}})).data["kind"] == "object"
+            evidence_id = relation["evidence"]["items"][0]["id"]
+            assert (await reader.call_tool("knowledge-get", {"params": {"id": evidence_id}})).data["kind"] == "evidence"
+            unknown = await reader.call_tool("knowledge-get", {"params": {"id": str(uuid4())}}, raise_on_error=False)
+            assert unknown.is_error and "NOT_FOUND" in unknown.content[0].text
+
+            # 歧义证据：拒绝写入，并给出可直接调用的下一步工具。
+            ambiguous = (await writer.call_tool("knowledge_object_add", {
+                "title": "不该写入", "evidence": [f"{chunk['id']}:grep=行"]})).data
+            assert not ambiguous["success"] and ambiguous["error"]["code"] == "EVIDENCE_SELECTION_REQUIRED"
+            assert ambiguous["data"]["match_count"] >= 2
+            assert ambiguous["data"]["next_tool"] == {
+                "name": "query_chunk_info", "arguments": {"chunk_id": chunk["id"]},
+                "hint": ambiguous["data"]["next_tool"]["hint"]}
+            # 非法定位在任何写入前拒绝。
+            bad = (await writer.call_tool("knowledge_object_add", {"title": "x", "evidence": ["abc:1"]})).data
+            assert not bad["success"] and bad["error"]["code"] == "INVALID_ARGUMENT"
+            # 空更新被拒。
+            empty = (await writer.call_tool("knowledge_object_update", {"id": oid, "expected_revision": 3})).data
+            assert not empty["success"] and empty["error"]["code"] == "INVALID_ARGUMENT"
+            assert (await reader.call_tool("knowledge-list", {"params": {}})).data["total"] == 2
+
+            # wiki：同一套组装逻辑，页面与图实体彼此独立。
+            page = (await writer.call_tool("wiki_page_add", {
+                "title": "稳定身份页", "kind": "topic", "body": "# 稳定身份\n\n见 [[其他页]]。",
+                "evidence": locator})).data
+            assert page["success"] and page["data"]["committed"], page
+            pid = page["data"]["pages"][0]["id"]
+            got = (await reader.call_tool("wiki-get", {"params": {"kind": "page", "id": pid}})).data
+            assert got["record"]["body"].startswith("# 稳定身份") and got["evidence"]["total"] == 1
+            # wiki-get 省略 kind：页面与证据都按 UUID 探测。
+            assert (await reader.call_tool("wiki-get", {"params": {"id": pid}})).data["kind"] == "page"
+            page_evidence_id = got["evidence"]["items"][0]["id"]
+            by_evidence = (await reader.call_tool("wiki-get", {"params": {"id": page_evidence_id}})).data
+            assert by_evidence["kind"] == "evidence" and by_evidence["record"]["page_id"] == pid
+            missing_page = await reader.call_tool("wiki-get", {"params": {"id": str(uuid4())}}, raise_on_error=False)
+            assert missing_page.is_error and "NOT_FOUND" in missing_page.content[0].text
+            updated = (await writer.call_tool("wiki_page_update", {
+                "id": pid, "expected_revision": got["record"]["revision"],
+                "expected_content_hash": got["record"]["content_hash"], "summary": "补摘要"})).data
+            assert updated["success"] and updated["data"]["committed"], updated
+            stale_page = (await writer.call_tool("wiki_page_update", {
+                "id": pid, "expected_revision": got["record"]["revision"],
+                "expected_content_hash": got["record"]["content_hash"], "summary": "过期"})).data
+            assert not stale_page["success"]
+            assert (await reader.call_tool("knowledge-list", {"params": {}})).data["total"] == 2, "写页不建图"
+
+            # query_files 与 query_file_info 同形：文件属性以解码后的 properties 返回，不暴露原始 metadata JSON 串。
+            listed = (await writer.call_tool("query_files", {"name": "意图来源"})).data
+            assert listed["success"] and listed["data"]["total"] == 1
+            [entry] = listed["data"]["files"]
+            assert "metadata" not in entry and isinstance(entry["properties"], dict)
+            detail = (await writer.call_tool("query_file_info", {"file_id": entry["id"]})).data["data"]
+            assert "metadata" not in detail and detail["properties"] == entry["properties"]
+            return oid
+
+    oid = asyncio.run(scenario())
+    assert _post(api, "knowledge/get", kind="object", id=oid)["record"]["title"] == "稳定身份（修订）"
+
+
+def test_mcp_intent_and_cli_build_identical_payloads(api, knowledge_base):
+    """两条入口共用 knowledge_intent：同样的扁平输入必须组装出相同的 apply 批次。"""
+    from indexing.services import knowledge_intent as intent
+    imported = _post(api, "file/import-markdown", filename="同构来源", content="# 来源\n\n唯一引文")
+    knowledge_base.drain()
+    chunk = _post(api, "chunk/list", file_id=imported["file_id"])["chunks"][0]
+    evidence = intent.resolve_evidence([f"{chunk['id']}:grep=唯一引文"])
+    assert len(evidence) == 1 and evidence[0]["quote"] == "唯一引文" and evidence[0]["source_kind"] == "piece"
+    built = intent.build_intent("object", "add", {"kind": "concept", "title": "T", "summary": None},
+                                evidence, None, reason="r")
+    assert built == {"reason": "r", "objects": [{"kind": "concept", "title": "T", "ref": "item"}],
+                     "evidence": [{**evidence[0], "object": {"ref": "item"}, "stance": "supports"}]}
+    relation = intent.build_intent("relation", "update", {"predicate": "supports"}, [], ["context"],
+                                   record_id="00000000-0000-0000-0000-0000000000b2", expected_revision=2)
+    assert relation["relations"] == [{"predicate": "supports", "id": "00000000-0000-0000-0000-0000000000b2",
+                                      "expected_revision": 2}]
+    assert relation["reason"] == "intent relation update"
+    with pytest.raises(BusinessError):
+        intent.build_intent("object", "add", {"title": "T"}, evidence, ["supports", "context"])
+
+
+def test_cli_save_request_lands_in_data_dir_requests(api, http_cli, knowledge_base):
+    code, added = http_cli("graph", "object", "add", "--kind", "entity", "--title", "留档实体", "--save-request")
+    assert code == 0 and added["success"]
+    saved = Path(added["data"]["request_file"])
+    assert saved.parent == (Path(knowledge_base.settings.data_path) / "requests").resolve()
+    assert saved.name.startswith("graph-object-add-") and saved.suffix == ".json"
+    wrapper = json.loads(saved.read_text(encoding="utf-8"))
+    assert wrapper["request"]["request_key"] == added["data"]["request_key"]
+    code, replay = http_cli("graph", "request", "--input", saved, "--read-back")
+    assert code == 0 and replay["data"]["read_back"]["complete"]
+
+
+def test_cli_apply_stdin_without_request_id_generates_key(api, http_cli, monkeypatch):
+    batch = {"reason": "stdin 批次", "objects": [{"ref": "a", "kind": "concept", "title": "stdin 概念"}]}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(batch, ensure_ascii=False)))
+    code, result = http_cli("graph", "apply", "--input", "-", "--read-back")
+    assert code == 0 and result["success"] and result["data"]["committed"] is True
+    key = result["data"]["request_key"]
+    assert key and _post(api, "knowledge/request", request_key=key)["refs"]["a"]["id"]
+    assert _post(api, "knowledge/list")["total"] == 1
 
 
 def test_cli_apply_source_changed_rolls_back_whole_batch(api, knowledge_base, http_cli, tmp_path):

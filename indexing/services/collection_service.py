@@ -46,13 +46,29 @@ def collection_tree():
     return {"collections": roots, "total": len(items)}
 
 
+def _existing_name_message(name: str) -> str:
+    """同名集合提示带上它的层级路径和 ID；集合名全库唯一，不按父级区分。"""
+    existing = _collection_repo.find_by_name(name)
+    if not existing:
+        return f"集合已存在: {name}"
+    chain = []
+    seen = set()
+    current = existing
+    while current is not None and current["id"] not in seen:
+        seen.add(current["id"])
+        chain.append(current["name"])
+        current = _collection_repo.find_by_id(current["parent_id"]) if current["parent_id"] is not None else None
+    path = " / ".join(reversed(chain))
+    return f"集合已存在: {name}（位于 {path}，ID {existing['id']}）；集合名全库唯一，不能在另一父级下重名"
+
+
 @serialized_mutation
 def create_collection(name: str, description: Optional[str] = None, parent_id: Optional[int] = None) -> Dict[str, Any]:
     """
     创建集合
 
     Args:
-        name: 集合名（唯一，去除首尾空白）
+        name: 集合名（全库唯一，去除首尾空白）
         description: 集合说明
 
     Returns:
@@ -67,7 +83,7 @@ def create_collection(name: str, description: Optional[str] = None, parent_id: O
     try:
         collection_id = _collection_repo.insert(name, description, parent_id)
     except sqlite3.IntegrityError:
-        return {"success": False, "message": f"集合已存在: {name}", "collection_id": None}
+        return {"success": False, "message": _existing_name_message(name), "collection_id": None}
 
     logger.info("[Collection] 创建集合: %s (id=%s)", name, collection_id)
     return {"success": True, "message": "集合创建成功", "collection_id": collection_id}
@@ -83,7 +99,7 @@ def rename_collection(collection_id: int, name: str) -> Dict[str, Any]:
     try:
         updated = _collection_repo.rename(collection_id, name)
     except sqlite3.IntegrityError:
-        return {"success": False, "message": f"集合已存在: {name}"}
+        return {"success": False, "message": _existing_name_message(name)}
 
     if not updated:
         return {"success": False, "message": f"集合不存在 (ID: {collection_id})"}

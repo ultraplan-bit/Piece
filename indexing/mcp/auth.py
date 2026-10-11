@@ -1,7 +1,7 @@
 """
 MCP Bearer Token 认证
 
-piece-kb（检索）和 piece-index（索引）共用中间件实现，密钥按服务选择。
+各 MCP 服务复用中间件实现，密钥按服务独立选择。
 """
 
 import secrets

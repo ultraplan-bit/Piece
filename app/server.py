@@ -56,22 +56,27 @@ def check_optional_dependencies(*, with_gui: bool, with_mcp: bool) -> None:
 
 
 async def start_mcp_servers(runtime: Runtime, manager: Any) -> None:
-    """在主事件循环中启动两个独立端口的 MCP 服务，逐个记录就绪或失败。"""
+    """启动独立端口的 MCP 服务，逐个记录就绪或失败；Zotero 始终限于本机。"""
     from indexing.mcp.config import get_mcp_port
     from indexing.mcp.server import mcp as index_mcp
     from retrieval.server import mcp as retrieval_mcp
 
-    services = [("retrieval", retrieval_mcp, runtime.settings.mcp.port), ("index", index_mcp, get_mcp_port())]
-    await manager.start([(mcp, port) for _, mcp, port in services], host=MCP_HOST, runtime=runtime)
+    services = [("retrieval", retrieval_mcp, runtime.settings.mcp.port, MCP_HOST),
+                ("index", index_mcp, get_mcp_port(), MCP_HOST)]
+    if runtime.settings.mcp.zotero_enabled:
+        from indexing.mcp.zotero_server import mcp as zotero_mcp
+        services.append(("zotero", zotero_mcp, runtime.settings.mcp.zotero_port, "127.0.0.1"))
+    await manager.start([(mcp, port) for _, mcp, port, _ in services],
+                        host={mcp.name: host for _, mcp, _, host in services}, runtime=runtime)
 
     def refresh_status(_task=None):
         if manager.stopping:
             return
         statuses, failures = {}, []
-        for (name, _mcp, port), server, task in zip(services, manager.servers, manager.tasks):
+        for (name, _mcp, port, host), server, task in zip(services, manager.servers, manager.tasks):
             ready = bool(server.started and not server.should_exit and not task.done())
-            statuses[name] = {"status": "ready" if ready else "failed", "host": MCP_HOST, "port": port,
-                              "url": f"http://{MCP_HOST}:{port}/mcp"}
+            statuses[name] = {"status": "ready" if ready else "failed", "host": host, "port": port,
+                              "url": f"http://{host}:{port}/mcp"}
             if not ready:
                 failures.append(name)
         runtime.mark_mcp_services(statuses, failures)

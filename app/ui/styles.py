@@ -390,6 +390,16 @@ THEME_CSS = '''
     .workspace-search .q-field__native { font-size: 13px; }
     .workspace-document { padding: 28px clamp(16px, 4vw, 56px); }
 
+    .zotero-item { border-bottom: 1px solid var(--border-color); }
+    .zotero-item:hover { background: var(--bg-hover); }
+    .zotero-item-active { background: var(--bg-selected-inactive); }
+    .zotero-item .q-btn__content { justify-content: flex-start; }
+    .zotero-tabs { border-bottom: 1px solid var(--border-color); padding-bottom: 4px; }
+    .zotero-tab-active { color: var(--text-primary); font-weight: 600; text-decoration: underline; text-underline-offset: 6px; }
+    .zotero-child { border-bottom: 1px solid var(--border-color); }
+    [data-zotero-browser] .library-footer { height: auto; align-items: stretch; }
+    [data-zotero-browser] .q-btn, [data-zotero-detail] .q-btn { border-radius: var(--control-radius); }
+
     /* 设置沿用桌面工作区的密度，分组靠对齐与分隔，不使用嵌套卡片。 */
     .settings-workspace { container-type: inline-size; }
     .settings-navigation .workspace-toolbar, .settings-workspace > .workspace-toolbar {

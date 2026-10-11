@@ -379,11 +379,13 @@ async def knowledge_search(params: km.SearchInput) -> dict:
 
 @mcp.tool(name="knowledge-get", annotations=_KNOWLEDGE_READ)
 async def knowledge_get(params: km.GetInput) -> dict:
-    """Read a knowledge record: params.kind=object/relation/evidence, id=UUID; limit/offset paginate evidence.
+    """Read a knowledge record by UUID: params.id is required; params.kind=object/relation/evidence is optional and is
+    detected from the UUID when omitted (the response always reports the actual kind). limit/offset paginate evidence.
 
-    Returns library_id, kind, record (entity summary/aliases or relation endpoints/predicate/basis/qualifier).
+    Returns library_id, kind, record (entity summary/aliases or relation endpoints/predicate/basis/qualifier/revision).
     Entities/relations also include has_evidence and evidence {items,total,limit,offset}; evidence location_status is
     current/changed/missing/unresolved/unverified, never fact verification. No evidence means unsupported, not false.
+    Use record.id and record.revision as id/expected_revision for the index service's *_update tools.
     Piece evidence carries file/chunk IDs and server-derived page_number; use get-source-page for available original pages.
     """
     return await _knowledge_read(knowledge.get_record, params)
@@ -464,11 +466,13 @@ async def wiki_search(params: wm.SearchInput) -> dict:
 
 @mcp.tool(name="wiki-get", annotations=_KNOWLEDGE_READ)
 async def wiki_get(params: wm.GetInput) -> dict:
-    """Read a Wiki record: params.kind=page/evidence, id=UUID; limit/offset paginate evidence.
+    """Read a Wiki record by UUID: params.id is required; params.kind=page/evidence is optional and is detected from the
+    UUID when omitted (the response always reports the actual kind). limit/offset paginate evidence.
 
     Returns library_id, kind, record (page includes title/summary/body/aliases/status/revision/content_hash/path/index_status).
     Pages also include evidence {items,total,limit,offset}, page links and backlinks; evidence location_status is
     current/changed/missing/unresolved/unverified, never fact verification. A page has no graph identity.
+    Use record.id, record.revision and record.content_hash as id/expected_revision/expected_content_hash for wiki_page_update.
     """
     return await _knowledge_read(wiki.get_record, params)
 

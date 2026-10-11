@@ -68,6 +68,28 @@ def test_wiki_rebuild_index_is_explicit_and_has_no_knowledge_payload(endpoint, c
     assert endpoint.calls[-1]["payload"] == {}
 
 
+def test_wiki_list_recovery_is_read_only_and_filters(endpoint, capsys):
+    code, _, _ = invoke(endpoint, capsys, "wiki", "list-recovery")
+    assert code == 0 and endpoint.calls[-1]["path"] == "/api/v1/wiki/list-recovery"
+    assert endpoint.calls[-1]["payload"] == {"limit": 50, "offset": 0}
+    invoke(endpoint, capsys, "wiki", "list-recovery", "--status", "needed", "--limit", "5")
+    assert endpoint.calls[-1]["payload"] == {"status": "needed", "limit": 5, "offset": 0}
+    code, _, _ = invoke(endpoint, capsys, "graph", "list-recovery")
+    assert code == 2
+
+
+def test_wiki_purge_recovery_previews_without_yes_and_confirms_with_yes(endpoint, capsys):
+    code, _, _ = invoke(endpoint, capsys, "wiki", "purge-recovery")
+    assert code == 0 and endpoint.calls[-1]["path"] == "/api/v1/wiki/purge-recovery"
+    assert endpoint.calls[-1]["payload"] == {"dry_run": True}
+    invoke(endpoint, capsys, "wiki", "purge-recovery", "--dry-run", "--yes", "--include-orphans")
+    assert endpoint.calls[-1]["payload"] == {"dry_run": True, "include_orphans": True}
+    other = "00000000-0000-0000-0000-0000000000b2"
+    invoke(endpoint, capsys, "wiki", "purge-recovery", "--operation-id", OBJECT_UUID, "--operation-id", other, "--yes")
+    assert endpoint.calls[-1]["payload"] == {"dry_run": False, "confirmed": True, "operation_ids": [OBJECT_UUID, other]}
+    assert not any(call["path"].endswith("/wiki/delete") or call["path"].endswith("/rebuild-index") for call in endpoint.calls)
+
+
 @pytest.mark.parametrize("namespace,args", [
     ("wiki", ["relation", "add"]), ("wiki", ["graph", OBJECT_UUID]),
     ("graph", ["page", "add"]),

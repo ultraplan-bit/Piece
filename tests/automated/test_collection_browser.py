@@ -20,7 +20,7 @@ from tree_browser_helpers import browse_mode, collection_row, document_row, expa
 
 
 @pytest.fixture
-def gui_service(knowledge_base, tmp_path):
+def gui_service(knowledge_base, tmp_path, request):
     import fitz
     from indexing import database, settings
     from indexing.services import collection_service, file_service
@@ -66,6 +66,10 @@ def gui_service(knowledge_base, tmp_path):
     with log_path.open("wb") as log:
         executable = os.environ.get("PIECE_TEST_EXECUTABLE")
         command = [executable] if executable else [sys.executable, "-m", "app.cli"]
+        if getattr(request, "param", None) == "zotero":
+            if executable:
+                pytest.skip("模拟 Zotero 的浏览器验收使用源码入口")
+            command = [sys.executable, str(Path(__file__).with_name("zotero_browser_app.py"))]
         process = subprocess.Popen([*command, "serve", "--no-mcp", "--no-tray",
                                     "--data-dir", str(data_dir), "--port", str(port)], cwd=ROOT,
                                    env={**os.environ, "PYTHONUTF8": "1"}, stdout=log, stderr=subprocess.STDOUT,

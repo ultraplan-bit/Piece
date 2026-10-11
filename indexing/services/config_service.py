@@ -159,7 +159,9 @@ def update_config(patch, offline=False):
         restart = [key for key in _RESTART_GROUPS if getattr(current, key) != getattr(updated, key)]
         if "mcp" in restart and (current.mcp.port == updated.mcp.port
                 and current.mcp.auth_enabled == updated.mcp.auth_enabled
-                and all(current.mcp.get_api_key(service) == updated.mcp.get_api_key(service) for service in ("retrieval", "index"))):
+                and all(current.mcp.get_api_key(service) == updated.mcp.get_api_key(service) for service in ("retrieval", "index", "zotero"))
+                and all(getattr(current.mcp, key) == getattr(updated.mcp, key)
+                        for key in ("zotero_enabled", "zotero_port", "zotero_auth_enabled"))):
             restart.remove("mcp")
         model_changed = _check_model_change(current, updated)
         if not offline and model_changed:

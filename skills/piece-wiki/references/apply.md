@@ -11,11 +11,11 @@
 - 给**已有页面**追加证据（不提交内容改动字段）时，`pages` 里仍要带上该页 `{"id":..., "expected_revision":..., "expected_content_hash":...}` 作为并发条件。证据写入页面文件，页面 `revision` 会随之推进；读回以最新 `revision`/`content_hash` 为准。
 - `evidence` 的 `source_kind` 为 `piece/external/user`；`quote` 必填，`stance` 为 `supports/contradicts/context`，默认 supports。本库引文须逐字出现在当前卡片正文，只统一换行，不模糊匹配。`content_hash/heading_path/page_number` 由服务计算，不能填入；可提交 `expected_content_hash` 拒绝旧正文，无法可靠计算就不伪造哈希。
 - 每批最多 **20 页面、200 证据、整个 JSON 512 KiB**；超限拆批，不转后台任务。`apply` 同步返回，**没有 `--wait` 或 `task_id`**。
-- `apply` 按页面独立提交：返回 `committed/partial/index_status/errors`。`committed=true` 表示至少一页真实落盘；`partial=true` 或 `index_status!=current`（含单页索引失败）表示未全部完成，此时 `success=false`，但 **不要重发**，已提交回执保留在 `data`，按 `errors` 处理索引问题用 `wiki rebuild-index`。
+- `apply` 按页面独立提交：返回 `committed/partial/index_status/errors`。`committed=true` 表示至少一页真实落盘；`partial=true` 或 `index_status!=current`（含单页索引失败）表示未全部完成，此时 `success=false`，但 **不要重发**，已提交回执保留在 `data`，按 `errors` 处理索引问题用 `wiki rebuild-index`。一页都没写入（`committed=false`）时 `error.code` 是首条错误的真实失败码而不是 `PARTIAL_FAILURE`，按该码重读后可重新提交。
 
 ## 最小新增
 
-以下仅演示结构，须换成用户真实要求保存的内容，不把示例当成用户说过的话。保存为 `new.json`：
+以下仅演示结构，须换成用户真实要求保存的内容，不把示例当成用户说过的话：
 
 ```json
 {
@@ -29,11 +29,15 @@
 }
 ```
 
-```text
-<PIECE> wiki apply --input new.json --dry-run --json
-<PIECE> wiki apply --input new.json --request-id UNIQUE_NEW_KEY --json
-<PIECE> wiki get page RETURNED_UUID --json
+批次直接经 stdin 传入，不必写文件；`--request-id` 省略时 CLI 自动生成并回传 `data.request_key`：
+
+```bash
+<PIECE> wiki apply --input - --read-back --json <<'JSON'
+{ ...上面的批次... }
+JSON
 ```
+
+先预检就加 `--dry-run`；确认后去掉它原样重跑。需要留档时改成文件路径：`--input new.json --request-id UNIQUE_NEW_KEY`。然后 `wiki get page RETURNED_UUID --json` 核对。
 
 保存 `data.refs.concept.id/revision`、`data.pages[].content_hash` 与 `data.evidence[].id`。正式结果包含 `committed`、各类记录的 `id/action/revision` 和 `counts.created/updated/reused`；页面还带 `submitted_fields`，只列显式提交的字段名，不代表值一定变化或语义正确。旧请求缺少此项时不猜测。不通过搜索相似标题猜本次结果。
 

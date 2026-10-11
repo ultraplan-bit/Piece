@@ -16,7 +16,7 @@ from . import task_service
 from .task_service import serialized_mutation
 from .errors import BusinessError
 from .chunking import ChunkerFactory
-from .metadata_service import encode_metadata
+from .metadata_service import decode_metadata, encode_metadata
 
 import logging
 logger = logging.getLogger(__name__)
@@ -146,20 +146,110 @@ def _assign_collections(cursor, file_id, collection_ids):
         cursor.execute("INSERT OR IGNORE INTO file_collections VALUES (?, ?)", (file_id, collection_id))
 
 
+# Zotero 来源数组：只受控合并进 files.metadata["zotero_sources"]，不改动 title、tags、
+# zotero_key 等其他属性。有 server_id 时按身份取最新版本，旧版 server_id=None 只按整条
+# 记录去重——null 不是稳定的跨实例身份，不能拿它覆盖已有记录。
+_ZOTERO_SOURCE_IDENTITY = ("server_id", "library_type", "library_id", "item_key", "attachment_key")
+
+
+def _extract_zotero_sources(metadata):
+    """校验并取出 metadata['zotero_sources'] 的来源记录；没有该键返回 None。
+
+    结构不合法直接报错，避免把不可信数组写进库；只保留已知字段。
+    """
+    if not isinstance(metadata, dict) or "zotero_sources" not in metadata:
+        return None
+    sources = metadata["zotero_sources"]
+    if not isinstance(sources, list):
+        raise BusinessError("INVALID_INPUT", "zotero_sources 必须为数组")
+    cleaned = []
+    for source in sources:
+        if not isinstance(source, dict):
+            raise BusinessError("INVALID_INPUT", "zotero_sources 记录必须为对象")
+        server_id = source.get("server_id")
+        if server_id is not None and (not isinstance(server_id, str) or not server_id):
+            raise BusinessError("INVALID_INPUT", "zotero_sources.server_id 必须为非空字符串或 null")
+        for field in ("library_type", "item_key", "attachment_key"):
+            value = source.get(field)
+            if not isinstance(value, str) or not value:
+                raise BusinessError("INVALID_INPUT", f"zotero_sources.{field} 必须为非空字符串")
+        for field in ("library_id", "item_version", "attachment_version"):
+            value = source.get(field)
+            if type(value) is not int or value < 0:
+                raise BusinessError("INVALID_INPUT", f"zotero_sources.{field} 必须为非负整数")
+        cleaned.append({field: source.get(field) for field in (*_ZOTERO_SOURCE_IDENTITY, "item_version", "attachment_version")})
+    return cleaned
+
+
+def _metadata_without_sources(metadata):
+    """去掉 zotero_sources 后的属性副本，用于不涉及来源的校验与落库。"""
+    if not isinstance(metadata, dict):
+        return metadata
+    return {key: value for key, value in metadata.items() if key != "zotero_sources"}
+
+
+def _merge_zotero_sources(existing, incoming):
+    """合并来源数组：有 server_id 的按身份取最新版本，旧版记录只按整条去重。"""
+    merged = [dict(source) for source in existing if isinstance(source, dict)]
+    for source in incoming:
+        if source["server_id"] is None:
+            if source not in merged:
+                merged.append(dict(source))
+            continue
+        identity = tuple(source[field] for field in _ZOTERO_SOURCE_IDENTITY)
+        for index, current in enumerate(merged):
+            if current.get("server_id") is None:
+                continue
+            if tuple(current.get(field) for field in _ZOTERO_SOURCE_IDENTITY) == identity:
+                updated = {**current, **source}
+                for field in ("item_version", "attachment_version"):
+                    previous = current.get(field)
+                    if type(previous) is int:
+                        updated[field] = max(previous, source[field])
+                merged[index] = updated
+                break
+        else:
+            merged.append(dict(source))
+    return merged
+
+
+def _with_zotero_sources(metadata, sources, file_hash):
+    """把来源并入属性并用真实快照哈希填 file_hash；无有效来源时原样返回。"""
+    if sources is None:
+        return metadata
+    merged = _merge_zotero_sources([], [{**source, "file_hash": file_hash} for source in sources])
+    if not merged:
+        return metadata
+    return {**(metadata or {}), "zotero_sources": merged}
+
+
+def _merge_sources_into_metadata(metadata_json, sources, file_hash):
+    """命中重复文件时只更新来源数组；无变化返回 None。"""
+    existing_metadata = decode_metadata(metadata_json)
+    existing = existing_metadata.get("zotero_sources", [])
+    _extract_zotero_sources({"zotero_sources": existing})
+    merged = _merge_zotero_sources(existing, [{**source, "file_hash": file_hash} for source in sources])
+    return None if merged == existing else {**existing_metadata, "zotero_sources": merged}
+
+
 @serialized_mutation
 def import_file(source_path, filename=None, collection_ids=None, *, managed_original=False, metadata=None):
     """复制到受控目录后原子登记和入队；补偿仅删除本次创建的副本，绝不删用户原件。
 
     ``metadata`` 随登记一并写入 files.metadata：导入后文件立刻进入在途任务，
     此时不能再单独改属性；PDF 路径也不解析 frontmatter，外部来源（如 Zotero）
-    的元数据只有这一条入口。命中重复文件时不覆盖已有属性。
+    的元数据只有这一条入口。命中重复文件时只合并其中的 ``zotero_sources``，
+    不覆盖已有 title、tags、zotero_key 等用户属性；没有来源数组则保持旧行为。
     """
     source = Path(source_path).expanduser().resolve()
     if not source.is_file():
         raise BusinessError("NOT_FOUND", f"导入文件不存在：{source}")
     name = validate_filename(filename or source.name)
     validate_import(name, source.stat().st_size)
-    metadata_json = encode_metadata(metadata)
+    sources = _extract_zotero_sources(metadata)
+    base_metadata = _metadata_without_sources(metadata)
+    # 提前校验属性，避免为注定失败的导入白拷文件；含来源时下面用真实哈希重算
+    metadata_json = encode_metadata(base_metadata)
     ensure_files_dir()
     created = []
     # 先快照再哈希，避免源文件在查重和复制之间变化。
@@ -180,10 +270,18 @@ def import_file(source_path, filename=None, collection_ids=None, *, managed_orig
                 digest.update(block)
                 writer.write(block)
         file_hash = digest.hexdigest()
+        if sources is not None:
+            metadata_json = encode_metadata(_with_zotero_sources(base_metadata, sources, file_hash))
         existing = _file_repo.find_by_hash(file_hash)
         if existing:
             with get_db_cursor(write=True) as cursor:
                 _assign_collections(cursor, existing["id"], collection_ids)
+                if sources is not None:
+                    merged_metadata = _merge_sources_into_metadata(existing.get("metadata"), sources, file_hash)
+                    if merged_metadata is not None:
+                        encoded = encode_metadata(merged_metadata)
+                        cursor.execute("UPDATE files SET metadata = ? WHERE id = ?", (encoded, existing["id"]))
+                        existing["metadata"] = encoded
             active_ids = [t["id"] for t in task_service.get_active_tasks() if t["file_id"] == existing["id"]]
             return {"file_id": existing["id"], "filename": existing["filename"], "duplicate": True,
                     "status": "duplicate", "task_ids": active_ids, "file": existing}

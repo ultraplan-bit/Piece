@@ -20,12 +20,11 @@ description: 使用 Piece CLI 导入原始文档、创建笔记、批量新增�
 
 - **原始文档**：`<PIECE> file import "资料.pdf" --collection "已存在集合" --wait --timeout 300 --json`。支持 PDF、Word、PPT、Excel、Markdown、TXT、HTML、EPUB。目录导入先看 `--recursive` 帮助，保留 skipped/excluded/duplicate/failed 报告，不把跳过项说成成功。导入 Obsidian vault 加 `--recursive --skip-link-notes`，隐藏目录（`.obsidian`、`.trash`）默认跳过，模板/附件目录用 `--exclude templates --exclude attachments` 排除。
 - **外部取得的内容**（网页、公众号文章、视频字幕、导图大纲）：先用你自己的工具取正文，再 `<PIECE> file import-markdown "文章标题" --input - --properties props.json --wait --json` 从 stdin 传入（也可 `--input 文章.md`）。`props.json` 是 JSON 对象，至少含 `title`、`source_url`，可加 `author`、`published_at`；也可写在正文开头 YAML frontmatter，合并时 `--properties` 优先。Piece 保留原件、自动切片并写属性，不要手工切片。正文按内容查重，不确定时重跑同命令只会返回已有文件。单次正文不超过 2 MiB，更大文档写成文件后用 `file import`。浏览器另存的 `.html` 会自动取正文并读标题/作者/来源地址；电子书直接导入 `.epub`。
-- **Zotero 文献库**：要求本机 Zotero 7+ 运行并已开启「设置 → 高级 → 允许本机其他应用程序与 Zotero 通信」。先 `<PIECE> zotero preview --json` 查看将导入与跳过的条目，再 `<PIECE> zotero import --wait --timeout 600 --json`；`--zotero-collection KEY` 限定范围，`--collection-mode path|top|none` 决定集合映射。返回 `ZOTERO_DISABLED` 提示开启开关，`ZOTERO_UNAVAILABLE` 提示启动 Zotero。
 - **直接写卡片**：先 `<PIECE> file create "项目笔记" --json` 得到 `file_id`；卡片写入 UTF-8 JSON 文件，每项只含 `doc_title`、`chunk_text`，再 `<PIECE> chunk batch-add FILE_ID --input cards.json --request-id UNIQUE_KEY --wait --timeout 300 --json`。创建空笔记不是解析文档；只有需要手工控制每张卡片时才走这条路。一次批量最多 50 张，标题和正文合计最多 200000 字符。
 
 ## 层级集合
 
-- 先 `<PIECE> collection tree --json` 核对 ID、`parent_id` 和 `path`；集合是逻辑分类，不移动原件。名称中的 `/` 不表示父子关系，Zotero 的 `path` 模式仍创建路径名称，不自动转成集合树。
+- 先 `<PIECE> collection tree --json` 核对 ID、`parent_id` 和 `path`；集合是逻辑分类，不移动原件。名称中的 `/` 不表示父子关系。
 - 创建根集合用 `<PIECE> collection create "人工智能" --json`；子集合用 `--parent-id PARENT_ID`。按名称自动新建的集合位于根层。
 - 归类/导入只写明确指定的集合，不自动加入祖先。读取父集合默认包含后代，`file list` / `search` 加 `--direct-only` 只读直接归属；未归类用 `file list --uncategorized`。
 - 经用户确认后用 `<PIECE> collection move ID --parent-id PARENT_ID --json` 移动，或 `--root` 移到根层；两者互斥。移动不修改文件归属和磁盘路径。

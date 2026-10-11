@@ -86,7 +86,8 @@ class SearchInput(ListInput):
 
 
 class GetInput(Input):
-    kind: RecordKind
+    """kind 省略时按 UUID 先找页面再找证据；UUID 全局唯一，不会歧义。"""
+    kind: RecordKind | None = None
     id: Uuid
     limit: Limit = 50
     offset: Offset = 0
@@ -124,6 +125,24 @@ class DeleteInput(Input):
         if not self.dry_run and (not self.request_key or not self.impact_token):
             raise ValueError("正式删除必须提供 request_key 和预览的 impact_token")
         return self
+
+
+RecoveryStatus = Literal["needed", "releasable", "orphan"]
+
+
+class RecoveryListInput(Input):
+    """列出 .wiki-recovery-*.bak 本地恢复副本；只读。"""
+    status: RecoveryStatus | None = None
+    limit: Limit = 50
+    offset: Offset = 0
+
+
+class RecoveryPurgeInput(Input):
+    """清理恢复副本：默认 dry_run 预览；正式删除需 confirmed。orphan 副本须显式 include_orphans。"""
+    operation_ids: Annotated[list[Uuid], Field(min_length=1, max_length=100)] | None = None
+    include_orphans: bool = False
+    dry_run: bool = True
+    confirmed: bool = False
 
 
 class StoredEvidence(SourceInput):

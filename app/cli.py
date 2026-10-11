@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, NoReturn
 
@@ -478,24 +479,105 @@ def _build_parser() -> CliParser:
     logs.add_argument("--level")
     logs.add_argument("--limit", type=_positive, default=100)
 
-    zotero_parser = commands.add_parser("zotero", help="从本机运行中的 Zotero 一次性导入带 PDF 的条目")
+    zotero_parser = commands.add_parser("zotero", help="读取或整理本机 Zotero 文献库，并按选定范围导入 Piece")
     zotero_commands = zotero_parser.add_subparsers(dest="zotero_command", required=True)
+
     zotero_preview = zotero_commands.add_parser("preview", help="列出 Zotero 集合与将要导入的条目，不写入")
     zotero_import = zotero_commands.add_parser("import", help="导入条目：PDF 复制入库，元数据写入文件属性")
     for sub in (zotero_preview, zotero_import):
         _add_runtime_options(sub)
         sub.add_argument("--zotero-collection", dest="collection_keys", action="append", metavar="KEY",
-                         help="只导入该 Zotero 集合（含子集合）的条目，可重复；不指定则整库")
+                         help="只导入该 Zotero 集合（含子集合）的条目，可重复；三种范围互斥")
+        sub.add_argument("--item-key", dest="item_keys", action="append", metavar="KEY",
+                         help="只导入指定文献条目 key，可重复；与集合/附件范围互斥")
+        sub.add_argument("--attachment-key", dest="attachment_keys", action="append", metavar="KEY",
+                         help="只导入指定附件 key，可重复；与集合/条目范围互斥")
         sub.add_argument("--collection-mode", choices=("path", "top", "none"), default="path",
                          help="Zotero 集合映射：path=按「父/子」路径建集合（默认），top=只取顶层，none=不映射")
         sub.add_argument("--base-url", help="Zotero Local API 地址（默认 http://127.0.0.1:23119/api）")
+        sub.add_argument("--server-id", help="目标 Zotero 实例的 Zotero-Server-ID；省略则用默认实例")
     zotero_import.add_argument("--collection", dest="collections", action="append",
                                help="额外归入的已存在 Piece 集合名，可重复")
     _add_wait_options(zotero_import)
 
+    def zotero_read(name, help_text):
+        sub = zotero_commands.add_parser(name, help=help_text)
+        _add_runtime_options(sub)
+        sub.add_argument("--server-id", help="目标 Zotero 实例的 Zotero-Server-ID；省略则用默认实例")
+        return sub
+
+    zotero_read("status", "探测 Zotero 连接、版本与写入可行性（不写入）")
+    zotero_search = zotero_read("search", "按条件检索 Zotero 文献条目")
+    zotero_search.add_argument("query", nargs="?", help="检索词；省略则按其余条件列举")
+    zotero_search.add_argument("--collection-key", help="仅查询该 Zotero 集合，不含子集合")
+    zotero_search.add_argument("--tag")
+    zotero_search.add_argument("--item-type")
+    zotero_search.add_argument("--scope", choices=("title_creator_year", "everything"), default="title_creator_year",
+                               help="title_creator_year 只匹配标题/作者/年份（默认）；everything 另搜摘要、笔记、批注与已索引全文")
+    zotero_search.add_argument("--limit", type=_positive, default=20)
+    zotero_search.add_argument("--offset", type=_nonnegative, default=0)
+
+    zotero_collections = zotero_read("collections", "列出 Zotero 集合树")
+    zotero_collections.add_argument("--parent-key")
+    zotero_collections.add_argument("--limit", type=_positive, default=50)
+    zotero_collections.add_argument("--offset", type=_nonnegative, default=0)
+
+    zotero_tags = zotero_read("tags", "列出 Zotero 标签")
+    zotero_tags.add_argument("--collection-key")
+    zotero_tags.add_argument("--limit", type=_positive, default=50)
+    zotero_tags.add_argument("--offset", type=_nonnegative, default=0)
+
+    zotero_item = zotero_read("item", "读取单个条目及书目信息")
+    zotero_item.add_argument("item_key", help="Zotero 条目 key")
+
+    zotero_children = zotero_read("children", "读取条目的子项（附件、笔记、批注）")
+    zotero_children.add_argument("item_key", help="Zotero 条目 key")
+    zotero_children.add_argument("--item-type")
+    zotero_children.add_argument("--limit", type=_positive, default=20)
+    zotero_children.add_argument("--offset", type=_nonnegative, default=0)
+
+    zotero_fulltext = zotero_read("fulltext", "读取附件已索引的全文文本（可能不完整）")
+    zotero_fulltext.add_argument("attachment_key", help="Zotero 附件 key")
+    zotero_fulltext.add_argument("--offset", type=_nonnegative, default=0, help="字符偏移")
+    zotero_fulltext.add_argument("--limit", type=_positive, default=12000, help="返回字符预算（默认 12000）")
+
+    zotero_citations = zotero_read("citations", "导出条目引用或书目")
+    zotero_citations.add_argument("item_keys", nargs="+", metavar="ITEM_KEY")
+    zotero_citations.add_argument("--format", choices=("bib", "citation", "bibtex", "ris", "csljson"), default="bib")
+    zotero_citations.add_argument("--style", default="apa")
+    zotero_citations.add_argument("--locale", default="en-US")
+
+    zotero_links = zotero_read("links", "查询条目与附件的关联")
+    zotero_links.add_argument("--item-key", dest="item_keys", action="append", metavar="KEY")
+    zotero_links.add_argument("--attachment-key", dest="attachment_keys", action="append", metavar="KEY")
+    zotero_links.add_argument("--limit", type=_positive, default=100)
+    zotero_links.add_argument("--offset", type=_nonnegative, default=0)
+
+    zotero_authorize = zotero_commands.add_parser(
+        "authorize", help="请求 Zotero 本地写入授权（需要 Zotero 10.0.5 及以上）",
+        description="请求 Zotero 本地写入授权：需要 Zotero 10.0.5 及以上、已开启本机通信，"
+                    "且配置中显式开启 zotero_write_enabled。授权 key 不会回传到终端或模型。")
+    _add_runtime_options(zotero_authorize)
+    zotero_authorize.add_argument("--server-id", required=True, help="目标 Zotero 实例的 Zotero-Server-ID（必需）")
+
+    zotero_preview_changes = zotero_commands.add_parser(
+        "preview-changes", help="预览 Zotero 写入变更，返回短时 plan_id（不写入）")
+    _add_runtime_options(zotero_preview_changes)
+    zotero_preview_changes.add_argument("--input", required=True,
+                                        help="变更 JSON 文件，或 - 读 stdin；对象含 changes 数组，或直接为数组")
+    zotero_preview_changes.add_argument("--server-id", required=True, help="目标 Zotero 实例的 Zotero-Server-ID（必需）")
+
+    zotero_apply_changes = zotero_commands.add_parser(
+        "apply-changes", help="按 preview-changes 返回的 plan_id 应用变更（需要 Zotero 10.0.5 及以上）",
+        description="按 preview-changes 返回的 plan_id 应用已预览的变更；需要 Zotero 10.0.5 及以上。"
+                    "只接受 plan_id 与确认，不直接接收可篡改的变更对象。")
+    _add_runtime_options(zotero_apply_changes)
+    zotero_apply_changes.add_argument("plan_id", help="preview-changes 返回的 plan_id")
+    zotero_apply_changes.add_argument("--yes", action="store_true", help="确认应用已预览的变更")
+
     mcp_config = commands.add_parser("mcp-config", help="取得 MCP 客户端配置")
     _add_runtime_options(mcp_config)
-    mcp_config.add_argument("--service", choices=("retrieval", "index"), required=True)
+    mcp_config.add_argument("--service", choices=("retrieval", "index", "zotero"), required=True)
     mcp_config.add_argument("--include-secrets", action="store_true",
                             help="明确要求返回密钥（默认脱敏）")
 
@@ -599,7 +681,8 @@ def _client_for(args: argparse.Namespace) -> PieceClient:
         config_dir=info.data_dir,
         db_path=info.db_path,
         api_key=key,
-        timeout=10,
+        # 授权要等用户在 Zotero 弹窗上点击；需长于服务端 AUTHORIZE_TIMEOUT_SECONDS，让服务端先给出明确错误。
+        timeout=330 if getattr(args, "zotero_command", None) == "authorize" else 10,
     )
 
 
@@ -667,14 +750,26 @@ def _add_knowledge_commands(commands, namespace):
         "delete": "默认预览；正式删除需预览 token、请求键和确认",
     }
     descriptions["rebuild-index"] = "从 MD 重建派生索引，不重写页面" if is_wiki else "重建图谱查询索引，不修改实体、关系或证据"
+    if is_wiki:
+        descriptions["list-recovery"] = "只读列出本地恢复副本（.wiki-recovery-*.bak）及其是否仍被需要"
+        descriptions["purge-recovery"] = "清理可释放的恢复副本；默认预览，正式删除需 --yes，不动页面与审计"
     if not is_wiki:
         descriptions["graph"] = "读取有界局部语义图"
     for name, help_text in descriptions.items():
         sub = operations.add_parser(name, help=help_text, description=help_text)
         _add_runtime_options(sub)
-        if name in {"list", "search", "get", "references", "lint", "history"}:
+        if name in {"list", "search", "get", "references", "lint", "history", "list-recovery"}:
             sub.add_argument("--limit", type=_positive, default=50, help="分页大小，最大 100")
             sub.add_argument("--offset", type=_nonnegative, default=0)
+        if name == "list-recovery":
+            sub.add_argument("--status", choices=("needed", "releasable", "orphan"),
+                             help="只列某一状态：needed 仍被未提交操作需要，releasable 可清理，orphan 无操作记录")
+        if name == "purge-recovery":
+            sub.add_argument("--operation-id", dest="operation_ids", action="append", metavar="UUID",
+                             help="只清理指定操作的副本，可重复；省略则清理全部可释放副本")
+            sub.add_argument("--include-orphans", action="store_true",
+                             help="连同没有操作记录的副本一起清理；默认跳过")
+            _add_confirmation_options(sub)
         if name in {"list", "search"}:
             sub.add_argument("--kind")
             sub.add_argument("--status", choices=("active", "disputed", "outdated"))
@@ -682,7 +777,12 @@ def _add_knowledge_commands(commands, namespace):
             sub.add_argument("query")
         if name in {"get", "history", "delete"}:
             kinds = ("page",) if is_wiki else ("object", "relation")
-            sub.add_argument("kind", choices=kinds if name == "history" else (*kinds, "evidence"))
+            if name == "get":
+                # UUID 全局唯一，get 可以省略 kind 由服务探测；history/delete 仍必须明确类型。
+                sub.add_argument("kind", nargs="?", choices=(*kinds, "evidence"),
+                                 help="记录类型；省略时按 UUID 自动探测")
+            else:
+                sub.add_argument("kind", choices=kinds if name == "history" else (*kinds, "evidence"))
             sub.add_argument("id", help="记录 UUID，不是文件/卡片整数 ID")
         if name == "graph":
             sub.add_argument("root_id", help="根图实体 UUID")
@@ -743,11 +843,18 @@ def _add_knowledge_commands(commands, namespace):
                 sub.add_argument("--basis", required=adding, choices=("explicit", "synthesis", "inference", "user_statement"))
                 sub.add_argument("--qualifier")
             sub.add_argument("--status", choices=("active", "disputed", "outdated"))
-            sub.add_argument("--evidence-file", action="append", default=[], help="chunk extract --out 保存的证据 JSON，可重复")
-            sub.add_argument("--stance", choices=("supports", "contradicts", "context"), default="supports")
-            sub.add_argument("--request-file", type=Path, required=True, help="保存请求及自动生成的键；仅允许原样重试")
+            sub.add_argument("--evidence-file", action="append", default=[],
+                             help="chunk extract --out 保存的证据 JSON，可重复")
+            sub.add_argument("--evidence", action="append", default=[], metavar="CHUNK_ID:LOCATOR",
+                             help="内联证据：卡片 ID 加行号 N 或 N-M，或 grep=子串 / re=正则；可重复，不必先落盘")
+            sub.add_argument("--stance", action="append", choices=("supports", "contradicts", "context"),
+                             help="证据立场；省略按 supports，给一次作用于全部证据，给多次按证据顺序逐一对应")
+            save = sub.add_mutually_exclusive_group()
+            save.add_argument("--request-file", type=Path, help="保存请求及自动生成的键；仅允许原样重试")
+            save.add_argument("--save-request", action="store_true",
+                              help="把请求自动保存到数据目录 requests/ 下并回传路径；无需自行命名")
             sub.add_argument("--reason", help="修改原因；省略时记录 CLI 操作名称")
-            sub.add_argument("--dry-run", action="store_true", help="保存请求文件并预检，不写入知识库")
+            sub.add_argument("--dry-run", action="store_true", help="只预检不写入；给了请求文件时仍会保存")
 
 
 def _wiki_input(client: PieceClient, value: dict[str, Any]) -> dict[str, Any]:
@@ -763,42 +870,81 @@ def _wiki_input(client: PieceClient, value: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _wiki_intent(args: argparse.Namespace) -> dict[str, Any]:
+def _resolve_inline_evidence(client: PieceClient, args: argparse.Namespace, specs: list[str]) -> list[dict[str, Any]]:
+    """由服务按定位切出精确引文；恰好一个匹配才采用，否则给出只读恢复命令。"""
+    from indexing.services import knowledge_intent as intent
+    from indexing.services.errors import BusinessError
+
+    def extract(payload: dict[str, Any]) -> dict[str, Any]:
+        result = client.post("/api/v1/chunk/extract", payload)
+        if not result.get("success"):
+            raise ClientError(f"解析内联证据失败：{result.get('message')}",
+                              code=(result.get("error") or {}).get("code", "EVIDENCE_SELECTION_REQUIRED"),
+                              data=result.get("data"))
+        return dict(result.get("data") or {})
+
+    try:
+        return intent.resolve_evidence(specs, extract)
+    except BusinessError as exc:
+        if exc.code == "INVALID_ARGUMENT":
+            raise ClientError(str(exc).replace("证据定位", "--evidence", 1), code=exc.code) from None
+        hint = "用 chunk get 读回正文，再以 CHUNK_ID:N-M 行号给唯一引文；不自动取首条"
+        detail = dict(exc.data or {})
+        chunk_id = detail.pop("chunk_id", None)
+        if chunk_id is not None:
+            detail.update(_wiki_next(args, ["chunk", "get", str(chunk_id)], hint))
+        raise ClientError(str(exc), code=exc.code, data=detail) from None
+
+
+def _wiki_intent(client: PieceClient, args: argparse.Namespace) -> dict[str, Any]:
+    from indexing.services import knowledge_intent as intent
+    from indexing.services.errors import BusinessError
+
     if args.evidence_file.count("-") + (getattr(args, "body_file", None) == "-") > 1:
         raise ClientError("stdin 只能供一个输入使用；其余正文或证据请保存为 UTF-8 文件", code="INVALID_ARGUMENT")
-    kind, adding = args.knowledge_command, args.knowledge_action == "add"
+    kind, action = args.knowledge_command, args.knowledge_action
     fields = (("kind", "title", "summary", "aliases", "status") if kind in {"object", "page"} else
               ("source", "predicate", "target", "description", "qualifier", "basis", "status"))
     values = {key: getattr(args, key) for key in fields if getattr(args, key) is not None}
     if kind == "page" and args.body_file is not None:
         values["body"] = _read_text(args.body_file)
-    if not adding and not values:
-        raise ClientError(f"update 至少需要一个待修改字段；只添加证据请用 {args.command} apply", code="INVALID_ARGUMENT")
-    for field in ("source", "target"):
-        if field in values:
-            values[field] = {"id": values[field]}
-    if adding:
-        owner = {"ref": "item"}
-        values.update(owner)
-    else:
-        owner = {"id": args.id}
-        values.update(owner, expected_revision=args.expected_revision)
-        if kind == "page":
-            values["expected_content_hash"] = args.expected_content_hash
-    evidence = []
     required = {"source_kind", "source_library_id", "source_file_id", "source_chunk_id", "expected_content_hash", "quote"}
+    items = []
     for filename in args.evidence_file:
         item = _object_input(filename)
         if set(item) != required or item.get("source_kind") != "piece" or not item.get("expected_content_hash"):
             raise ClientError(f"不是 chunk extract --out 生成的完整证据文件：{filename}", code="INVALID_ARGUMENT")
-        evidence.append({**item, kind: owner, "stance": args.stance})
-    return {"reason": args.reason if args.reason is not None else f"CLI {args.command} {kind} {args.knowledge_action}",
-            {"page": "pages", "object": "objects", "relation": "relations"}[kind]: [values], "evidence": evidence}
+        items.append(item)
+    items.extend(_resolve_inline_evidence(client, args, args.evidence))
+    try:
+        return intent.build_intent(
+            kind, action, values, items, args.stance,
+            reason=args.reason, record_id=getattr(args, "id", None),
+            expected_revision=getattr(args, "expected_revision", None),
+            expected_content_hash=getattr(args, "expected_content_hash", None),
+            actor=f"CLI {args.command}")
+    except BusinessError as exc:
+        raise ClientError(str(exc).replace("stance ", "--stance ", 1), code=exc.code) from None
 
 
-def _wiki_save_request(client: PieceClient, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
-    path = path.expanduser().resolve()
+def _request_file_path(args: argparse.Namespace) -> Path | None:
+    """显式路径优先；``--save-request`` 自动落到数据目录 requests/ 下，按命名空间和时间命名。"""
+    if args.request_file is not None:
+        return args.request_file
+    if not args.save_request:
+        return None
+    directory = _get_data_dir(args) / "requests"
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return directory / f"{args.command}-{args.knowledge_command}-{args.knowledge_action}-{stamp}-{uuid.uuid4().hex[:8]}.json"
+
+
+def _wiki_save_request(client: PieceClient, path: Path | None, payload: dict[str, Any]) -> dict[str, Any]:
     candidate = {**payload, "request_key": str(uuid.uuid4())}
+    if path is None:
+        # 不落盘：服务端请求日志已按键保存回执，恢复走 `<ns> request KEY`。
+        return candidate
+    path = path.expanduser().resolve()
     try:
         _write_new_json(path, {"target_id": client.expected_target_id, "request": candidate})
         return candidate
@@ -832,6 +978,11 @@ def _clean_strings(values: Iterable[str] | None, field: str) -> list[str]:
 def _optional_names(values: Iterable[str] | None) -> list[str] | None:
     """未指定过滤时省略字段；空列表在服务端表示空范围，不能误发。"""
     return _clean_strings(values, "collection") or None
+
+
+def _present(**fields: Any) -> dict[str, Any]:
+    """只发送用户显式提供的字段，让服务端默认值在未传时生效。"""
+    return {key: value for key, value in fields.items() if value is not None}
 
 
 def _task_ids_from_data(data: Any) -> list[int]:
@@ -1136,6 +1287,13 @@ def _wiki_recovery(args: argparse.Namespace, result: dict[str, Any], payload=Non
         if kind and isinstance(record_id, str):
             words = [args.command, "get", kind, record_id]
             hint = "读回当前版本与内容哈希并比较；不要仅替换并发条件后覆盖"
+    elif code == "KNOWLEDGE_CONFLICT" and detail.get("section") == "relations" and isinstance(detail.get("existing"), dict):
+        # 已有同端点/谓词/条件的关系：回执带它的摘要和版本，恢复命令是对它做修订，不是换 qualifier 再建一条。
+        existing = detail["existing"]
+        if isinstance(existing.get("id"), str) and type(existing.get("revision")) is int:
+            words = [args.command, "relation", "update", existing["id"],
+                     "--expected-revision", str(existing["revision"])]
+            hint = "data.existing 是已有关系的当前内容；要改它就在此命令后补 --description/--predicate 等待改字段，要保留它就不必再写"
     elif code in {"QUOTE_MISMATCH", "SOURCE_CHANGED", "INVALID_SOURCE"}:
         index = detail.get("index")
         evidence = payload.get("evidence", [])
@@ -1516,15 +1674,19 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         operation = args.knowledge_command
         path = _knowledge_path(args, operation)
         if operation in {"page", "object", "relation"}:
-            payload = _wiki_save_request(client, args.request_file, _wiki_intent(args))
+            request_file = _request_file_path(args)
+            # 回填到 args，使失败恢复（_wiki_recovery）能引用实际落盘路径。
+            args.request_file = request_file
+            payload = _wiki_save_request(client, request_file, _wiki_intent(client, args))
             if args.dry_run:
                 payload["dry_run"] = True
+            location = {"request_file": str(request_file.expanduser().resolve())} if request_file is not None else {}
             try:
                 result = _wiki_submit(client, args, payload, read_back=True)
             except ClientError as exc:
-                exc.data = {**(exc.data or {}), "request_file": str(args.request_file.expanduser().resolve())}
+                exc.data = {**(exc.data or {}), **location}
                 raise
-            result["data"] = {**(result.get("data") or {}), "request_file": str(args.request_file.expanduser().resolve())}
+            result["data"] = {**(result.get("data") or {}), **location}
             return _simple(result)
         if operation == "apply":
             payload = _wiki_input(client, _object_input(args.input))
@@ -1535,7 +1697,8 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             if args.dry_run:
                 payload["dry_run"] = True
             if payload.get("dry_run") is not True and not payload.get("request_key"):
-                raise ClientError("正式提交必须提供 --request-id 或 request_key", code="INVALID_ARGUMENT")
+                # 与意图命令一致：不强制外部提供键，CLI 自生成并回传，便于按 request 查询。
+                payload["request_key"] = str(uuid.uuid4())
             return _simple(_wiki_submit(client, args, payload, read_back=args.read_back))
         if operation == "delete":
             payload = {"kind": args.kind, "id": args.id}
@@ -1558,6 +1721,16 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             args.request_key = saved.get("request_key")
             if not isinstance(args.request_key, str) or not args.request_key.strip():
                 raise ClientError("请求文件缺少有效 request_key", code="INVALID_ARGUMENT")
+        if operation == "purge-recovery":
+            payload = {"dry_run": True}
+            if args.operation_ids:
+                payload["operation_ids"] = _clean_strings(args.operation_ids, "operation-id")
+            if args.include_orphans:
+                payload["include_orphans"] = True
+            if args.dry_run or not args.yes:
+                # 没有 --yes 一律只预览；清理是本地文件删除，不能被交互确认误触发。
+                return _simple(client.post(path, payload))
+            return _simple(client.post(path, {**payload, "dry_run": False, "confirmed": _confirm(args, "清理 Wiki 恢复副本")}))
         fields = {
             "list": ("kind", "status", "limit", "offset"),
             "search": ("query", "kind", "status", "limit", "offset"),
@@ -1568,6 +1741,7 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "history": ("kind", "id", "limit", "offset"),
             "request": ("request_key",),
             "rebuild-index": (),
+            "list-recovery": ("status", "limit", "offset"),
         }[operation]
         result = client.post(path, {key: getattr(args, key) for key in fields if getattr(args, key) is not None})
         if operation == "request" and args.read_back:
@@ -1604,14 +1778,63 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         return _simple(client.post("/api/v1/logs", {"level": args.level, "limit": args.limit}))
 
     if command == "zotero":
-        payload = {
-            "collection_keys": _clean_strings(args.collection_keys, "zotero-collection") or None,
-            "collection_mode": args.collection_mode, "base_url": args.base_url,
-        }
-        if args.zotero_command == "preview":
-            return _simple(client.post("/api/v1/zotero/preview", payload))
-        result = client.post("/api/v1/zotero/import", {**payload, "collections": _optional_names(args.collections)})
-        return _with_wait(client, result, args)
+        operation = args.zotero_command
+        if operation in {"preview", "import"}:
+            payload = {
+                "collection_keys": _clean_strings(args.collection_keys, "zotero-collection") or None,
+                "item_keys": _clean_strings(args.item_keys, "item-key") or None,
+                "attachment_keys": _clean_strings(args.attachment_keys, "attachment-key") or None,
+                "collection_mode": args.collection_mode, "base_url": args.base_url,
+                "server_id": args.server_id,
+            }
+            if operation == "preview":
+                return _simple(client.post("/api/v1/zotero/preview", payload))
+            result = client.post("/api/v1/zotero/import", {**payload, "collections": _optional_names(args.collections)})
+            return _with_wait(client, result, args)
+        if operation == "status":
+            return _simple(client.post("/api/v1/zotero/status", _present(server_id=args.server_id)))
+        if operation == "search":
+            return _simple(client.post("/api/v1/zotero/search", _present(
+                query=args.query, collection_key=args.collection_key, tag=args.tag, item_type=args.item_type,
+                limit=args.limit, offset=args.offset, scope=args.scope, server_id=args.server_id)))
+        if operation == "collections":
+            return _simple(client.post("/api/v1/zotero/collections", _present(
+                parent_key=args.parent_key, limit=args.limit, offset=args.offset, server_id=args.server_id)))
+        if operation == "tags":
+            return _simple(client.post("/api/v1/zotero/tags", _present(
+                collection_key=args.collection_key, limit=args.limit, offset=args.offset, server_id=args.server_id)))
+        if operation == "item":
+            return _simple(client.post("/api/v1/zotero/item", _present(item_key=args.item_key, server_id=args.server_id)))
+        if operation == "children":
+            return _simple(client.post("/api/v1/zotero/children", _present(
+                item_key=args.item_key, item_type=args.item_type, limit=args.limit, offset=args.offset,
+                server_id=args.server_id)))
+        if operation == "fulltext":
+            return _simple(client.post("/api/v1/zotero/fulltext", _present(
+                attachment_key=args.attachment_key, offset=args.offset, limit=args.limit, server_id=args.server_id)))
+        if operation == "citations":
+            return _simple(client.post("/api/v1/zotero/citations", _present(
+                item_keys=_clean_strings(args.item_keys, "item-key"), format=args.format, style=args.style,
+                locale=args.locale, server_id=args.server_id)))
+        if operation == "links":
+            return _simple(client.post("/api/v1/zotero/links", _present(
+                item_keys=_clean_strings(args.item_keys, "item-key") or None,
+                attachment_keys=_clean_strings(args.attachment_keys, "attachment-key") or None,
+                limit=args.limit, offset=args.offset, server_id=args.server_id)))
+        if operation == "authorize":
+            return _simple(client.post("/api/v1/zotero/authorize", {"server_id": args.server_id}))
+        if operation == "preview-changes":
+            body = _read_input_json(args.input)
+            changes = body.get("changes") if isinstance(body, dict) else body
+            if not isinstance(changes, list) or not changes:
+                raise ClientError("changes 输入必须是数组，或含非空 changes 数组的对象", code="INVALID_JSON")
+            return _simple(client.post("/api/v1/zotero/changes/preview",
+                                       {"changes": changes, "server_id": args.server_id}))
+        if operation == "apply-changes":
+            confirmed = _confirm(args, "应用 Zotero 变更")
+            return _simple(client.post("/api/v1/zotero/changes/apply",
+                                       {"plan_id": args.plan_id, "confirmed": confirmed}))
+        raise ClientError("未知 zotero 命令", code="INVALID_ARGUMENT")
 
     if command == "mcp-config":
         return _simple(client.post("/api/v1/mcp-config", {

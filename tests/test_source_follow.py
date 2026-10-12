@@ -206,5 +206,7 @@ cards[1].isConnected = true;
 boundary(90); pane.isConnected = false; advance(250);
 assert.equal(events.length, 2);
 """.replace("HANDLER", _SOURCE_SCROLL_HANDLER)
-    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
-    assert result.returncode == 0, result.stderr
+    # 脚本本身不到 0.1 秒；放宽超时只为吸收 CI 上 node.exe 首次冷启动的开销，
+    # 不要再收紧，否则 Windows runner 可能把本该 0 秒的测试判成超时。
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, f"node exit {result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"

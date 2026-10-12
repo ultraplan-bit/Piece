@@ -14,7 +14,7 @@ from app.ui.styles import PINK_PRIMARY
 def test_theme_changes_clear_previous_palette_after_navigation(gui_service, initial_theme):
     service = gui_service
     expect = playwright.expect
-    selected_colors = {"light": "rgb(232, 241, 251)", "dark": "rgb(34, 58, 82)", "pink": "rgb(251, 232, 238)"}
+    selected_colors = {"light": "rgb(238, 241, 243)", "dark": "rgb(54, 59, 66)", "pink": "rgb(238, 241, 243)"}
     with playwright.sync_playwright() as automation:
         browser = automation.chromium.launch(channel="msedge", headless=True)
         context = browser.new_context(viewport={"width": 1280, "height": 900},
@@ -43,7 +43,7 @@ def test_theme_changes_clear_previous_palette_after_navigation(gui_service, init
             else:
                 expect(body).not_to_have_class(re.compile("body--dark"))
             expect(body).to_have_css("--q-primary", PINK_PRIMARY if theme == "pink" else "#5898d4")
-            expect(page.locator(".wiki-workbench .theme-selected")).to_have_css("background-color", selected_colors[theme])
+            expect(page.locator(".wiki-workbench .mode-active")).to_have_css("background-color", selected_colors[theme])
 
         try:
             page.goto(service["url"])
@@ -61,7 +61,7 @@ def test_theme_changes_clear_previous_palette_after_navigation(gui_service, init
                 assert_palette(theme)
                 page.screenshot(path=str(service["path"] / f"theme-{index}-{theme}.png"))
                 page.locator(".workspace-primary").get_by_role("button", name=t("sidebar.graph"), exact=True).click()
-                expect(page.locator(".workspace-content .workspace-toolbar .theme-selected").first).to_have_css(
+                expect(page.locator(".workspace-content .workspace-toolbar .mode-active").first).to_have_css(
                     "background-color", selected_colors[theme])
             assert not errors, errors
         finally:

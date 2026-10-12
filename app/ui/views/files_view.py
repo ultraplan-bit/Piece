@@ -885,7 +885,7 @@ def render_files_right(
                             ui.button(t("library.mode_" + value), color=None,
                                       on_click=lambda v=value: chunk_handlers.set_file_reading_mode(v)).props(
                                 f'flat dense no-caps no-ripple aria-pressed={str(mode == value).lower()}'
-                            ).classes("reader-mode-active" if mode == value else "theme-text-muted").set_enabled(
+                            ).classes("mode-active" if mode == value else "theme-text-muted").set_enabled(
                                 state.get("selected_file_id") is not None
                             )
                     comparing = state.get("source_pane_open", False)
@@ -896,7 +896,7 @@ def render_files_right(
                                   on_click=chunk_handlers.close_source_page if comparing else chunk_handlers.open_comparison).props(
                             f'flat dense no-caps no-ripple aria-pressed={str(comparing).lower()}'
                         ).classes("reader-source-toggle").classes(
-                            "reader-mode-active" if comparing else "theme-text-muted"
+                            "mode-active" if comparing else "theme-text-muted"
                         ).set_enabled(enabled)
                     if not enabled:
                         hint = t("library.compare_unavailable") if state.get("selected_file_id") else t("chunks.select_file_first")

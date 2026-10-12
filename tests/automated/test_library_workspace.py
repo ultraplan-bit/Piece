@@ -205,7 +205,7 @@ def test_reader_buttons_switch_both_ways_without_changing_comparison(knowledge_b
             if isinstance(element, ui.button) and element.text in (t("library.mode_reading"), t("library.mode_cards")):
                 selected = element.text == t("library.mode_" + mode)
                 assert element._props["aria-pressed"] == str(selected).lower()
-                assert ("reader-mode-active" in element._classes) == selected
+                assert ("mode-active" in element._classes) == selected
         compare = next(element for element in container.descendants() if "reader-source-toggle" in element._classes)
         assert compare._props["aria-pressed"] == str(comparing).lower()
     container.delete()

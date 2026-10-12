@@ -182,7 +182,7 @@ class GraphWorkbench(WorkbenchBase):
                     if controls:
                         controls()
                     for mode, icon in (("objects", "account_tree"), ("graph", "hub"), ("review", "fact_check")):
-                        ui.button(self.text(mode), icon=icon, color=None, on_click=partial(self.set_mode, mode)).props("flat dense no-caps").classes("theme-selected" if self.mode == mode else "theme-text-secondary")
+                        ui.button(self.text(mode), icon=icon, color=None, on_click=partial(self.set_mode, mode)).props("flat dense no-caps").classes("mode-active" if self.mode == mode else "theme-text-secondary")
             self.refresh_modes = modes.refresh
             modes()
             with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(detail=e.vertical_position)).classes("w-full flex-1") as area:

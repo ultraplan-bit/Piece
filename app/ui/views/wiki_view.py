@@ -199,7 +199,7 @@ class WikiWorkbench(WorkbenchBase):
                     if controls:
                         controls()
                     for mode, icon in (("pages", "article"), ("review", "fact_check")):
-                        ui.button(self.text(mode), icon=icon, color=None, on_click=partial(self.set_mode, mode)).props("flat dense no-caps").classes("theme-selected" if self.mode == mode else "theme-text-secondary")
+                        ui.button(self.text(mode), icon=icon, color=None, on_click=partial(self.set_mode, mode)).props("flat dense no-caps").classes("mode-active" if self.mode == mode else "theme-text-secondary")
                     ui.space()
                     self._info_button = ui.button(self.text("page_info"), icon="info", color=None, on_click=self.toggle_inspector).props("flat dense no-caps").classes("wiki-info-toggle")
                     self._info_button.set_enabled(self.editor is None and self.mode == "pages")

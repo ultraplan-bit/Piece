@@ -48,7 +48,6 @@ THEME_CSS = '''
         --bg-selected-inactive: #e9ecef;
         --focus-ring: #2b6cb0;
         --border-color: #e3e6ea;
-        --border-selected: #5b8def;
         --text-primary: #1f2328;
         --text-secondary: #5a646e;
         /* 次级小字在各浅色面板上仍需满足 WCAG AA 4.5:1。 */
@@ -80,7 +79,6 @@ THEME_CSS = '''
         --bg-selected-inactive: #34383f;
         --focus-ring: #7db6e8;
         --border-color: #3a4048;
-        --border-selected: #6b93d8;
         --text-primary: #e6e9ee;
         --text-secondary: #c7ccd3;
         --text-muted: #9aa3ad;
@@ -96,7 +94,6 @@ THEME_CSS = '''
     body.theme-pink {
         /* 少女粉主题 - 仅替换强调色（--text-accent 需与 PINK_PRIMARY 保持一致） */
         --bg-selected: #fbe8ee;
-        --border-selected: #f2a3ba;
         --text-accent: #e5628e;
     }
 
@@ -150,7 +147,6 @@ THEME_CSS = '''
     .library-view-button .q-btn__content, .library-view-button .block { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .library-location { padding: 0 10px 4px 4px; min-height: 28px; }
     .library-location .q-btn { min-height: 24px; padding: 2px 6px; }
-    .library-catalog .theme-selected { background: var(--bg-selected-inactive); }
     .resource-tree { padding: 4px; }
     .resource-collection-row {
         display: flex; align-items: center; gap: 4px; min-height: 32px;
@@ -184,7 +180,6 @@ THEME_CSS = '''
         color: var(--text-primary); background: var(--bg-content); border: 1px solid var(--text-accent);
         border-radius: var(--control-radius); box-shadow: var(--shadow-card); font-size: 13px;
     }
-    [data-catalog]:not(:focus-within) .theme-selected { background: var(--bg-selected-inactive); box-shadow: none; }
     [data-catalog-row] { scroll-margin: 44px 0 8px; }
     [data-catalog-row]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
     /* 表头与行共用列宽；窄目录把元数据移到标题下方，不丢失格式和日期。 */
@@ -219,7 +214,7 @@ THEME_CSS = '''
     .reader-toolbar { gap: 8px; }
     .reader-view-switch { border: 1px solid var(--border-color); border-radius: 3px; padding: 1px; flex-shrink: 0; }
     .reader-view-switch .q-btn, .reader-source-toggle.q-btn { min-height: 25px; padding: 2px 8px; border-radius: 1px; font-size: 12px; }
-    .reader-mode-active { background: var(--bg-hover); color: var(--text-primary); font-weight: 600; }
+    .mode-active { background: var(--bg-hover); color: var(--text-primary); font-weight: 600; }
     .file-info-drawer {
         position: absolute;
         top: var(--toolbar-height);
@@ -384,7 +379,6 @@ THEME_CSS = '''
         cursor: pointer;
         transition: background-color 120ms ease;
     }
-    .workspace-list-item.theme-selected { box-shadow: inset 2px 0 var(--border-selected); }
     .workspace-list-title { font-size: 13px; line-height: 1.5; font-weight: 500; }
     .workspace-search .q-field__control { border-radius: var(--control-radius); }
     .workspace-search .q-field__native { font-size: 13px; }
@@ -512,11 +506,6 @@ THEME_CSS = '''
     .collection-tree-count { flex-shrink: 0; white-space: nowrap; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-muted); }
     .breadcrumb-label { max-width: 100%; }
     .breadcrumb-label .q-btn__content { overflow-wrap: anywhere; }
-
-    /* 选中边框样式 */
-    .theme-border-selected {
-        border-left-color: var(--border-selected) !important;
-    }
 
     html, body {
         overflow: hidden !important;
@@ -726,7 +715,8 @@ THEME_CSS = '''
     .theme-content { background-color: var(--bg-content); }
     .theme-card { background-color: var(--bg-card); border-color: var(--border-color); }
     .theme-hover:hover { background-color: var(--bg-hover); }
-    .theme-selected { background-color: var(--bg-selected); }
+    /* 列表选中只用克制的底色区分，不加左侧强调条（对齐资料库的文件选中效果）。 */
+    .theme-selected { background-color: var(--bg-selected-inactive); }
     .theme-border { border-color: var(--border-color); }
     .theme-text { color: var(--text-primary); }
     .theme-text-secondary { color: var(--text-secondary); }

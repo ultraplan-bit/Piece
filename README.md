@@ -30,7 +30,7 @@ Piece 的思路很简单：**资料留在本机，建好索引，再把检索能
 - **导入即成卡片**：PDF、Word、PPT、Excel（`.xlsx`）、Markdown、TXT、HTML、EPUB，解析后切成一张张知识卡片。
 - **卡片能改、能核对**：标题和正文随手修正，旁边对照 PDF 原页，解析错了一眼看得出。
 - **混合检索**：BM25 + 向量，RRF 融合排序。
-- **接上你常用的 AI**：MCP 分两个服务——查资料用只读的 `piece-kb`，想让 AI 写笔记、改卡片再加 `piece-index`；也能导出 Skill 给终端 AI。
+- **接上你常用的 AI**：MCP 按能力分成几个服务——查资料用只读的 `piece-kb`，想让 AI 写笔记、改卡片再加 `piece-index`，维护知识图谱用 `piece-graph`，编译知识页用 `piece-wiki`；也能导出 Skill 给终端 AI。
 - **顺带整理**：层级集合分类、Wiki 知识页、知识图谱，还支持整库导入 Obsidian 与 Zotero。
 - **本地优先**：SQLite + FTS5 + sqlite-vec 存储，NiceGUI 界面，服务常驻本机。
 
@@ -94,6 +94,8 @@ Piece 的思路很简单：**资料留在本机，建好索引，再把检索能
 
 - 只想查资料：选检索服务 `piece-kb`；
 - 还要让 AI 写笔记、改卡片：再启用索引服务 `piece-index`；
+- 维护知识图谱：启用图谱服务 `piece-graph`；
+- 编译 Markdown 知识页：启用 Wiki 服务 `piece-wiki`；
 - 查阅 Zotero 文献：单独选 `piece-zotero`。
 
 **方式二 · Skill**：AI 能运行本机命令行的话，到 **Skill 导出** 页面导出工作流——`piece-search` 查资料，`piece-index` 导入和整理资料，`piece-wiki` 编译知识页，`piece-graph` 维护图谱，`piece-zotero` 查阅文献。
@@ -160,11 +162,11 @@ piece stop                        # 请求停止；服务会在退出前收尾�
 
 ### MCP 写入与 Wiki、图谱
 
-MCP 写入优先用索引服务里的意图工具：`knowledge_object_add` / `knowledge_object_update` / `knowledge_relation_add` / `knowledge_relation_update` 和 `wiki_page_add` / `wiki_page_update`。参数扁平，证据用 `CHUNK_ID:行号` 或 `CHUNK_ID:grep=子串` 内联，`request_key` 自动生成并回传。它们与 CLI 的 `graph object add`、`wiki page add` 共用同一套组装逻辑；一次提交多条记录或需要字段级控制时，再用 `knowledge_apply` / `wiki_apply` 批次工具。
+MCP 写入优先用图谱与 Wiki 服务里的意图工具：`knowledge-object-add` / `knowledge-object-update` / `knowledge-relation-add` / `knowledge-relation-update`（`piece-graph`）和 `wiki-page-add` / `wiki-page-update`（`piece-wiki`）。参数扁平，证据用 `CHUNK_ID:行号` 或 `CHUNK_ID:grep=子串` 内联，`request_key` 自动生成并回传。它们与 CLI 的 `graph object add`、`wiki page add` 共用同一套组装逻辑；一次提交多条记录或需要字段级控制时，再用 `knowledge-apply` / `wiki-apply` 批次工具。
 
 Wiki 正文与元数据保存在配置 `data_path` 下的 `wiki/` Markdown 文件，SQLite 只保留可重建的页面索引和独立审计；页面内链用 `[标题](piece://wiki/页面UUID)`，改标题或文件名不改变身份。外部编辑后显式运行 `piece wiki rebuild-index` 刷新索引，不会重写 MD 或调用模型。
 
-知识页的证据要求逐字引用原文。Agent 可用 `piece chunk extract` 从卡片正文按行号或匹配切出精确子串（CLI 与两个 MCP 服务都提供），加 `--out` 可直接落成可提交的证据文件；匹配不唯一时先用 `--lines` 收窄，不猜第一条。
+知识页的证据要求逐字引用原文。Agent 可用 `piece chunk extract` 从卡片正文按行号或匹配切出精确子串（CLI 与 `piece-kb` 的 `extract-quote` 都提供），加 `--out` 可直接落成可提交的证据文件；匹配不唯一时先用 `--lines` 收窄，不猜第一条。
 
 一条命令写入知识页，默认读回、不写任何临时文件：
 
@@ -190,7 +192,7 @@ piece zotero preview --attachment-key ATTACHMENT_KEY --collection-mode none --se
 piece zotero import --attachment-key ATTACHMENT_KEY --collection-mode none --server-id SERVER_ID --wait --json
 ```
 
-独立 MCP 服务 `piece-zotero` 提供查阅、`zotero_import`、授权、变更预览与执行，原有 `piece-kb`、`piece-index` 不注册 Zotero 工具。需要 Zotero 7+ 运行并开启「设置 → 高级 → 允许本机其他应用程序与 Zotero 通信」。前端入口是 **工具 → Zotero 文献库**，导入是一次性复制，不改动原库。修改 Zotero 需要显式启用配置 `zotero_write_enabled`（默认 `false`），先在 Zotero 弹窗授权，再预览差异并按 `plan_id` 执行。详见 [Zotero 操作说明](skills/piece-zotero/SKILL.md)。
+独立 MCP 服务 `piece-zotero` 提供查阅、`zotero_import`、授权、变更预览与执行，其余服务不注册 Zotero 工具。需要 Zotero 7+ 运行并开启「设置 → 高级 → 允许本机其他应用程序与 Zotero 通信」。前端入口是 **工具 → Zotero 文献库**，导入是一次性复制，不改动原库。修改 Zotero 需要显式启用配置 `zotero_write_enabled`（默认 `false`），先在 Zotero 弹窗授权，再预览差异并按 `plan_id` 执行。详见 [Zotero 操作说明](skills/piece-zotero/SKILL.md)。
 
 ### 小技巧
 

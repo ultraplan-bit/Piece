@@ -95,6 +95,9 @@ hiddenimports = [
     'app.window',
     'retrieval.server',
     'indexing.mcp.server',
+    'indexing.mcp.graph_server',
+    'indexing.mcp.wiki_server',
+    'indexing.mcp.shared',
     'indexing.mcp.config',
     # 轻量 CLI 与平台边界（含独立窗口 / helper 的早期分派）
     'app.cli',

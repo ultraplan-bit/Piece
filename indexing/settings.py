@@ -66,14 +66,28 @@ class EmbeddingSettings(BaseModel):
     max_tokens: int = Field(default=8192, ge=1)  # 模型最大上下文长度
 
 
-McpService = Literal["retrieval", "index", "zotero"]
+McpService = Literal["retrieval", "index", "graph", "wiki", "zotero"]
+
+# 全部 MCP 服务；顺序即 GUI 与配置导出中的展示顺序。
+MCP_SERVICES: tuple[McpService, ...] = ("retrieval", "index", "graph", "wiki", "zotero")
+
+# 派生端口偏移：索引与两个知识服务都从检索端口偏移得到，用户只需改一个基端口。
+# 偏移 2、3 已被 zotero（默认 8688）和 GUI（默认 8689）占用，graph/wiki 因此用 4、5，
+# 否则默认配置下两个服务会抢同一端口而其中之一启动失败。改这两个数字前先核对默认值。
+MCP_PORT_OFFSETS: dict[McpService, int] = {"retrieval": 0, "index": 1, "graph": 4, "wiki": 5}
+MCP_PORT_ENV: dict[McpService, str] = {
+    "index": "PIECE_INDEX_MCP_PORT", "graph": "PIECE_GRAPH_MCP_PORT", "wiki": "PIECE_WIKI_MCP_PORT",
+}
 
 
 class McpSettings(BaseModel):
     """MCP 服务配置"""
     port: int = Field(default=8686, ge=1, le=65535)
     api_key: str = ""  # 检索密钥；同时兼容旧配置的共享密钥
-    index_api_key: Optional[str] = None  # 未配置时沿用旧密钥；显式空字符串表示不认证
+    # 其余服务未配置时沿用旧密钥；显式空字符串表示不认证
+    index_api_key: Optional[str] = None
+    graph_api_key: Optional[str] = None
+    wiki_api_key: Optional[str] = None
     auth_enabled: bool = True  # 是否启用密钥验证
     # get-docs 的 include_images 默认值：开启后 AI 不传参也会附带插图，
     # AI 仍可显式传 false 跳过
@@ -90,6 +104,10 @@ class McpSettings(BaseModel):
             return self.api_key
         if service == "index":
             return self.api_key if self.index_api_key is None else self.index_api_key
+        if service == "graph":
+            return self.api_key if self.graph_api_key is None else self.graph_api_key
+        if service == "wiki":
+            return self.api_key if self.wiki_api_key is None else self.wiki_api_key
         if service == "zotero":
             return self.zotero_api_key
         raise ValueError(f"未知 MCP 服务: {service}")
@@ -254,7 +272,7 @@ class AppSettings(BaseModel):
 
     @model_validator(mode="after")
     def protect_management_key(self):
-        if self.api.admin_key in {self.mcp.get_api_key(service) for service in ("retrieval", "index", "zotero")}:
+        if self.api.admin_key in {self.mcp.get_api_key(service) for service in MCP_SERVICES}:
             raise ValueError("管理 API 密钥必须与 MCP 凭据分离")
         return self
 
@@ -295,6 +313,8 @@ def load_settings() -> AppSettings:
     settings = AppSettings()
     settings.mcp.api_key = generate_api_key()
     settings.mcp.index_api_key = generate_api_key()
+    settings.mcp.graph_api_key = generate_api_key()
+    settings.mcp.wiki_api_key = generate_api_key()
     if not save_settings(settings):
         raise RuntimeError(f"无法初始化配置：{config_path}")
     return settings
@@ -357,15 +377,29 @@ def get_mcp_api_key(service: McpService = "retrieval") -> str:
     return get_settings().mcp.get_api_key(service)
 
 
-def get_index_mcp_port(retrieval_port: int | None = None) -> int:
-    raw = os.getenv("PIECE_INDEX_MCP_PORT")
+def get_mcp_service_port(service: McpService, base_port: int | None = None) -> int:
+    """取某个 MCP 服务的监听端口。
+
+    检索用基端口，索引/图谱/Wiki 由基端口加固定偏移派生（可被各自的环境变量覆盖），
+    Zotero 用独立的 zotero_port 字段。传入 base_port 用于设置页预览尚未保存的基端口。
+    """
+    config = get_settings().mcp
+    if service == "zotero":
+        return config.zotero_port
+    base = config.port if base_port is None else base_port
+    offset = MCP_PORT_OFFSETS[service]
+    raw = os.getenv(MCP_PORT_ENV.get(service, ""))
     try:
-        port = int(raw) if raw else (retrieval_port if retrieval_port is not None else get_settings().mcp.port) + 1
+        port = int(raw) if raw else base + offset
     except ValueError:
-        port = (retrieval_port if retrieval_port is not None else get_settings().mcp.port) + 1
+        port = base + offset
     if not 1 <= port <= 65535:
-        raise ValueError("索引 MCP 端口必须在 1–65535 之间")
+        raise ValueError(f"{service} MCP 端口必须在 1–65535 之间")
     return port
+
+
+def get_index_mcp_port(retrieval_port: int | None = None) -> int:
+    return get_mcp_service_port("index", retrieval_port)
 
 
 def get_mcp_config() -> McpSettings:

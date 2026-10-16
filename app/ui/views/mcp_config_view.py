@@ -16,16 +16,25 @@ from nicegui import ui
 
 from app.i18n import t
 from app.ui.components import write_clipboard as _write_clipboard
-from indexing.mcp.config import get_mcp_port
+from indexing.mcp.config import PORT_PLACEHOLDERS, SERVICE_NAMES, get_service_ports
 from indexing.settings import get_settings, is_mcp_auth_enabled
 
 
-# 独立服务端点；key 用于取翻译文案。
+# 独立服务端点；key 用于取翻译文案。顺序即界面展示顺序。
 MCP_SERVICES = (
     {"name": "piece-kb", "key": "service_kb"},
     {"name": "piece-index", "key": "service_index"},
+    {"name": "piece-graph", "key": "service_graph"},
+    {"name": "piece-wiki", "key": "service_wiki"},
     {"name": "piece-zotero", "key": "service_zotero"},
 )
+
+# 由索引端点克隆出来的服务：模板里只内置 piece-kb 与 piece-index，
+# 其余服务复用索引节点的容器格式，避免给 30 多个客户端模板各写一遍。
+_DERIVED_SERVICES = ("piece-zotero", "piece-graph", "piece-wiki")
+
+# 未显式选择服务时写入配置的默认集合。
+_DEFAULT_SERVICES = ("piece-kb", "piece-index")
 
 
 # MCP 客户端配置模板
@@ -612,14 +621,14 @@ def _client_docs(client: dict) -> str | None:
 def _get_config_json(client: dict, services: Iterable[str] | None = None) -> str:
     """生成客户端配置，按服务选择端口和密钥；未启用认证时不导出密钥。
 
-    services 为要写入配置的服务名集合，None 保留原有检索与索引服务。
+    services 为要写入配置的服务名集合，None 保留默认的检索与索引服务。
     """
     settings = get_settings()
-    ports = {"piece-kb": settings.mcp.port, "piece-index": get_mcp_port(), "piece-zotero": settings.mcp.zotero_port}
-    kept = ["piece-kb", "piece-index"] if services is None else [name for name in ports if name in services]
+    ports = get_service_ports()
+    kept = list(_DEFAULT_SERVICES) if services is None else [name for name in ports if name in services]
     api_keys = {name: settings.mcp.get_api_key(service)
-                for name, service in (("piece-kb", "retrieval"), ("piece-index", "index"), ("piece-zotero", "zotero"))
-                if is_mcp_auth_enabled(service)}
+                for service, name in SERVICE_NAMES.items()
+                if name in ports and is_mcp_auth_enabled(service)}
 
     if client.get("format") == "bash":
         commands = []
@@ -645,13 +654,14 @@ def _get_config_json(client: dict, services: Iterable[str] | None = None) -> str
         return "\n\n".join(sections)
 
     config = json.loads(json.dumps(client["config"]))
-    if "piece-zotero" in kept:
-        _add_zotero_server(config)
+    for name in _DERIVED_SERVICES:
+        if name in kept:
+            _clone_index_server(config, name)
     # 替换端口后再注入密钥，避免自定义密钥中的占位符被误替换。
     config_str = json.dumps(config)
-    config_str = config_str.replace("{port}", str(ports["piece-kb"]))
-    config_str = config_str.replace("{index_port}", str(ports["piece-index"]))
-    config_str = config_str.replace("{zotero_port}", str(ports["piece-zotero"]))
+    for name, placeholder in PORT_PLACEHOLDERS.items():
+        if name in ports:
+            config_str = config_str.replace(placeholder, str(ports[name]))
     config = json.loads(config_str)
     for name in ports:
         if name not in kept:
@@ -660,24 +670,25 @@ def _get_config_json(client: dict, services: Iterable[str] | None = None) -> str
     return json.dumps(config, indent=2, ensure_ascii=False)
 
 
-def _add_zotero_server(node) -> bool:
-    """复用客户端的索引端点模板，保留它的字段和容器格式。"""
+def _clone_index_server(node, name: str) -> bool:
+    """复用客户端的索引端点模板新建一个服务节点，保留它的字段和容器格式。"""
     def clone(value):
-        return json.loads(json.dumps(value).replace("piece-index", "piece-zotero").replace("{index_port}", "{zotero_port}"))
+        renamed = json.dumps(value).replace("piece-index", name).replace("{index_port}", PORT_PLACEHOLDERS[name])
+        return json.loads(renamed)
 
     if isinstance(node, dict):
         if isinstance(node.get("piece-index"), dict):
-            node["piece-zotero"] = clone(node["piece-index"])
+            node[name] = clone(node["piece-index"])
             return True
         for child in node.values():
-            if _add_zotero_server(child):
+            if _clone_index_server(child, name):
                 return True
     elif isinstance(node, list):
         for child in node:
             if isinstance(child, dict) and child.get("name") == "piece-index":
                 node.append(clone(child))
                 return True
-            if _add_zotero_server(child):
+            if _clone_index_server(child, name):
                 return True
     return False
 
@@ -845,7 +856,7 @@ def _entry_key(client: dict) -> str:
 def _render_client_config(client: dict, selected_client: dict) -> None:
     """单个客户端的配置区：服务选择 → 配置入口 → 配置内容 → 三者区分说明。"""
     settings = get_settings()
-    ports = {"piece-kb": settings.mcp.port, "piece-index": get_mcp_port(), "piece-zotero": settings.mcp.zotero_port}
+    ports = get_service_ports()
     # 先提供只读检索；其他服务由用户明确勾选，选择跨客户端和页面保留。
     kept = {"value": selected_client.setdefault("services", {"piece-kb"})}
 
@@ -886,8 +897,8 @@ def _render_client_config(client: dict, selected_client: dict) -> None:
             ui.label(t("mcp_config.services_heading")).classes(
                 "text-xs font-semibold theme-text-muted"
             )
-            authentication = {"piece-kb": is_mcp_auth_enabled("retrieval"), "piece-index": is_mcp_auth_enabled("index"),
-                              "piece-zotero": is_mcp_auth_enabled("zotero")}
+            authentication = {SERVICE_NAMES[service]: is_mcp_auth_enabled(service)
+                              for service in SERVICE_NAMES if SERVICE_NAMES[service] in ports}
             for service in MCP_SERVICES:
                 name = service["name"]
                 purpose = t(f"mcp_config.{service['key']}_purpose")

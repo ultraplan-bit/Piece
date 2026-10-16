@@ -656,17 +656,17 @@ def test_purge_recovery_orphans_require_explicit_opt_in(knowledge_base):
 
 def test_zero_write_batch_is_not_partial_failure_at_entrypoints(knowledge_base):
     """一页都没写入时，MCP/API 信封应透出真实冲突码而不是 PARTIAL_FAILURE。"""
-    from indexing.mcp import server as index
+    from indexing.mcp import shared
     page_id = create()
     stale = update(page_id, body="过期")
     wiki.apply(batch(pages=[update(page_id, body="抢先")]))
     result = wiki.apply(batch(pages=[stale]))
     assert not result["committed"] and result["partial"] and result["errors"][0]["code"] == "VERSION_CONFLICT"
-    envelope = index._write_envelope(result, "部分")
+    envelope = shared.write_envelope(result, "部分")
     assert not envelope["success"] and envelope["error"]["code"] == "VERSION_CONFLICT"
     assert envelope["data"] is result and envelope["message"] == result["errors"][0]["message"]
     # 至少写入一页的批次仍然是 PARTIAL_FAILURE。
     mixed = {"committed": True, "partial": True, "index_status": "stale",
              "errors": [{"code": "CONTENT_CONFLICT", "message": "x"}]}
-    assert index._write_envelope(mixed, "部分")["error"]["code"] == "PARTIAL_FAILURE"
-    assert index._write_envelope({"committed": True, "partial": False, "index_status": "current"}, "部分")["success"]
+    assert shared.write_envelope(mixed, "部分")["error"]["code"] == "PARTIAL_FAILURE"
+    assert shared.write_envelope({"committed": True, "partial": False, "index_status": "current"}, "部分")["success"]

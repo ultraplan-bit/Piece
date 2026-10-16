@@ -196,15 +196,14 @@ def run_sync_job(confirmed=False):
 
 
 def mcp_config(service="retrieval", include_secrets=False):
-    from ..settings import get_settings, get_index_mcp_port, is_mcp_auth_enabled
+    from ..settings import MCP_SERVICES, get_mcp_service_port, get_settings, is_mcp_auth_enabled
+    from ..mcp.config import SERVICE_NAMES
     settings = get_settings()
-    if service not in {"retrieval", "index", "zotero"}:
+    if service not in MCP_SERVICES:
         raise BusinessError("INVALID_INPUT", "未知 MCP 服务")
-    ports = {"retrieval": settings.mcp.port, "index": get_index_mcp_port(), "zotero": settings.mcp.zotero_port}
-    name = {"retrieval": "piece-kb", "index": "piece-index", "zotero": "piece-zotero"}[service]
-    entry = {"url": f"http://127.0.0.1:{ports[service]}/mcp"}
+    entry = {"url": f"http://127.0.0.1:{get_mcp_service_port(service)}/mcp"}
     key = settings.mcp.get_api_key(service)
     authenticated = is_mcp_auth_enabled(service)
     if authenticated:
         entry["headers"] = {"Authorization": f"Bearer {key}" if include_secrets else "Bearer <REDACTED>"}
-    return {"mcpServers": {name: entry}, "contains_secrets": bool(include_secrets and authenticated)}
+    return {"mcpServers": {SERVICE_NAMES[service]: entry}, "contains_secrets": bool(include_secrets and authenticated)}

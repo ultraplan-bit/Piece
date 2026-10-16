@@ -112,7 +112,10 @@ def create_readme():
 
 MCP 服务配置:
 - 检索服务: http://localhost:8686/mcp（只读查询）
-- 索引服务: http://localhost:8687/mcp（读写管理）
+- 索引服务: http://localhost:8687/mcp（文件、卡片与集合管理）
+- 图谱服务: http://localhost:8690/mcp（图谱实体与语义关系）
+- Wiki 服务: http://localhost:8691/mcp（Markdown 知识页与引用）
+- 端口由检索端口派生：索引 +1、图谱 +4、Wiki +5；修改检索端口后其余随之变化
 
 数据存储:
 - 数据库和上传文件默认存储在 ./data 目录

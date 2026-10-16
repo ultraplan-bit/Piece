@@ -19,6 +19,8 @@ from indexing.mcp import auth
 from indexing.mcp.config import get_mcp_port
 from app.ui.views import mcp_config_view
 
+_SERVICE_NAMES = ("piece-kb", "piece-index", "piece-graph", "piece-wiki", "piece-zotero")
+
 
 @pytest.fixture(autouse=True)
 def isolated_settings(monkeypatch, tmp_path):
@@ -104,13 +106,13 @@ def test_auth_switch_disables_both_services(service):
 
 
 def _json_servers(config):
-    """从任意 JSON 层级找到两项服务，不依赖模板的包装格式。"""
+    """从任意 JSON 层级找到服务节点，不依赖模板的包装格式。"""
     servers = {}
     if isinstance(config, dict):
-        for name in ("piece-kb", "piece-index"):
+        for name in _SERVICE_NAMES:
             if name in config and isinstance(config[name], dict):
                 servers[name] = config[name]
-        if config.get("name") in ("piece-kb", "piece-index"):
+        if config.get("name") in _SERVICE_NAMES:
             servers[config["name"]] = config
         for value in config.values():
             servers.update(_json_servers(value))

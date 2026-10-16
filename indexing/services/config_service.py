@@ -9,7 +9,8 @@ from pathlib import Path
 from pydantic import ValidationError
 from app.platform import database_lock
 from .. import settings as settings_module
-from ..settings import AppSettings, get_settings, load_settings, save_settings, _get_config_file_path
+from ..settings import (AppSettings, MCP_SERVICES, get_settings, load_settings,
+                        save_settings, _get_config_file_path)
 from .errors import BusinessError
 from .task_service import serialized_mutation
 
@@ -159,7 +160,8 @@ def update_config(patch, offline=False):
         restart = [key for key in _RESTART_GROUPS if getattr(current, key) != getattr(updated, key)]
         if "mcp" in restart and (current.mcp.port == updated.mcp.port
                 and current.mcp.auth_enabled == updated.mcp.auth_enabled
-                and all(current.mcp.get_api_key(service) == updated.mcp.get_api_key(service) for service in ("retrieval", "index", "zotero"))
+                and all(current.mcp.get_api_key(service) == updated.mcp.get_api_key(service)
+                        for service in MCP_SERVICES)
                 and all(getattr(current.mcp, key) == getattr(updated.mcp, key)
                         for key in ("zotero_enabled", "zotero_port", "zotero_auth_enabled"))):
             restart.remove("mcp")

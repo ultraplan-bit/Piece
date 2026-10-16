@@ -30,7 +30,7 @@ Piece keeps it simple: **your documents stay on your machine, get indexed, and t
 - **Import becomes cards**: PDF, Word, PowerPoint, Excel (`.xlsx`), Markdown, TXT, HTML, and EPUB, parsed into individual knowledge cards.
 - **Editable and verifiable**: fix titles and text on the spot, with the original PDF page alongside so parsing errors are easy to spot.
 - **Hybrid retrieval**: BM25 plus vector search, fused and ranked with RRF.
-- **Connects to your AI**: two MCP services — read-only `piece-kb` for searching, plus `piece-index` when you want the AI to write notes and edit cards. Skills can also be exported for terminal-based AI.
+- **Connects to your AI**: MCP is split by capability — read-only `piece-kb` for searching, plus `piece-index` when you want the AI to write notes and edit cards, `piece-graph` to maintain the knowledge graph, and `piece-wiki` to compile knowledge pages. Skills can also be exported for terminal-based AI.
 - **Organize as you go**: hierarchical collections, Wiki pages, a knowledge graph, and one-shot imports from Obsidian and Zotero.
 - **Local-first**: SQLite + FTS5 + sqlite-vec for storage, a NiceGUI interface, and a service that runs on your own machine.
 
@@ -94,6 +94,8 @@ On the **Library** page, click **+ → Upload File**, choose your files, and wai
 
 - Search only: choose the read-only `piece-kb` service;
 - Also let the AI write notes and edit cards: add the `piece-index` service;
+- Maintain the knowledge graph: enable the `piece-graph` service;
+- Compile Markdown knowledge pages: enable the `piece-wiki` service;
 - Look up Zotero references: choose `piece-zotero` separately.
 
 **Option 2 · Skills**: if your AI can run local commands, export workflows from the **Skill Export** page — `piece-search` to look things up, `piece-index` to import and organize, `piece-wiki` to compile pages, `piece-graph` to maintain the graph, and `piece-zotero` for references.
@@ -160,11 +162,11 @@ piece stop                        # Request a stop; the service finishes in-flig
 
 ### MCP writes, Wiki, and graph
 
-For MCP writes, prefer the intent tools on the index service: `knowledge_object_add` / `knowledge_object_update` / `knowledge_relation_add` / `knowledge_relation_update` and `wiki_page_add` / `wiki_page_update`. Arguments are flat, evidence is inlined as `CHUNK_ID:line` or `CHUNK_ID:grep=substring`, and `request_key` is generated and returned automatically. They share assembly logic with the CLI's `graph object add` and `wiki page add`; use the batch tools `knowledge_apply` / `wiki_apply` when submitting many records at once or when you need field-level control.
+For MCP writes, prefer the intent tools on the graph and Wiki services: `knowledge-object-add` / `knowledge-object-update` / `knowledge-relation-add` / `knowledge-relation-update` (on `piece-graph`) and `wiki-page-add` / `wiki-page-update` (on `piece-wiki`). Arguments are flat, evidence is inlined as `CHUNK_ID:line` or `CHUNK_ID:grep=substring`, and `request_key` is generated and returned automatically. They share assembly logic with the CLI's `graph object add` and `wiki page add`; use the batch tools `knowledge-apply` / `wiki-apply` when submitting many records at once or when you need field-level control.
 
 Wiki text and metadata are stored as Markdown files under `wiki/` in the configured `data_path`, while SQLite keeps only a rebuildable page index and a separate audit trail. In-page links use `[Title](piece://wiki/PAGE_UUID)`, so changing a title or filename does not change identity. After editing externally, run `piece wiki rebuild-index` explicitly to refresh the index; it neither rewrites the Markdown nor calls a model.
 
-Knowledge-page evidence must quote the source verbatim. An agent can use `piece chunk extract` to cut an exact substring from card text by line number or match (available in the CLI and both MCP services); adding `--out` writes it straight to a submittable evidence file. When a match is not unique, narrow it with `--lines` first rather than guessing the first hit.
+Knowledge-page evidence must quote the source verbatim. An agent can use `piece chunk extract` to cut an exact substring from card text by line number or match (available in the CLI and as `extract-quote` on `piece-kb`); adding `--out` writes it straight to a submittable evidence file. When a match is not unique, narrow it with `--lines` first rather than guessing the first hit.
 
 A single command writes a knowledge page, reading back by default and writing no temporary file:
 
@@ -190,7 +192,7 @@ piece zotero preview --attachment-key ATTACHMENT_KEY --collection-mode none --se
 piece zotero import --attachment-key ATTACHMENT_KEY --collection-mode none --server-id SERVER_ID --wait --json
 ```
 
-A separate MCP service, `piece-zotero`, provides lookup, `zotero_import`, authorization, and change preview/execution; `piece-kb` and `piece-index` register no Zotero tools. This requires Zotero 7+ running with "Settings → Advanced → Allow other applications on this computer to communicate with Zotero" enabled. The front-end entry is **Tools → Zotero Library**, and importing is a one-time copy that leaves the original library untouched. Modifying Zotero requires the `zotero_write_enabled` config (default `false`), authorization in a Zotero popup, and then previewing the diff and executing by `plan_id`. See the [Zotero guide](skills/piece-zotero/SKILL.md) for details.
+A separate MCP service, `piece-zotero`, provides lookup, `zotero_import`, authorization, and change preview/execution; the other services register no Zotero tools. This requires Zotero 7+ running with "Settings → Advanced → Allow other applications on this computer to communicate with Zotero" enabled. The front-end entry is **Tools → Zotero Library**, and importing is a one-time copy that leaves the original library untouched. Modifying Zotero requires the `zotero_write_enabled` config (default `false`), authorization in a Zotero popup, and then previewing the diff and executing by `plan_id`. See the [Zotero guide](skills/piece-zotero/SKILL.md) for details.
 
 ### Tips
 

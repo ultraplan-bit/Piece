@@ -18,6 +18,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 IGNORED_ENV = {"PIECE_DATA_DIR", "PIECE_API_KEY", "PIECE_INDEX_MCP_PORT",
+               "PIECE_GRAPH_MCP_PORT", "PIECE_WIKI_MCP_PORT",
                "NICEGUI_STORAGE_PATH", "PYTHONPATH", "VIRTUAL_ENV"}
 
 pytestmark = pytest.mark.skipif(shutil.which("uv") is None, reason="需要 uv 命令构建与安装")

@@ -234,7 +234,7 @@ def test_mcp_right_shows_endpoints_and_distinguishes_states(page, knowledge_base
     labels = _labels(page)
     # 服务状态（端点 + 认证）与「不检测客户端连接」的说明都要出现
     endpoints = [text for text in labels if "http://localhost:" in text]
-    assert len(endpoints) == 3
+    assert len(endpoints) == 5
     assert all(mcp.t("mcp_config.auth_on") in text for text in endpoints)
     assert mcp.t("mcp_config.notice") in labels
     assert mcp.t("mcp_config.settings_restart_hint") in labels

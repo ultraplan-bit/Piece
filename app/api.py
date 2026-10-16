@@ -93,11 +93,12 @@ class LocalSecurity:
                 return
             token = auth.removeprefix("Bearer ") if auth.startswith("Bearer ") else ""
             read_key = settings.mcp.get_api_key("retrieval")
-            write_key = settings.mcp.get_api_key("index")
+            # 任何可写 MCP 服务的密钥都授予 API 写角色；它们与检索密钥分离，读凭据不得触发写入。
+            write_keys = {settings.mcp.get_api_key(service) for service in ("index", "graph", "wiki")} - {read_key}
             role = None
             if _equal(token, settings.api.admin_key):
                 role = "admin"
-            elif write_key != read_key and _equal(token, write_key):
+            elif any(key and _equal(token, key) for key in write_keys):
                 role = "write"
             elif _equal(token, read_key):
                 role = "read"
@@ -518,7 +519,7 @@ def create_api(runtime):
         "ZoteroChangesApply", plan_id=(str, ...), confirmed=(bool, False)),
         zotero_write_service.apply_changes)
     register("logs", "admin", _model("Logs", level=(str | None, None), limit=(Limit, 100)), get_log_buffer)
-    register("mcp-config", "admin", _model("McpConfig", service=(Literal["retrieval", "index", "zotero"], "retrieval"), include_secrets=(bool, False)), maintenance.mcp_config)
+    register("mcp-config", "admin", _model("McpConfig", service=(Literal["retrieval", "index", "graph", "wiki", "zotero"], "retrieval"), include_secrets=(bool, False)), maintenance.mcp_config)
 
     @app.post("/api/v1/shutdown")
     async def shutdown(request: Request):

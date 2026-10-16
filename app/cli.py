@@ -577,7 +577,7 @@ def _build_parser() -> CliParser:
 
     mcp_config = commands.add_parser("mcp-config", help="取得 MCP 客户端配置")
     _add_runtime_options(mcp_config)
-    mcp_config.add_argument("--service", choices=("retrieval", "index", "zotero"), required=True)
+    mcp_config.add_argument("--service", choices=("retrieval", "index", "graph", "wiki", "zotero"), required=True)
     mcp_config.add_argument("--include-secrets", action="store_true",
                             help="明确要求返回密钥（默认脱敏）")
 

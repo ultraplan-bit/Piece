@@ -10,8 +10,8 @@ from nicegui import ui
 from app.i18n import t, SUPPORTED_LANGUAGES
 from app.ui.components import confirm_dialog, help_hint, write_clipboard
 from app.utils import open_external
-from indexing.mcp.config import get_mcp_port
-from indexing.settings import MINERU_LANGUAGES, get_settings
+from indexing.mcp.config import SERVICE_NAMES, get_service_ports
+from indexing.settings import MINERU_LANGUAGES, MCP_SERVICES, get_settings
 
 
 PADDLE_TOKEN_URL = "https://aistudio.baidu.com/account/accessToken"
@@ -197,7 +197,8 @@ def render_settings_right(selected_setting: dict, settings_form: dict, settings_
             if not settings_handlers.can_save or not validate():
                 return
             changed = settings_handlers.changed_fields(group)
-            if group == "mcp" and changed & {"mcp_port", "mcp_api_key", "mcp_index_api_key", "mcp_auth_enabled"}:
+            if group == "mcp" and changed & ({"mcp_port", "mcp_api_key", "mcp_auth_enabled"}
+                                             | {f"mcp_{service}_api_key" for service in MCP_SERVICES}):
                 confirm_dialog(t("settings_mcp.apply_title"), t("settings_mcp.apply_message"),
                                lambda: settings_handlers.save_settings_form(group, notify=False),
                                confirm_text=t("settings.save_group"))
@@ -305,13 +306,21 @@ def _render_mcp_settings(form, handlers):
     _section(t("settings_mcp.services_title"), t("settings_mcp.key_hint"))
     port = _number_field(form, "mcp_port", t("settings_mcp.retrieval_port"), 1024, 65535,
                          hint=t("settings_mcp.retrieval_port_hint"))
-    port.validation = lambda value: _integer_error(value, 1024, 65535) or _integer_error(
-        get_mcp_port(int(value or 0)), 1024, 65535)
-    with _setting_row(t("settings_mcp.index_port"), t("settings_mcp.index_port_hint")):
-        ui.label().classes("text-sm font-mono theme-text").bind_text_from(
-            port, "value", backward=lambda value: str(get_mcp_port(int(value))) if value is not None else "—")
-    _render_mcp_api_key(form, handlers, "retrieval")
-    _render_mcp_api_key(form, handlers, "index")
+    port.validation = lambda value: _integer_error(value, 1024, 65535) or next(
+        (error for error in (_integer_error(derived, 1024, 65535)
+                             for derived in get_service_ports(int(value or 0)).values()) if error), None)
+    # 派生端口只展示，不能单独编辑；基端口一改就整体跟随。
+    for service in MCP_SERVICES:
+        name = SERVICE_NAMES[service]
+        if name == "piece-kb" or service == "zotero":
+            continue
+        with _setting_row(t(f"settings_mcp.{service}_port"), t("settings_mcp.derived_port_hint")):
+            ui.label().classes("text-sm font-mono theme-text").bind_text_from(
+                port, "value",
+                backward=lambda value, n=name: str(get_service_ports(int(value))[n]) if value is not None else "—")
+    for service in MCP_SERVICES:
+        if service != "zotero":
+            _render_mcp_api_key(form, handlers, service)
     _switch_field(form, "mcp_auth_enabled", t("settings_mcp.auth_enabled"), hint=t("settings_mcp.auth_enabled_hint"))
     _section(t("settings_mcp.include_images"))
     _switch_field(form, "mcp_include_images_default", t("settings_mcp.include_images"), hint=t("settings_mcp.include_images_hint"))
@@ -335,7 +344,7 @@ async def _copy_text(text, success):
 
 
 def _render_mcp_api_key(form, handlers, service):
-    key = {"retrieval": "mcp_api_key", "index": "mcp_index_api_key", "zotero": "mcp_zotero_api_key"}[service]
+    key = f"mcp_{service}_api_key" if service != "retrieval" else "mcp_api_key"
     field = _text_field(form, key, t(f"settings_mcp.{service}_api_key"), password=True, readonly=True)
     with ui.row().classes("settings-field-actions"):
         ui.button(t("settings_mcp.copy_key"), icon="content_copy", color=None,

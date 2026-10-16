@@ -57,12 +57,17 @@ def check_optional_dependencies(*, with_gui: bool, with_mcp: bool) -> None:
 
 async def start_mcp_servers(runtime: Runtime, manager: Any) -> None:
     """启动独立端口的 MCP 服务，逐个记录就绪或失败；Zotero 始终限于本机。"""
-    from indexing.mcp.config import get_mcp_port
+    from indexing.mcp.config import get_service_ports
     from indexing.mcp.server import mcp as index_mcp
+    from indexing.mcp.graph_server import mcp as graph_mcp
+    from indexing.mcp.wiki_server import mcp as wiki_mcp
     from retrieval.server import mcp as retrieval_mcp
 
-    services = [("retrieval", retrieval_mcp, runtime.settings.mcp.port, MCP_HOST),
-                ("index", index_mcp, get_mcp_port(), MCP_HOST)]
+    ports = get_service_ports()
+    services = [("retrieval", retrieval_mcp, ports["piece-kb"], MCP_HOST),
+                ("index", index_mcp, ports["piece-index"], MCP_HOST),
+                ("graph", graph_mcp, ports["piece-graph"], MCP_HOST),
+                ("wiki", wiki_mcp, ports["piece-wiki"], MCP_HOST)]
     if runtime.settings.mcp.zotero_enabled:
         from indexing.mcp.zotero_server import mcp as zotero_mcp
         services.append(("zotero", zotero_mcp, runtime.settings.mcp.zotero_port, "127.0.0.1"))

@@ -60,9 +60,10 @@ def _form_values(settings):
     for group in ("mcp", "webdav", "office", "ocr"):
         values.update({f"{group}_{key}": value for key, value in getattr(settings, group).model_dump().items()
                        if key not in {"payload", "last_sync_time"}})
-    # 旧配置的索引密钥沿用检索密钥，界面展示实际凭据而非 None。
-    values["mcp_api_key"] = settings.mcp.get_api_key("retrieval")
-    values["mcp_index_api_key"] = settings.mcp.get_api_key("index")
+    # 旧配置的派生服务密钥沿用检索密钥，界面展示实际凭据而非 None。
+    for service in ("retrieval", "index", "graph", "wiki"):
+        field = "mcp_api_key" if service == "retrieval" else f"mcp_{service}_api_key"
+        values[field] = settings.mcp.get_api_key(service)
     for key, value in settings.ocr.payload.model_dump().items():
         if key.startswith("use_"):
             values[f"ocr_{key}"] = _payload_form_value(value)
@@ -383,7 +384,7 @@ class SettingsHandlers:
 
     def regenerate_mcp_api_key(self, api_key_input, service: str = "retrieval"):
         """只生成草稿；保存并重启后才替换运行中的凭据。"""
-        field = {"retrieval": "mcp_api_key", "index": "mcp_index_api_key", "zotero": "mcp_zotero_api_key"}[service]
+        field = "mcp_api_key" if service == "retrieval" else f"mcp_{service}_api_key"
         self.settings_form[field] = generate_api_key()
         api_key_input.set_value(self.settings_form[field])
         ui.notify(t("settings_mcp.key_regenerated"), type="info")

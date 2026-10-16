@@ -353,6 +353,9 @@ def test_auth_switch_disables_both_services(mcp_settings, service):
     assert not middleware and not settings.is_mcp_auth_enabled(service)
 
 
+_SERVICE_NAMES = ("piece-kb", "piece-index", "piece-graph", "piece-wiki", "piece-zotero")
+
+
 def _parse_config(client, text):
     if client.get("format") == "bash":
         servers = {}
@@ -373,10 +376,10 @@ def _parse_config(client, text):
     def walk(config):
         servers = {}
         if isinstance(config, dict):
-            for name in ("piece-kb", "piece-index"):
+            for name in _SERVICE_NAMES:
                 if isinstance(config.get(name), dict):
                     servers[name] = config[name]
-            if config.get("name") in ("piece-kb", "piece-index"):
+            if config.get("name") in _SERVICE_NAMES:
                 servers[config["name"]] = config
             for value in config.values():
                 servers.update(walk(value))
@@ -393,7 +396,6 @@ def _clients():
     except ImportError:
         return []
     return mcp_config_view.MCP_CLIENTS
-
 
 @pytest.mark.parametrize("client", _clients(), ids=lambda c: c["id"])
 @pytest.mark.parametrize("auth_enabled", [True, False])
@@ -412,6 +414,26 @@ def test_all_client_templates_use_service_specific_credentials(mcp_settings, mon
     if not auth_enabled:
         assert "read-key" not in text and "write-key" not in text
     assert client == original
+
+
+def test_all_services_can_be_selected_together(mcp_settings, monkeypatch):
+    """派生服务（图谱/Wiki）复用索引模板，端口与密钥独立。"""
+    from app.ui.views import mcp_config_view
+    monkeypatch.delenv("PIECE_INDEX_MCP_PORT", raising=False)
+    mcp_settings.mcp = settings.McpSettings(
+        port=9230, api_key="read-key", index_api_key="write-key",
+        graph_api_key="graph-key", wiki_api_key="wiki-key", auth_enabled=True,
+    )
+    for client_id in ("cursor", "claude_code", "openai_codex"):
+        client = next(c for c in mcp_config_view.MCP_CLIENTS if c["id"] == client_id)
+        servers = _parse_config(client, mcp_config_view._get_config_json(client, {
+            "piece-kb", "piece-index", "piece-graph", "piece-wiki"}))
+        assert set(servers) == {"piece-kb", "piece-index", "piece-graph", "piece-wiki"}
+        for name, port, key in (("piece-kb", 9230, "read-key"), ("piece-index", 9231, "write-key"),
+                                ("piece-graph", 9234, "graph-key"), ("piece-wiki", 9235, "wiki-key")):
+            server = servers[name]
+            assert (server.get("url") or server.get("serverUrl") or server.get("httpUrl")) == f"http://localhost:{port}/mcp"
+            assert server.get("headers", {}).get("Authorization") == f"Bearer {key}"
 
 
 def test_custom_keys_are_escaped_and_not_treated_as_templates(mcp_settings):

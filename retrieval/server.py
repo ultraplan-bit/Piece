@@ -22,9 +22,6 @@ from indexing.mcp.auth import apply_bearer_auth
 from indexing.services.errors import BusinessError
 from indexing.settings import get_mcp_config
 from indexing import knowledge_models as km
-from indexing.services import knowledge_service as knowledge
-from indexing import wiki_models as wm
-from indexing.services import wiki_service as wiki
 
 
 # 创建FastMCP服务实例
@@ -32,11 +29,9 @@ from indexing.services import wiki_service as wiki
 # 设置为 False 启用灵活验证模式，自动转换字符串参数（如 "5" -> 5）
 mcp = FastMCP(
     name="piece-kb",
-    instructions="""Piece searches user's personal documents. Call resolve-keywords to find relevant documents, then get-docs to retrieve content. Use get-source-page with a file_id and 1-based page_number to inspect a full source page when OCR, tables, formulas, or layout need verification.
-Two knowledge features are separate from document search and from each other; both never call models or modify data.
-Knowledge graph: knowledge-list/search, knowledge-get for an entity/relation/evidence (entities have no body), knowledge-graph for bounded neighbors, knowledge-references for source backlinks, knowledge-lint for read-only structural checks, knowledge-history/request for revisions and committed outcomes.
-Wiki pages: wiki-list/search, wiki-get for a page body plus paginated evidence, page links and backlinks, wiki-references for source backlinks, wiki-lint for read-only checks, wiki-history/request for revisions and committed outcomes. Wiki pages are Markdown and independent of graph entities; page links are navigation, not semantic claims.
-All these tools take a params JSON object, use UUID IDs (not integer file/chunk IDs). library_id is the persistent source-library UUID, not the service connection identity. Evidence location_status is current/changed/missing/unresolved/unverified; even current does not verify a claim. Read sources before drawing conclusions; duplicate names do not imply identical pages/entities. To turn a source passage into exact evidence, call extract-quote with a chunk_id and lines or grep instead of copying long LaTeX/HTML text by hand. Knowledge and Wiki mutations are provided by the index service.""",
+    instructions="""Piece searches user's personal documents. Call resolve-keywords to find relevant documents, then get-docs to retrieve content. Use list-collections before resolve-keywords to discover collection names for scoping. Use get-source-page with a file_id and 1-based page_number to inspect a full source page when OCR, tables, formulas, or layout need verification. Use extract-quote with a chunk_id and lines or grep to cut an exact quote out of a chunk instead of copying long LaTeX/HTML text by hand.
+These tools work on integer file/chunk IDs from this library; read sources before drawing conclusions and cite the file, title and page when answering.
+Knowledge graph and Wiki are separate features with their own services: piece-graph for entities, semantic relations and their evidence; piece-wiki for Markdown knowledge pages. File/card management is piece-index.""",
     strict_input_validation=False,
 )
 
@@ -349,170 +344,3 @@ async def extract_quote(params: km.ChunkExtractInput) -> dict:
     except BusinessError as exc:
         raise ToolError(json.dumps({"code": exc.code, "message": str(exc), "data": exc.data}, ensure_ascii=False)) from exc
 
-
-async def _knowledge_read(function, params):
-    try:
-        return await run_sync(function, **params.model_dump())
-    except BusinessError as exc:
-        raise ToolError(json.dumps({"code": exc.code, "message": str(exc), "data": exc.data}, ensure_ascii=False)) from exc
-
-
-@mcp.tool(name="knowledge-list", annotations=_KNOWLEDGE_READ)
-async def knowledge_list(params: km.ListInput) -> dict:
-    """List knowledge objects, not document chunks. params: optional kind/status, limit 1..100 (default 50), offset >=0.
-
-    Returns library_id and objects [{id,kind,title,summary,status,revision,created_at,updated_at}], total/limit/offset.
-    Same-name objects are distinct; read title/summary and evidence to disambiguate. Graph entities carry no body.
-    """
-    return await _knowledge_read(knowledge.list_objects, params)
-
-
-@mcp.tool(name="knowledge-search", annotations=_KNOWLEDGE_READ)
-async def knowledge_search(params: km.SearchInput) -> dict:
-    """Search entity names/aliases and Chinese-tokenized title/summary without embedding calls.
-
-    params: required query (plain text, not SQL/FTS syntax), optional kind/status, limit/offset as knowledge-list.
-    Returns library_id, objects, total/limit/offset. Graph entities have no body; use knowledge-get for details and sources; do not merge by name.
-    """
-    return await _knowledge_read(knowledge.search_objects, params)
-
-
-@mcp.tool(name="knowledge-get", annotations=_KNOWLEDGE_READ)
-async def knowledge_get(params: km.GetInput) -> dict:
-    """Read a knowledge record by UUID: params.id is required; params.kind=object/relation/evidence is optional and is
-    detected from the UUID when omitted (the response always reports the actual kind). limit/offset paginate evidence.
-
-    Returns library_id, kind, record (entity summary/aliases or relation endpoints/predicate/basis/qualifier/revision).
-    Entities/relations also include has_evidence and evidence {items,total,limit,offset}; evidence location_status is
-    current/changed/missing/unresolved/unverified, never fact verification. No evidence means unsupported, not false.
-    Use record.id and record.revision as id/expected_revision for the index service's *_update tools.
-    Piece evidence carries file/chunk IDs and server-derived page_number; use get-source-page for available original pages.
-    """
-    return await _knowledge_read(knowledge.get_record, params)
-
-
-@mcp.tool(name="knowledge-graph", annotations=_KNOWLEDGE_READ)
-async def knowledge_graph(params: km.GraphInput) -> dict:
-    """Get bounded neighbors of params.root_id (entity UUID). depth=1 or 2; edge_types is only [relation].
-
-    Optional predicates/statuses filter semantic relations; [] means none. max_nodes<=100, max_edges<=300.
-    Returns nodes, edges with complete endpoints, truncated and budgets. No bodies/quotes; not full-graph statistics.
-    related_to/contradicts are symmetric; other predicates are directed. Page links live in the separate Wiki feature.
-    """
-    return await _knowledge_read(knowledge.graph, params)
-
-
-@mcp.tool(name="knowledge-references", annotations=_KNOWLEDGE_READ)
-async def knowledge_references(params: km.ReferencesInput) -> dict:
-    """Find source backlinks: params.source_library_id=library UUID, source_file_id=integer, optional limit/offset.
-
-    Returns evidence with owner_kind and owner object/relation summaries, location_status, total/limit/offset.
-    Always use both library and file ID; other libraries with the same file ID are not interchangeable.
-    """
-    return await _knowledge_read(knowledge.references, params)
-
-
-@mcp.tool(name="knowledge-lint", annotations=_KNOWLEDGE_READ)
-async def knowledge_lint(params: km.LintInput) -> dict:
-    """Read-only structural checks; params.object_ids optionally limits UUID scope ([] checks none), limit/offset paginate objects.
-
-    Returns issues, checked_objects, total_objects, truncated, read_only=true, semantic_review=false.
-    Checks missing evidence, isolated objects, changed/missing sources and ambiguous names/aliases.
-    No network, automatic fixes, merging or semantic truth judgement. Read candidate entities and evidence before proposing edits.
-    """
-    return await _knowledge_read(knowledge.lint, params)
-
-
-@mcp.tool(name="knowledge-history", annotations=_KNOWLEDGE_READ)
-async def knowledge_history(params: km.HistoryInput) -> dict:
-    """Read revisions: params.kind=object/relation, id=UUID, optional limit/offset.
-
-    Returns history [{before,after,before_revision,after_revision,reason,batch_id,actor,...}], total/limit/offset.
-    Read-only; corrections require a new revision using the current expected_revision, not rollback.
-    Deleting an object/relation clears its online history; backups are outside online deletion.
-    """
-    return await _knowledge_read(knowledge.history, params)
-
-
-@mcp.tool(name="knowledge-request", annotations=_KNOWLEDGE_READ)
-async def knowledge_request(params: km.RequestInput) -> dict:
-    """Recover a committed apply/delete result using params.request_key after a timeout or lost response.
-
-    Returns original IDs/revisions/counts, not input bodies. NOT_FOUND does not prove failure: retry only the identical
-    payload and key on the same library. Returned IDs may since have been deleted; verify with knowledge-get.
-    """
-    return await _knowledge_read(knowledge.request_result, params)
-
-
-@mcp.tool(name="wiki-list", annotations=_KNOWLEDGE_READ)
-async def wiki_list(params: wm.ListInput) -> dict:
-    """List Wiki pages, not graph entities or document chunks. params: optional kind/status, limit 1..100 (default 50), offset >=0.
-
-    Returns library_id and pages [{id,kind,title,summary,status,revision,content_hash,index_status}], total/limit/offset.
-    Same-name pages are distinct; read the body and evidence to disambiguate. No full bodies here.
-    """
-    return await _knowledge_read(wiki.list_pages, params)
-
-
-@mcp.tool(name="wiki-search", annotations=_KNOWLEDGE_READ)
-async def wiki_search(params: wm.SearchInput) -> dict:
-    """Search Wiki page titles/aliases and body/index without embedding calls.
-
-    params: required query (plain text), optional kind/status, limit/offset as wiki-list.
-    Returns library_id, pages, total/limit/offset. Use wiki-get for bodies, evidence and page links; do not merge by name.
-    """
-    return await _knowledge_read(wiki.search_pages, params)
-
-
-@mcp.tool(name="wiki-get", annotations=_KNOWLEDGE_READ)
-async def wiki_get(params: wm.GetInput) -> dict:
-    """Read a Wiki record by UUID: params.id is required; params.kind=page/evidence is optional and is detected from the
-    UUID when omitted (the response always reports the actual kind). limit/offset paginate evidence.
-
-    Returns library_id, kind, record (page includes title/summary/body/aliases/status/revision/content_hash/path/index_status).
-    Pages also include evidence {items,total,limit,offset}, page links and backlinks; evidence location_status is
-    current/changed/missing/unresolved/unverified, never fact verification. A page has no graph identity.
-    Use record.id, record.revision and record.content_hash as id/expected_revision/expected_content_hash for wiki_page_update.
-    """
-    return await _knowledge_read(wiki.get_record, params)
-
-
-@mcp.tool(name="wiki-references", annotations=_KNOWLEDGE_READ)
-async def wiki_references(params: wm.ReferencesInput) -> dict:
-    """Find source backlinks to Wiki pages: params.source_library_id=library UUID, source_file_id=integer, optional limit/offset.
-
-    Returns evidence with owner page id/title and location_status, total/limit/offset. Use both library and file ID.
-    """
-    return await _knowledge_read(wiki.references, params)
-
-
-@mcp.tool(name="wiki-lint", annotations=_KNOWLEDGE_READ)
-async def wiki_lint(params: wm.LintInput) -> dict:
-    """Read-only structural checks on Wiki pages; params.page_ids optionally limits UUID scope ([] checks none).
-
-    Returns issues, checked_pages, total_pages, truncated, read_only=true, semantic_review=false.
-    Checks missing evidence, broken/through page links, changed/missing sources and ambiguous names.
-    No network, automatic fixes or semantic truth judgement; read candidate pages before proposing edits.
-    """
-    return await _knowledge_read(wiki.lint, params)
-
-
-@mcp.tool(name="wiki-history", annotations=_KNOWLEDGE_READ)
-async def wiki_history(params: wm.HistoryInput) -> dict:
-    """Read Wiki page revisions: params.kind=page, id=UUID, optional limit/offset.
-
-    Returns history [{before,after,before_revision,after_revision,reason,batch_id,actor,...}], total/limit/offset.
-    Read-only; corrections require a new revision using current expected_revision/expected_content_hash, not rollback.
-    Wiki page deletion retains online history, so history stays readable after a page is deleted.
-    """
-    return await _knowledge_read(wiki.history, params)
-
-
-@mcp.tool(name="wiki-request", annotations=_KNOWLEDGE_READ)
-async def wiki_request(params: wm.RequestInput) -> dict:
-    """Recover a committed Wiki apply/delete result using params.request_key after a timeout or lost response.
-
-    Returns original IDs/revisions/counts and partial/index_status, not input bodies. NOT_FOUND does not prove failure:
-    retry only the identical payload and key on the same library, then verify with wiki-get.
-    """
-    return await _knowledge_read(wiki.request_result, params)

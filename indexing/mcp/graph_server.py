@@ -66,6 +66,18 @@ async def knowledge_search(params: km.SearchInput) -> dict:
     return await shared.read(knowledge.search_objects, params)
 
 
+@mcp.tool(name="knowledge-relation-search", annotations=shared.READ)
+async def knowledge_relation_search(params: km.RelationSearchInput) -> dict:
+    """Search relations by their own description and qualifier text, without embedding calls.
+
+    params: required query (plain text, not SQL/FTS syntax), optional status, limit/offset as knowledge-list.
+    Returns library_id, relations [{id,source_id,source_title,predicate,target_id,target_title,description,
+    qualifier,basis,status,revision,display}], total/limit/offset. Endpoint titles are read live, not copied
+    into the index. Use it to find relations by meaning; entity names are matched by knowledge-search.
+    """
+    return await shared.read(knowledge.search_relations, params)
+
+
 @mcp.tool(name="knowledge-get", annotations=shared.READ)
 async def knowledge_get(params: km.GetInput) -> dict:
     """Read a knowledge record by UUID: params.id is required; params.kind=object/relation/evidence is optional and is

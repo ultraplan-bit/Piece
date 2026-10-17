@@ -429,6 +429,61 @@ def test_delete_removes_fts_ghost(knowledge_base):
     assert _scalar("SELECT COUNT(*) FROM knowledge_fts WHERE object_id=?", (oid,)) == 0
 
 
+def test_alias_is_searchable_through_fts(knowledge_base):
+    # 查询带空格使别名子串匹配（contains 档）不成立，只能靠 FTS 命中别名。
+    [oid] = _create_objects({"ref": "a", "title": "机器学习", "summary": "监督学习",
+                             "aliases": ["神经网络模型"]})
+    assert knowledge.search_objects(query="神经 网络")["total"] == 1
+    knowledge.apply(_batch(objects=[{"id": oid, "expected_revision": 1, "aliases": []}]))
+    assert knowledge.search_objects(query="神经 网络")["total"] == 0
+
+
+def test_search_objects_ranks_title_hit_above_summary_hit(knowledge_base):
+    # 两者都只经 FTS 命中（标题不含带空格的整串），名次由 bm25 列权重决定：标题高于摘要。
+    [title_hit] = _create_objects({"ref": "t", "title": "卷积网络原理", "summary": "无关说明"})
+    [summary_hit] = _create_objects({"ref": "s", "title": "无关标题", "summary": "卷积网络"})
+    ids = [item["id"] for item in knowledge.search_objects(query="卷积 网络", limit=10)["objects"]]
+    assert ids.index(title_hit) < ids.index(summary_hit)
+
+
+def test_relation_search_matches_description_and_reads_endpoints_live(knowledge_base):
+    a, b, c = _create_objects({"ref": "a", "title": "检索增强生成"},
+                              {"ref": "b", "title": "知识图谱"},
+                              {"ref": "c", "title": "向量数据库"})
+    knowledge.apply(_batch(relations=[
+        {"ref": "r1", "source": {"id": a}, "predicate": "depends_on", "target": {"id": b},
+         "description": "依赖实体关系抽取", "basis": "synthesis", "qualifier": "离线建图场景"},
+        {"ref": "r2", "source": {"id": a}, "predicate": "depends_on", "target": {"id": c},
+         "description": "依赖近邻索引", "basis": "synthesis"},
+    ]))
+    found = knowledge.search_relations(query="抽取")
+    assert found["total"] == 1
+    item = found["relations"][0]
+    assert item["description"] == "依赖实体关系抽取"
+    assert item["source_title"] == "检索增强生成" and item["target_title"] == "知识图谱"
+    assert item["display"] == "检索增强生成 —depends_on→ 知识图谱"
+    # qualifier 也参与匹配
+    assert knowledge.search_relations(query="离线建图")["total"] == 1
+    # 端点标题实时读取，不复制进索引：实体改名后仍能命中且标题更新。
+    knowledge.apply(_batch(objects=[{"id": b, "expected_revision": 1, "title": "语义图谱"}]))
+    assert knowledge.search_relations(query="抽取")["relations"][0]["target_title"] == "语义图谱"
+    assert knowledge.search_relations(query="不存在的词组")["total"] == 0
+
+
+def test_relation_fts_ghost_removed_on_delete(knowledge_base):
+    a, b = _create_objects({"ref": "a", "title": "甲"}, {"ref": "b", "title": "乙"})
+    result = knowledge.apply(_batch(relations=[
+        {"ref": "r", "source": {"id": a}, "predicate": "related_to", "target": {"id": b},
+         "description": "幽灵关系描述", "basis": "synthesis"}]))
+    rid = result["refs"]["r"]["id"]
+    assert knowledge.search_relations(query="幽灵")["total"] == 1
+    preview = knowledge.delete({"kind": "relation", "id": rid, "expected_revision": 1, "dry_run": True})
+    knowledge.delete({"kind": "relation", "id": rid, "expected_revision": 1, "request_key": "rel-ghost-del",
+                      "impact_token": preview["impact_token"], "dry_run": False, "confirmed": True})
+    assert knowledge.search_relations(query="幽灵")["total"] == 0
+    assert _scalar("SELECT COUNT(*) FROM knowledge_relation_fts WHERE relation_id=?", (rid,)) == 0
+
+
 # --------------------------------------------------------------------------- #
 # 局部图：深度、循环、预算、端点完整与稳定排序
 # --------------------------------------------------------------------------- #

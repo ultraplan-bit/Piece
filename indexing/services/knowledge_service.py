@@ -73,9 +73,10 @@ def _insert(cursor, table, values):
 
 def _save_record(cursor, kind, record_id, values, updating=False):
     values = dict(values)
+    aliases = list(values.get("aliases") or [])
     if kind == "object":
         values["title_norm"] = models.normalize_name(values["title"])
-        values["aliases_norm_json"] = _json([models.normalize_name(v) for v in values["aliases"]])
+        values["aliases_norm_json"] = _json([models.normalize_name(v) for v in aliases])
         values["aliases_json"] = _json(values.pop("aliases"))
     if updating:
         cursor.execute(f"UPDATE {TABLES[kind]} SET " + ",".join(f"{field}=?" for field in values)
@@ -83,12 +84,29 @@ def _save_record(cursor, kind, record_id, values, updating=False):
                        [*values.values(), record_id])
     else:
         _insert(cursor, TABLES[kind], {"id": record_id, **values})
-    if kind == "object":
-        from retrieval.nodes.preprocess_node import tokenize_query
-        cursor.execute("DELETE FROM knowledge_fts WHERE object_id=?", (record_id,))
-        cursor.execute("INSERT INTO knowledge_fts(object_id,title,summary) VALUES (?,?,?)",
-                       (record_id, *(" ".join(tokenize_query(values[field])) for field in ("title", "summary"))))
+    _sync_fts(cursor, kind, record_id, values, aliases)
     return _record(cursor, kind, record_id)
+
+
+def _sync_fts(cursor, kind, record_id, values, aliases):
+    """图谱派生全文索引随记录同步；只维护图谱自己的 FTS 表，不触碰资料层索引。
+
+    实体收标题、别名、摘要；关系收描述与适用条件。关系端点标题不复制进索引，
+    端点改名时无需回填，避免留下过期副本。
+    """
+    from retrieval.nodes.preprocess_node import tokenize_query
+
+    def tokens(text):
+        return " ".join(tokenize_query(text or ""))
+
+    if kind == "object":
+        cursor.execute("DELETE FROM knowledge_fts WHERE object_id=?", (record_id,))
+        cursor.execute("INSERT INTO knowledge_fts(object_id,title,aliases,summary) VALUES (?,?,?,?)",
+                       (record_id, tokens(values["title"]), tokens(" ".join(aliases)), tokens(values["summary"])))
+    elif kind == "relation":
+        cursor.execute("DELETE FROM knowledge_relation_fts WHERE relation_id=?", (record_id,))
+        cursor.execute("INSERT INTO knowledge_relation_fts(relation_id,description,qualifier) VALUES (?,?,?)",
+                       (record_id, tokens(values["description"]), tokens(values["qualifier"])))
 
 
 def _revision(cursor, kind, before, after, reason, batch_id, actor):
@@ -289,23 +307,70 @@ def search_objects(**kwargs):
     match = " OR ".join('"' + token.replace('"', '""') + '"' for token in tokens)
     exact = "(o.title_norm=? OR EXISTS(SELECT 1 FROM json_each(o.aliases_norm_json) a WHERE a.value=?))"
     contains = "(instr(o.title_norm,?)>0 OR EXISTS(SELECT 1 FROM json_each(o.aliases_norm_json) a WHERE instr(a.value,?)>0))"
-    candidates, args = [exact, contains], [name, name, name, name]
+    candidates, where_args = [exact, contains], [name, name, name, name]
+    # FTS 档单独带出 bm25：标题权重最高、别名次之、摘要最低，命中质量参与排序，
+    # 不再让所有 FTS 命中并列同一档后仅按 id 排。
+    cte, cte_args, join, rank = "", [], "", ""
     if match:
-        candidates.append("o.id IN (SELECT object_id FROM knowledge_fts WHERE knowledge_fts MATCH ?)")
-        args.append(match)
+        cte = ("WITH fts_hit AS (SELECT object_id, bm25(knowledge_fts, 0.0, 5.0, 3.0, 1.0) AS rank "
+               "FROM knowledge_fts WHERE knowledge_fts MATCH ?) ")
+        cte_args = [match]
+        join = " LEFT JOIN fts_hit ON fts_hit.object_id = o.id"
+        candidates.append("fts_hit.object_id IS NOT NULL")
+        rank = "fts_hit.rank, "
     where = "(" + " OR ".join(candidates) + ")"
+    filter_args = []
     for field in ("kind", "status"):
         if getattr(query, field) is not None:
             where += f" AND o.{field}=?"
-            args.append(getattr(query, field))
+            filter_args.append(getattr(query, field))
     with get_db_cursor() as cursor:
         cursor.execute("BEGIN")
-        total = cursor.execute("SELECT COUNT(*) FROM knowledge_objects o WHERE " + where, args).fetchone()[0]
-        rows = cursor.execute(f"SELECT {','.join('o.' + c for c in SUMMARY_COLUMNS.split(','))} FROM knowledge_objects o WHERE " + where
-                              + f" ORDER BY CASE WHEN {exact} THEN 0 WHEN {contains} THEN 1 ELSE 2 END,o.id LIMIT ? OFFSET ?",
-                              [*args, name, name, name, name, query.limit, query.offset]).fetchall()
+        total = cursor.execute(cte + "SELECT COUNT(*) FROM knowledge_objects o" + join + " WHERE " + where,
+                               [*cte_args, *where_args, *filter_args]).fetchone()[0]
+        rows = cursor.execute(cte + f"SELECT {','.join('o.' + c for c in SUMMARY_COLUMNS.split(','))} FROM knowledge_objects o" + join
+                              + " WHERE " + where
+                              + f" ORDER BY CASE WHEN {exact} THEN 0 WHEN {contains} THEN 1 ELSE 2 END,{rank}o.id LIMIT ? OFFSET ?",
+                              [*cte_args, *where_args, *filter_args, name, name, name, name, query.limit, query.offset]).fetchall()
         return {"library_id": _library_id(cursor), "objects": [dict(row) for row in rows],
                 "total": total, "limit": query.limit, "offset": query.offset}
+
+
+def search_relations(**kwargs):
+    """按关系自身的描述与适用条件检索关系；端点标题实时读取，不复制进索引。"""
+    query = _validate(models.RelationSearchInput, kwargs)
+    from retrieval.nodes.preprocess_node import tokenize_query
+    tokens = tokenize_query(query.query)
+    match = " OR ".join('"' + token.replace('"', '""') + '"' for token in tokens)
+    with get_db_cursor() as cursor:
+        cursor.execute("BEGIN")
+        result = {"library_id": _library_id(cursor), "relations": [], "total": 0,
+                  "limit": query.limit, "offset": query.offset}
+        if not match:
+            return result
+        cte = ("WITH hits AS (SELECT relation_id, bm25(knowledge_relation_fts, 0.0, 3.0, 1.0) AS rank "
+               "FROM knowledge_relation_fts WHERE knowledge_relation_fts MATCH ?) ")
+        where, args = "hits.relation_id IS NOT NULL", [match]
+        if query.status is not None:
+            where += " AND r.status=?"
+            args.append(query.status)
+        result["total"] = cursor.execute(
+            cte + "SELECT COUNT(*) FROM knowledge_relations r JOIN hits ON hits.relation_id=r.id WHERE " + where, args).fetchone()[0]
+        rows = cursor.execute(
+            cte + "SELECT r.*, hits.rank FROM knowledge_relations r JOIN hits ON hits.relation_id=r.id WHERE " + where
+            + " ORDER BY hits.rank, r.id LIMIT ? OFFSET ?", [*args, query.limit, query.offset]).fetchall()
+        endpoint_ids = sorted({row[key] for row in rows for key in ("source_id", "target_id")})
+        titles = dict(cursor.execute(
+            f"SELECT id,title FROM knowledge_objects WHERE id IN ({','.join('?' for _ in endpoint_ids)})",
+            endpoint_ids).fetchall()) if endpoint_ids else {}
+        for row in rows:
+            item = {key: row[key] for key in ("id", "source_id", "predicate", "target_id", "description",
+                                              "qualifier", "basis", "status", "revision", "created_at", "updated_at")}
+            item["source_title"] = titles.get(row["source_id"])
+            item["target_title"] = titles.get(row["target_id"])
+            item["display"] = _relation_display(row, titles)
+            result["relations"].append(item)
+        return result
 
 
 def _relation_display(relation, titles):
@@ -572,12 +637,23 @@ def lint(**kwargs):
 def rebuild_index():
     """仅重建图谱实体的派生全文索引，不改实体、关系、证据或历史。"""
     from retrieval.nodes.preprocess_node import tokenize_query
+
+    def tokens(text):
+        return " ".join(tokenize_query(text or ""))
+
     with get_db_cursor(write=True) as cursor:
         cursor.execute("DELETE FROM knowledge_fts")
-        rows = cursor.execute("SELECT id,title,summary FROM knowledge_objects ORDER BY id").fetchall()
-        cursor.executemany("INSERT INTO knowledge_fts(object_id,title,summary) VALUES (?,?,?)",
-                           [(row["id"], " ".join(tokenize_query(row["title"])), " ".join(tokenize_query(row["summary"]))) for row in rows])
-        return {"committed": True, "dry_run": False, "indexed_objects": len(rows), "index_status": "current",
+        cursor.execute("DELETE FROM knowledge_relation_fts")
+        rows = cursor.execute("SELECT id,title,aliases_json,summary FROM knowledge_objects ORDER BY id").fetchall()
+        cursor.executemany("INSERT INTO knowledge_fts(object_id,title,aliases,summary) VALUES (?,?,?,?)",
+                           [(row["id"], tokens(row["title"]),
+                             tokens(" ".join(json.loads(row["aliases_json"]))), tokens(row["summary"]))
+                            for row in rows])
+        relations = cursor.execute("SELECT id,description,qualifier FROM knowledge_relations ORDER BY id").fetchall()
+        cursor.executemany("INSERT INTO knowledge_relation_fts(relation_id,description,qualifier) VALUES (?,?,?)",
+                           [(row["id"], tokens(row["description"]), tokens(row["qualifier"])) for row in relations])
+        return {"committed": True, "dry_run": False, "indexed_objects": len(rows),
+                "indexed_relations": len(relations), "index_status": "current",
                 "rewrote_records": False, "library_id": _library_id(cursor)}
 
 

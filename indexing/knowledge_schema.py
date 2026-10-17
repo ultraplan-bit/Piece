@@ -10,7 +10,10 @@ REQUIRED_COLUMNS = {
     "knowledge_evidence": {"id", "object_id", "relation_id", "source_kind", "stance", "source_library_id", "source_file_id", "source_chunk_id", "source_title", "source_url", "heading_path", "page_number", "quote", "content_hash", "dedup_key", "created_at"},
     "knowledge_revisions": {"id", "object_id", "relation_id", "before_revision", "after_revision", "before_json", "after_json", "reason", "batch_id", "actor", "created_at"},
     "knowledge_requests": {"request_key", "request_hash", "result_json", "created_at"},
-    "knowledge_fts": {"object_id", "title", "summary"},
+    "knowledge_fts": {"object_id", "title", "aliases", "summary"},
+    # 关系全文索引只收关系自身可变的文本；端点标题仍从 knowledge_fts 走，
+    # 实体改名后无需回填关系行，也不会留下过期副本。
+    "knowledge_relation_fts": {"relation_id", "description", "qualifier"},
     # Wiki 表只是导航/全文缓存；正文、身份及证据始终从 MD 读取。
     "wiki_pages": {"id", "path", "kind", "title", "title_norm", "summary", "aliases_json", "aliases_norm_json", "status", "revision", "content_hash", "created_at", "updated_at"},
     "wiki_links": {"source_id", "target_id"},
@@ -23,7 +26,8 @@ REQUIRED_COLUMNS = {
 REQUIRED_OBJECTS = set(REQUIRED_COLUMNS) | {
     "idx_knowledge_title", "idx_knowledge_relations_target",
     "idx_knowledge_evidence_object", "idx_knowledge_evidence_relation", "idx_knowledge_evidence_source",
-    "idx_knowledge_history_object", "idx_knowledge_history_relation", "knowledge_objects_ad",
+    "idx_knowledge_history_object", "idx_knowledge_history_relation",
+    "knowledge_objects_ad", "knowledge_relations_ad",
     "idx_wiki_links_target", "idx_wiki_evidence_source", "idx_wiki_operations_page", "wiki_pages_ad",
 }
 
@@ -86,9 +90,15 @@ STATEMENTS = [
         request_key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, result_json TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )""",
-    "CREATE VIRTUAL TABLE knowledge_fts USING fts5(object_id UNINDEXED,title,summary,tokenize='unicode61')",
+    "CREATE VIRTUAL TABLE knowledge_fts USING fts5(object_id UNINDEXED,title,aliases,summary,tokenize='unicode61')",
     """CREATE TRIGGER knowledge_objects_ad AFTER DELETE ON knowledge_objects BEGIN
         DELETE FROM knowledge_fts WHERE object_id = old.id;
+    END""",
+    # 关系索引只存 description/qualifier 两个分词列；端点标题不复制进来，
+    # 避免实体改名后关系行留下过期副本。
+    "CREATE VIRTUAL TABLE knowledge_relation_fts USING fts5(relation_id UNINDEXED,description,qualifier,tokenize='unicode61')",
+    """CREATE TRIGGER knowledge_relations_ad AFTER DELETE ON knowledge_relations BEGIN
+        DELETE FROM knowledge_relation_fts WHERE relation_id = old.id;
     END""",
     """CREATE TABLE wiki_pages (
         id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,

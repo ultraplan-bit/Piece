@@ -47,6 +47,8 @@
 
 ```text
 <PIECE> graph list --kind concept --status active --limit 20 --offset 0 --json
+<PIECE> graph search "关键词" --limit 5 --json
+<PIECE> graph relation-search "关系描述关键词" --limit 5 --json
 <PIECE> graph get object OBJECT_UUID --limit 20 --offset 0 --json
 <PIECE> graph get relation RELATION_UUID --json
 <PIECE> graph get evidence EVIDENCE_UUID --json
@@ -62,6 +64,8 @@
 
 `get` 的类型可省略：只给 UUID 时服务按 UUID 探测是实体、关系还是证据，响应 `kind` 报告实际类型；`history`、`delete` 仍必须写明类型。
 `request --input` 与位置请求键二选一，只查询不提交；查询删除请求时，读回验证记录已不存在，返回 `deleted=true`，不返回删除前正文。
+
+`search` 匹配实体标题、别名与摘要；`relation-search` 匹配关系自身的描述与适用条件，命中后按 `id` 用 `get relation` 读证据。两者都只给候选，端点标题实时读取，不复制进索引，也不做语义合并。
 
 `get` 返回 `record` 和 `evidence.items/total/limit/offset`、`has_evidence`；分页继续读取。关系 `record.display` 和 graph 关系边的 `display` 是只读展示（如 `A —depends_on→ B`，对称关系不带箭头），按当前端点标题生成；身份仍以 UUID 为准，不把 display 写回批次。`graph` 默认 depth=1、最大 2，`--edge-type` 只接受 `relation`，检查 `truncated`，返回计数不是全图总数。`lint` 只做程序性结构检查，不做语义判断。
 

@@ -184,6 +184,14 @@ class SearchInput(ListInput):
     query: Annotated[str, Field(min_length=1, max_length=1000), AfterValidator(nonblank)]
 
 
+class RelationSearchInput(Input):
+    """按关系自身的描述与适用条件检索；status 可选，端点标题由服务实时读取。"""
+    query: Annotated[str, Field(min_length=1, max_length=1000), AfterValidator(nonblank)]
+    status: Status | None = None
+    limit: Limit = 50
+    offset: Offset = 0
+
+
 class GetInput(Input):
     """kind 省略时按 UUID 在实体/关系/证据三张表中探测；UUID 全局唯一，不会歧义。"""
     kind: RecordKind | None = None

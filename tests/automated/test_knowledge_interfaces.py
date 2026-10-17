@@ -101,7 +101,7 @@ def test_api_knowledge_read_write_permissions(api):
     committed = _batch(objects=[{"ref": "b", "kind": "entity", "title": "空正文实体"}])
     _post(api, "knowledge/apply", **committed)
     reads = {
-        "list": {}, "search": {"query": "概念"}, "get": {"kind": "object", "id": oid},
+        "list": {}, "search": {"query": "概念"}, "relation-search": {"query": "概念"}, "get": {"kind": "object", "id": oid},
         "graph": {"root_id": oid}, "references": {"source_library_id": library_id, "source_file_id": 1},
         "lint": {"object_ids": [oid]}, "history": {"kind": "object", "id": oid},
         "request": {"request_key": committed["request_key"]},
@@ -220,11 +220,11 @@ def test_mcp_protocol_schema_validation_and_partial_updates(api, mcp_servers):
         async with Client(graph.mcp) as graph_client, Client(wiki_server.mcp) as wiki_client:
             graph_tools = {tool.name: tool for tool in await graph_client.list_tools()}
             assert set(graph_tools) == {"knowledge-" + name for name in (
-                "list", "search", "get", "graph", "references", "lint", "history", "request",
+                "list", "search", "relation-search", "get", "graph", "references", "lint", "history", "request",
                 "apply", "delete", "rebuild-index", "object-add", "object-update", "relation-add", "relation-update")}
             reads = {name: tool for name, tool in graph_tools.items() if tool.annotations.readOnlyHint}
             assert set(reads) == {"knowledge-" + name for name in (
-                "list", "search", "get", "graph", "references", "lint", "history", "request")}
+                "list", "search", "relation-search", "get", "graph", "references", "lint", "history", "request")}
             for tool in reads.values():
                 assert tool.annotations.idempotentHint and not tool.annotations.openWorldHint and not tool.annotations.destructiveHint
                 assert "params" in tool.inputSchema["properties"]

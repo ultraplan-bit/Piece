@@ -429,6 +429,7 @@ def create_api(runtime):
     register("search", "read", _model("Search", **descendants, query=(str, ...), file_ids=(Ids | None, None), collections=(Names | None, None), limit=(Annotated[int, Field(ge=1, le=50)], 20), diagnostics=(bool, False)), search)
     register("knowledge/list", "read", km.ListInput, knowledge.list_objects)
     register("knowledge/search", "read", km.SearchInput, knowledge.search_objects)
+    register("knowledge/relation-search", "read", km.RelationSearchInput, knowledge.search_relations)
     register("knowledge/get", "read", km.GetInput, knowledge.get_record)
     register("knowledge/graph", "read", km.GraphInput, knowledge.graph)
     register("knowledge/references", "read", km.ReferencesInput, knowledge.references)

@@ -911,10 +911,11 @@ def _add_knowledge_commands(commands, namespace):
         descriptions["purge-recovery"] = "清理可释放的恢复副本；默认预览，正式删除需 --yes，不动页面与审计"
     if not is_wiki:
         descriptions["graph"] = "读取有界局部语义图"
+        descriptions["relation-search"] = "按关系描述与适用条件检索关系"
     for name, help_text in descriptions.items():
         sub = operations.add_parser(name, help=help_text, description=help_text)
         _add_runtime_options(sub)
-        if name in {"list", "search", "get", "references", "lint", "history", "list-recovery"}:
+        if name in {"list", "search", "relation-search", "get", "references", "lint", "history", "list-recovery"}:
             sub.add_argument("--limit", type=_positive, default=50, help="分页大小，最大 100")
             sub.add_argument("--offset", type=_nonnegative, default=0)
         if name == "list-recovery":
@@ -931,6 +932,9 @@ def _add_knowledge_commands(commands, namespace):
             sub.add_argument("--status", choices=("active", "disputed", "outdated"))
         if name == "search":
             sub.add_argument("query")
+        if name == "relation-search":
+            sub.add_argument("query", help="按关系描述与适用条件检索")
+            sub.add_argument("--status", choices=("active", "disputed", "outdated"))
         if name in {"get", "history", "delete"}:
             kinds = ("page",) if is_wiki else ("object", "relation")
             if name == "get":
@@ -1890,6 +1894,7 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         fields = {
             "list": ("kind", "status", "limit", "offset"),
             "search": ("query", "kind", "status", "limit", "offset"),
+            "relation-search": ("query", "status", "limit", "offset"),
             "get": ("kind", "id", "limit", "offset"),
             "graph": ("root_id", "depth", "predicates", "statuses", "max_nodes", "max_edges"),
             "references": ("source_library_id", "source_file_id", "limit", "offset"),

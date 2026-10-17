@@ -70,18 +70,19 @@ def insert_objects(cursor, count, *, prefix="obj", start=0, title_prefix=GRAPH_K
         title = f"{title_prefix}{index:06d}"
         rows.append((oid, KINDS[index % 2], title, normalize_name(title), summary,
                      "[]", "[]", STATUSES[index % 3], 1))
-        fts_rows.append((oid, " ".join(tokenize_query(title)), " ".join(tokenize_query(summary))))
+        fts_rows.append((oid, " ".join(tokenize_query(title)), "", " ".join(tokenize_query(summary))))
         ids.append(oid)
     cursor.executemany(
         "INSERT INTO knowledge_objects(id,kind,title,title_norm,summary,aliases_json,aliases_norm_json,status,revision)"
         " VALUES (?,?,?,?,?,?,?,?,?)", rows)
-    cursor.executemany("INSERT INTO knowledge_fts(object_id,title,summary) VALUES (?,?,?)", fts_rows)
+    cursor.executemany("INSERT INTO knowledge_fts(object_id,title,aliases,summary) VALUES (?,?,?,?)", fts_rows)
     return ids
 
 
 def insert_relations(cursor, object_ids, count, *, prefix="rel", start=0):
     """在对象之间插入 count 条关系；qualifier 带序号保证 UNIQUE 约束不冲突。"""
-    rows, ids = [], []
+    from retrieval.nodes.preprocess_node import tokenize_query
+    rows, fts_rows, ids = [], [], []
     total = len(object_ids)
     for index in range(start, start + count):
         source = object_ids[index % total]
@@ -89,12 +90,15 @@ def insert_relations(cursor, object_ids, count, *, prefix="rel", start=0):
         if target == source:  # CHECK(source_id != target_id)
             target = object_ids[(index * 7 + 2) % total]
         rid = _oid(prefix, index)
+        description, qualifier = f"关系说明{index}", f"q{index}"
         rows.append((rid, source, PREDICATES[index % len(PREDICATES)], target,
-                     f"关系说明{index}", f"q{index}", BASES[index % len(BASES)], STATUSES[index % 3], 1))
+                     description, qualifier, BASES[index % len(BASES)], STATUSES[index % 3], 1))
+        fts_rows.append((rid, " ".join(tokenize_query(description)), " ".join(tokenize_query(qualifier))))
         ids.append(rid)
     cursor.executemany(
         "INSERT INTO knowledge_relations(id,source_id,predicate,target_id,description,qualifier,basis,status,revision)"
         " VALUES (?,?,?,?,?,?,?,?,?)", rows)
+    cursor.executemany("INSERT INTO knowledge_relation_fts(relation_id,description,qualifier) VALUES (?,?,?)", fts_rows)
     return ids
 
 

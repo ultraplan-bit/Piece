@@ -140,6 +140,8 @@ uv run --extra desktop piece serve --open
 
 macOS / Linux 可通过源码运行、使用浏览器界面，实机兼容性仍在完善。命令行帮助可运行 `uv run --extra desktop piece --help`；Windows 便携版在终端中使用 `piece-cli.exe`。
 
+AI 客户端需要结构化参数时，在 `--help` 上加 `--json` 得到机器可读的帮助：`piece file list --json --help` 返回该命令的参数名、取值形态、可选值与默认值，可逐层下钻（`piece` → `piece file` → `piece file list`），不必解析散文帮助或靠试错猜参数。
+
 ### 命令行管理知识库
 
 下面的 `piece`，在源码环境里换成 `uv run --no-sync piece`，便携版换成 `piece-cli.exe`。业务命令需要 Piece 服务已启动。

@@ -155,6 +155,162 @@ def _add_confirmation_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dry-run", action="store_true", help="只检查将要执行的操作")
 
 
+# ``--help`` 与 ``--json`` 同时给出时输出结构化 schema，让 agent 逐层下钻取参数，
+# 不必解析中文散文帮助，也不必靠试错猜参数名和取值。
+_HELP_WORDS = {"--help", "-h"}
+
+# 取值形态到 schema 的映射。_port/_positive/_nonnegative 是本地校验函数，
+# 直接暴露函数名对调用方没有意义，故显式命名。
+_PARAMETER_TYPES = {
+    int: "integer",
+    str: "string",
+    Path: "path",
+    _port: "port",
+    _positive: "positive_integer",
+    _nonnegative: "nonnegative_integer",
+}
+
+_UNSET = object()
+
+
+def _wants_help_schema(argv: list[str]) -> bool:
+    return "--json" in argv and any(word in _HELP_WORDS for word in argv)
+
+
+def _subparser_choices(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser]:
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return dict(action.choices)
+    return {}
+
+
+def _option_takes_value(parser: argparse.ArgumentParser, word: str) -> bool:
+    """该选项是否吃掉下一个 token 作为取值。
+
+    认不出来时按"吃取值"处理：未知选项本就该报错，跳过它的取值比把它
+    后面的子命令名误认成命令更不容易给出错误层级。
+    """
+    if "=" in word:  # --data-dir=值 形式，取值已在同一 token 里
+        return False
+    for action in parser._actions:
+        if word in action.option_strings:
+            return action.nargs != 0
+    return True
+
+
+def _locate_parser(parser: argparse.ArgumentParser, argv: list[str]):
+    """按 argv 里的子命令名逐层下钻，返回目标 parser 与路径。
+
+    只认子命令名：选项自身与它的取值都跳过，因此 ``--data-dir list``
+    不会因为取值恰好叫 list 而误判成子命令。
+    """
+    current, path = parser, []
+    index = 0
+    while index < len(argv):
+        word = argv[index]
+        index += 1
+        if word.startswith("-"):
+            if _option_takes_value(current, word):
+                index += 1
+            continue
+        choices = _subparser_choices(current)
+        if word in choices:
+            current = choices[word]
+            path.append(word)
+    return current, path
+
+
+def _default_value(action: argparse.Action) -> Any:
+    """默认值的 JSON 形态；SUPPRESS 表示默认由全局选项提供，返回哨兵。"""
+    value = action.default
+    if value is argparse.SUPPRESS:
+        return _UNSET
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return [str(item) if isinstance(item, Path) else item for item in value]
+    return value
+
+
+def _value_schema(action: argparse.Action) -> dict[str, Any]:
+    """从 argparse action 推断取值形态。"""
+    if action.nargs == 0:  # store_true / store_false / version 等不带值的开关
+        return {"type": "boolean"}
+
+    schema: dict[str, Any] = {}
+    if action.nargs in ("+", "*") or isinstance(action, argparse._AppendAction):
+        schema["multiple"] = True
+    if action.choices:
+        schema["type"] = "choice"
+        schema["choices"] = [str(choice) for choice in action.choices]
+    else:
+        schema["type"] = _PARAMETER_TYPES.get(action.type, "string")
+    return schema
+
+
+def _option_schema(action: argparse.Action, global_options: set[str]) -> dict[str, Any]:
+    schema: dict[str, Any] = {"name": action.option_strings[0], "dest": action.dest}
+    if len(action.option_strings) > 1:
+        schema["aliases"] = list(action.option_strings[1:])
+    schema.update(_value_schema(action))
+    schema["required"] = bool(getattr(action, "required", False))
+    default = _default_value(action)
+    if default is not _UNSET:
+        schema["default"] = default
+    if any(name in global_options for name in action.option_strings):
+        schema["global"] = True
+    if action.help and action.help != argparse.SUPPRESS:
+        schema["help"] = action.help
+    return schema
+
+
+def _argument_schema(action: argparse.Action) -> dict[str, Any]:
+    schema: dict[str, Any] = {"name": action.dest}
+    schema.update(_value_schema(action))
+    # 位置参数没有 required 属性；nargs 为 ? / * 时可省略
+    schema["required"] = action.nargs not in ("?", "*")
+    if action.help and action.help != argparse.SUPPRESS:
+        schema["help"] = action.help
+    return schema
+
+
+def _describe_command(parser: argparse.ArgumentParser, argv: list[str]) -> dict[str, Any]:
+    """当前层命令的 schema：参数、子命令名与用法；不递归展开子命令。"""
+    target, path = _locate_parser(parser, argv)
+    # 子命令里与顶层同名的选项可写在命令前，标 global 让调用方知道有全局形式
+    global_options = {name for action in parser._actions for name in action.option_strings} if path else set()
+
+    options: list[dict[str, Any]] = []
+    arguments: list[dict[str, Any]] = []
+    commands: list[dict[str, Any]] = []
+    for action in target._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            helps = {item.dest: item.help for item in action._choices_actions
+                     if item.help and item.help != argparse.SUPPRESS}
+            commands = [{"name": name, "help": helps.get(name)} for name in action.choices]
+        elif isinstance(action, argparse._HelpAction):
+            continue
+        elif action.option_strings:
+            options.append(_option_schema(action, global_options))
+        else:
+            arguments.append(_argument_schema(action))
+
+    usage = target.format_usage().strip()
+    data: dict[str, Any] = {
+        "command": target.prog,
+        "path": " ".join(path),
+        "usage": usage[len("usage: "):] if usage.startswith("usage: ") else usage,
+        "options": options,
+        "arguments": arguments,
+    }
+    description = (target.description or "").strip()
+    if description:
+        data["description"] = description
+    if commands:
+        data["commands"] = commands
+    return make_envelope(True, target.prog, data)
+
+
 def _build_parser() -> CliParser:
     parser = CliParser(prog="piece", description="Piece 本地知识库命令行工具")
     parser.add_argument("--version", action="store_true", help="显示版本并退出")
@@ -2073,6 +2229,12 @@ def main(argv: list[str] | None = None) -> int:
     if "--version" in raw_argv:
         result = make_envelope(True, f"Piece {VERSION}", {"version": VERSION})
         _write_result(result, _JSON_REQUESTED)
+        return 0
+
+    # 机器可读帮助：--json 与 --help 同时给出时输出结构化 schema。
+    # 与 --version 同样在 parse_args 之前处理，不触碰配置或服务。
+    if _wants_help_schema(raw_argv):
+        _write_json(_describe_command(parser, raw_argv))
         return 0
 
     # PyInstaller 内部入口必须在任何服务依赖、日志和数据库导入之前处理。

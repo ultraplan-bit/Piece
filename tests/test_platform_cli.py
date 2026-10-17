@@ -312,3 +312,66 @@ assert not {{'nicegui', 'indexing.database', 'indexing.settings', 'app.logging_c
     if help_args == ["--help"]:
         assert "serve" in result.stdout and "open" in result.stdout and "autostart" in result.stdout
     assert not (tmp_path / "unused").exists()
+
+
+def _schema(capsys, *args):
+    """跑一次机器可读帮助，返回解析后的 envelope。"""
+    assert cli.main([*args, "--json", "--help"]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_json_help_lists_top_level_commands(capsys):
+    data = _schema(capsys)["data"]
+
+    assert data["path"] == ""
+    names = [command["name"] for command in data["commands"]]
+    assert {"serve", "file", "chunk", "wiki", "graph", "zotero"} <= set(names)
+    assert all(command["help"] for command in data["commands"])
+
+
+def test_json_help_describes_leaf_parameters(capsys):
+    data = _schema(capsys, "file", "list")["data"]
+
+    assert data["path"] == "file list"
+    options = {option["name"]: option for option in data["options"]}
+    # 取值形态、默认值与可重复性都要给出，否则调用方仍要靠试错
+    assert options["--limit"]["type"] == "positive_integer"
+    assert options["--limit"]["default"] == 20
+    assert options["--sort-by"]["type"] == "choice"
+    assert options["--sort-by"]["choices"] == ["created_at", "updated_at", "filename", "id"]
+    assert options["--direct-only"]["type"] == "boolean"
+    # 全局选项标注出来，调用方知道可写在命令前
+    assert options["--json"]["global"] is True
+
+
+def test_json_help_marks_required_and_repeated_options(capsys):
+    data = _schema(capsys, "graph", "object", "add")["data"]
+
+    options = {option["name"]: option for option in data["options"]}
+    assert options["--title"]["required"] is True
+    assert options["--evidence"]["multiple"] is True
+    assert options["--evidence"]["type"] == "string"
+    assert options["--stance"]["multiple"] is True
+    assert options["--stance"]["choices"] == ["supports", "contradicts", "context"]
+
+
+def test_json_help_positional_arguments(capsys):
+    data = _schema(capsys, "chunk", "get")["data"]
+
+    arguments = {argument["name"]: argument for argument in data["arguments"]}
+    assert arguments["chunk_id"]["type"] == "positive_integer"
+    assert arguments["chunk_id"]["required"] is True
+
+
+def test_json_help_ignores_option_values_when_descending(capsys):
+    # 取值恰好等于子命令名时仍应解析到正确的层，不因 --data-dir file 走错
+    assert cli.main(["file", "--data-dir", "list", "--json", "--help"]) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["path"] == "file"
+
+
+def test_plain_help_still_text_without_json(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--help"])
+    assert exc.value.code == 0
+    assert "usage: piece" in capsys.readouterr().out
+

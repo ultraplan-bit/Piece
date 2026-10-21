@@ -34,6 +34,20 @@ knowledge_apply/delete 批次工具（只收一个 params JSON 对象，正式�
 不要盲改。删除必须先 dry_run 预览并取得用户确认，返回的 impact_token 要在正式删除时原样带回。
 超时或响应丢失用 knowledge-request 按 request_key 查原结果，或原键原样重试，不要换键重复新建。
 
+从文档建图（一次读一段、边读边写，不要先读完整篇再动手）：
+1. 定位来源：piece-index 的 query_files / query_file_info 拿 file_id，list_file_chunks 分页读卡片。先用默认大纲
+   （只给 chunk_index/doc_title/heading_path）看结构，再按 include_text=true 取要读的那几页正文。
+2. 分批：按 chunk_index 连续区间分批（每批约 5–10 张卡片）。有没有标题都用同一套规则，标题/页码只用来给批次命名；
+   不要依赖文档大纲，很多文档没有标题。批次之间不重叠——重叠只会让同一关系被抽两次。
+3. 每批：读完这批卡片后，先 knowledge-search 查重（同名/别名可能是同一实体，但同名不等于同一记录，不要按名字合并），
+   再用 knowledge_object_add / knowledge_relation_add 提交本批的实体、批内关系和证据。证据写 "CHUNK_ID:行号" 或
+   "CHUNK_ID:grep=子串"，服务切出精确引文。一批提交后进入下一批。
+4. 跨批关系：两个端点分别落在不同批的关系，第一批看不全，不要硬凑。等实体都已入库后，第二遍用 knowledge-search
+   找到已有实体再补关系——实体是持久的，第二遍不必重读原文。
+5. 续建：进度存在图里。新会话先 knowledge-references（库 UUID + file_id）查该文件已写入的证据，按 source_chunk_id
+   判断哪些卡片已覆盖，从第一张未覆盖的卡片接着做，不要从头重来。空卡片（抽不出实体）不产生证据，会被重读一次，属正常。
+6. 完成判据：该文件所有卡片都读过、且跨批关系已补，才可报告完成；不要只建了前几批就说建好。
+
 跨服务：文件/卡片/集合的导入与整理在 piece-index；精确引文用 piece-kb 的 extract-quote（按 chunk_id 切出行号或匹配），
 或 piece-index 的 query_chunk_info 读回正文。Wiki 页面是另一套独立数据，在 piece-wiki。
 """,

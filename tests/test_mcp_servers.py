@@ -270,6 +270,7 @@ def test_split_keys_are_enforced_over_real_http():
     ("remove_chunk", "delete_chunk", [1]),
     ("batch_remove_chunks", "batch_delete_chunks", [[1]]),
     ("query_chunk_info", "get_chunk_info", [1]),
+    ("list_file_chunks", "list_chunks", [1]),
     ("check_task_status", "get_task_status", [1]),
     ("query_storage_stats", "get_storage_stats", []),
     ("query_collections", "list_collections", []),

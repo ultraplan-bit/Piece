@@ -276,6 +276,50 @@ def get_chunk_info(chunk_id: int) -> Dict[str, Any]:
         }
 
 
+def list_chunks(file_id: int, page: int = 1, page_size: int = 50, include_text: bool = False) -> Dict[str, Any]:
+    """按文件顺序列出卡片，供分批读取文档建图或核对切片。
+
+    Args:
+        file_id: 文件 ID
+        page: 页码（从 1 开始）
+        page_size: 每页数量（最大 100）
+        include_text: 是否返回卡片正文；默认 false 只给大纲（标题/层级/序号），
+            需要正文时按 chunk_id 分批读取，避免一次拉入整篇文档
+
+    Returns:
+        {
+            "success": bool,
+            "message": str,
+            "data": {
+                "file_id": int,
+                "chunks": [{"id", "chunk_index", "doc_title", "heading_path", "heading_level"[,"chunk_text"]}],
+                "total": int, "page": int, "page_size": int, "total_pages": int
+            }
+        }
+    """
+    try:
+        from indexing.services.file_service import get_chunks_paginated
+
+        result = get_chunks_paginated(file_id, page, page_size)
+        if result is None:
+            return {"success": False, "message": f"文件不存在 (file_id={file_id})", "data": None}
+        keep = ("id", "chunk_index", "doc_title", "heading_path", "heading_level")
+        chunks = []
+        for chunk in result["chunks"]:
+            item = {key: chunk.get(key) for key in keep}
+            if include_text:
+                item["chunk_text"] = chunk.get("chunk_text")
+            chunks.append(item)
+        logger.info("[MCP] 列出文件切片: file_id=%s, page=%s, count=%s", file_id, page, len(chunks))
+        return {"success": True, "message": "查询成功",
+                "data": {"file_id": file_id, "chunks": chunks, "total": result["total"],
+                         "page": result["page"], "page_size": result["page_size"],
+                         "total_pages": result["total_pages"]}}
+    except Exception as e:
+        logger.error(f"[MCP] 列出文件切片异常: {str(e)}", exc_info=True)
+        return {"success": False, "message": f"列出文件切片失败: {str(e)}", "data": None}
+
+
 def get_storage_stats() -> Dict[str, Any]:
     """
     获取存储统计信息

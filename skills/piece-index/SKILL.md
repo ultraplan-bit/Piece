@@ -33,6 +33,7 @@ description: 使用 Piece CLI 导入原始文档、创建笔记、批量新增�
 ## 扫描与统计
 
 - 用 `<PIECE> file list --name "文件名片段" --json` 定位文件，可结合集合和状态过滤；这是文件名包含匹配，`%`、`_` 也是普通字符，不是正文检索。
+- 读一篇文档的卡片用 `<PIECE> chunk list FILE_ID --page 1 --page-size 50 --json`，按 `chunk_index` 顺序分页返回（含正文），用于分批读取（例如据此构建知识图谱）或核对切片。
 - 登记已放进知识库 `files/originals/` 的原件：先 `<PIECE> file scan --dry-run --json` 确认范围，再 `<PIECE> file scan --wait --json`。扫描不接收外部目录、不重索引已登记文件；保留 `created/skipped/failed` 和 `task_ids`，部分失败不报告整体成功。
 - `<PIECE> stats --json` 返回入库文件数、已索引文件数、切片数及登记原件大小总和；不能把 `total_size` 当成包含数据库、插图、日志的完整磁盘占用。
 

@@ -15,7 +15,7 @@ from uuid import uuid4
 from nicegui import context, run, ui
 
 from app.i18n import t
-from app.ui.components import _open_dialog, guard_unsaved, CATALOG_KEY_HANDLER
+from app.ui.components import _open_dialog, chunk_markdown, guard_unsaved, CATALOG_KEY_HANDLER
 from indexing.services.errors import BusinessError
 
 logger = logging.getLogger(__name__)
@@ -492,7 +492,7 @@ class WorkbenchBase:
         if not chunk or chunk["file_id"] != evidence["source_file_id"]:
             self.notify(self.text("source_unavailable"), type="warning")
             return
-        with ui.dialog() as dialog, ui.card().classes("w-[1000px] max-w-full theme-card"):
+        with ui.dialog() as dialog, ui.card().classes("w-[1000px] max-w-full max-h-[90vh] overflow-auto theme-card"):
             ui.label(self.text("compare_source")).classes("text-lg font-semibold")
             with ui.row().classes("w-full gap-4 items-start"):
                 with ui.column().classes("flex-1 min-w-[240px]"):
@@ -500,7 +500,8 @@ class WorkbenchBase:
                     ui.label(evidence["quote"]).classes("whitespace-pre-wrap break-words")
                 with ui.column().classes("flex-1 min-w-[240px]"):
                     ui.label(self.text("current_body"))
-                    self.markdown(chunk["chunk_text"])
+                    # 切片正文按阅读器同一套渲染：相对图片还原到工作目录、公式转 MathML。
+                    chunk_markdown(chunk["chunk_text"], chunk_id=chunk["id"])
             if self.open_source:
                 async def open_file():
                     dialog.close()

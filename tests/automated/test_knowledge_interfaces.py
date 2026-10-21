@@ -805,6 +805,37 @@ def test_mcp_intent_tools_flat_params_auto_key_and_shared_builder(api, knowledge
     assert _post(api, "knowledge/get", kind="object", id=oid)["record"]["title"] == "稳定身份（修订）"
 
 
+def test_index_mcp_lists_file_chunks_outline_and_text(api, knowledge_base, mcp_servers):
+    """索引 MCP 的 list_file_chunks：默认只给大纲，include_text 才带正文；供分批读文档。"""
+    from fastmcp import Client
+    index, retrieval, graph, wiki_server = mcp_servers
+    imported = _post(api, "file/import-markdown", filename="分批来源",
+                     content="# 分批来源\n\n## 甲\n\n甲段正文内容\n\n## 乙\n\n乙段正文内容")
+    knowledge_base.drain()
+    file_id = imported["file_id"]
+
+    async def scenario():
+        async with Client(index.mcp) as index_client:
+            outline = (await index_client.call_tool("list_file_chunks", {"file_id": file_id})).data
+            assert outline["success"], outline
+            data = outline["data"]
+            assert data["file_id"] == file_id and data["total"] >= 2
+            assert [c["chunk_index"] for c in data["chunks"]] == sorted(c["chunk_index"] for c in data["chunks"])
+            assert all("chunk_text" not in c for c in data["chunks"])
+            assert {"id", "chunk_index", "doc_title", "heading_path", "heading_level"} <= set(data["chunks"][0])
+            # include_text 才带正文
+            with_text = (await index_client.call_tool("list_file_chunks", {"file_id": file_id, "include_text": True})).data
+            assert all("chunk_text" in c and c["chunk_text"] for c in with_text["data"]["chunks"])
+            # 分页：page_size=1 时 total_pages 覆盖全部
+            paged = (await index_client.call_tool("list_file_chunks", {"file_id": file_id, "page": 1, "page_size": 1})).data
+            assert len(paged["data"]["chunks"]) == 1 and paged["data"]["total_pages"] == data["total"]
+            # 不存在的文件如实失败
+            missing = (await index_client.call_tool("list_file_chunks", {"file_id": 999999})).data
+            assert not missing["success"]
+
+    asyncio.run(scenario())
+
+
 def test_mcp_intent_and_cli_build_identical_payloads(api, knowledge_base):
     """两条入口共用 knowledge_intent：同样的扁平输入必须组装出相同的 apply 批次。"""
     from indexing.services import knowledge_intent as intent

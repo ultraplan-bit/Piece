@@ -318,9 +318,11 @@ def chunk_markdown(chunk_text: str, chunk_id: int | None = None, file_path: str 
     if file_path:
         from pathlib import Path
         from indexing.services.file_service import get_working_dir
-        relative = Path(file_path).resolve().parent.relative_to(get_working_dir().resolve())
-        if relative.parts:
-            base_url += quote(relative.as_posix()) + "/"
+        # 历史记录可能指向已迁移的数据目录；越界时退回 /working/，不让图片换算失败。
+        parent = Path(file_path).resolve().parent
+        working = get_working_dir().resolve()
+        if parent.is_relative_to(working) and parent != working:
+            base_url += quote(parent.relative_to(working).as_posix()) + "/"
     # 先让 Markdown 解析器处理空格、配对括号和引用式图片，再统一改写 HTML 地址。
     # 同步更新元素属性，确保首次发给浏览器的就是正确 URL，不先触发一次错误请求。
     rendered = ui.markdown(chunk_text, extras=_MARKDOWN_EXTRAS)

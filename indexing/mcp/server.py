@@ -28,6 +28,7 @@ from indexing.mcp.tools.query_tools import (
     list_files,
     get_file_info,
     get_chunk_info,
+    list_chunks,
     get_storage_stats,
 )
 from indexing.mcp.tools.collection_tools import (
@@ -60,6 +61,9 @@ Piece 索引 MCP 服务：用户个人知识库的文件、卡片、集合与索
 
 导入路径：整篇已取得正文的文档用 import_markdown（自动切片、保留原件、可重新索引）；只有需要逐张控制卡片标题和正文时
 才 create_file 拿 file_id 再 add_chunk / batch_add_chunks。正文按内容查重，重复导入返回已有文件而不新建任务。
+
+分批读取：一篇文档的卡片用 list_file_chunks 按 file_id 分页读取，默认只给大纲（chunk_index/doc_title/heading_path），
+确定范围后再 include_text=true 取正文，或用 query_chunk_info 按 chunk_id 单张读；不要为了取少量卡片而逐张试 ID。
 
 异步：文件/卡片写入返回 task_id，受理不等于索引完成；用 check_tasks_status 查终态并从结果取 chunk_id。
 允许部分受理，即使 success=false 也要保留已返回的 task_ids，只重试失败项，不要整批重发。
@@ -420,6 +424,31 @@ async def query_chunk_info(chunk_id: int) -> dict:
     """
     logger.info(f"[MCP Tool] query_chunk_info: chunk_id={chunk_id}")
     return await run_sync(get_chunk_info, chunk_id)
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
+async def list_file_chunks(file_id: int, page: int = 1, page_size: int = 50,
+                           include_text: bool = False) -> dict:
+    """
+    按文件顺序列出卡片，用于分批读取一篇文档（如据此构建知识图谱）或核对切片。
+
+    先只看大纲再取正文：默认 include_text=false 只返回每张卡片的 chunk_id、chunk_index、doc_title、
+    heading_path、heading_level，不带正文，便于判断文档结构与分批范围；确定要读的卡片后，
+    用 include_text=true 取正文，或用 query_chunk_info 按 chunk_id 单张读取。分页用 page/total_pages。
+
+    Args:
+        file_id: 文件 ID（query_files / query_file_info 返回）
+        page: 页码，从 1 开始
+        page_size: 每页数量，最大 100
+        include_text: 是否返回卡片正文；默认 false 只给大纲
+
+    Returns:
+        - success: 是否成功
+        - data.chunks: [{id, chunk_index, doc_title, heading_path, heading_level[, chunk_text]}]
+        - data.total / page / page_size / total_pages: 分页信息
+    """
+    logger.info("[MCP Tool] list_file_chunks: file_id=%s, page=%s, include_text=%s", file_id, page, include_text)
+    return await run_sync(list_chunks, file_id, page, page_size, include_text)
 
 
 # ==================== 任务管理工具 ====================

@@ -36,7 +36,14 @@ def test_graph_ids_direction_parallel_edges_and_safe_tooltips(dark):
     assert options["tooltip"]["renderMode"] == "html" and options["tooltip"]["enterable"] is False
     assert "el.textContent = p.data.tooltip_text" in options["tooltip"][":formatter"]
     assert series["layout"] == "none" and options["animation"] is False
-    assert sum(n["label"]["show"] for n in series["data"]) == 1
+    # 分层环布局：根居中，其余按跳数向外分环，不再挤在同一条水平轴上。
+    by_id = {n["id"]: n for n in series["data"]}
+    assert (by_id[graph["root_id"]]["x"], by_id[graph["root_id"]]["y"]) == (0, 0)
+    assert len({(n["x"], n["y"]) for n in series["data"]}) == len(series["data"])
+    assert any(n["y"] != 0 for n in series["data"] if n["id"] != graph["root_id"])
+    # 度数越大节点越大；标签不再只显示根一个。
+    assert by_id[graph["root_id"]]["symbolSize"] >= by_id[graph["nodes"][1]["id"]]["symbolSize"]
+    assert sum(n["label"]["show"] for n in series["data"]) >= 1
     assert [entry["name"] for entry in options["legend"]["data"]] == list(KINDS)
     subset = deepcopy(graph)
     subset["nodes"] = graph["nodes"][:2]

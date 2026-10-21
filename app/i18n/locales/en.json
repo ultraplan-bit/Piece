@@ -1082,6 +1082,13 @@
     "return": "Back to graph",
     "rebuild_index": "Rebuild query index",
     "rebuild_intro": "Rebuild the query index from existing entities, relations and evidence only; it never rewrites knowledge or history and never calls models.",
-    "rebuild_done": "Graph query index rebuilt."
+    "rebuild_done": "Graph query index rebuilt.",
+    "search_hint": "Search entity titles, aliases or summaries, or browse all entities.",
+    "choose_root": "Pick an entity, then choose Center here to explore its neighborhood.",
+    "all": "All entities, paginated",
+    "broken_link": "This record no longer exists or is invalid. Your previous reading is retained; go back and pick again.",
+    "references": "Referenced by documents",
+    "zoom_in": "Zoom in",
+    "zoom_out": "Zoom out"
   }
 }

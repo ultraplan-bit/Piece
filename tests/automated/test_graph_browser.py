@@ -123,8 +123,25 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             expect(page.locator(".nicegui-echart canvas")).to_be_visible(timeout=30000)
             middle = page.locator(".workspace-splitter").last.locator(":scope > .q-splitter__before")
             expect(middle).to_have_css("width", "260px")
+            # 画布铺满右栏：高度跟随栏高，不再被写死成固定像素而在下方留白。
+            sizes = page.evaluate("""() => {
+                const el = document.querySelector('.nicegui-echart');
+                const pane = el.closest('.theme-content');
+                return {chart: el.offsetHeight, pane: pane.offsetHeight};
+            }""")
+            assert sizes["chart"] > sizes["pane"] * 0.7, sizes
+
             expect(middle.get_by_role("button", name="目标图节点", exact=True)).to_be_visible()
-            expect(page.get_by_text(k("table"), exact=True)).to_be_visible()
+            # 筛选控件要有可用宽度：多选框空值时没有值撑宽，只给 max-width 会被挤成窄缝。
+            widths = page.evaluate("""() => [...document.querySelectorAll('.graph-toolbar .q-select')]
+                .map(s => s.offsetWidth)""")
+            assert widths and min(widths) >= 100, widths
+            # 关系表格默认收进底部抽屉，展开后才渲染关系行。
+            table_title = page.get_by_text(k("table"), exact=True)
+            expect(table_title).to_be_visible()
+            expect(page.get_by_role("button", name=k("related_to"), exact=True)).to_have_count(0)
+            table_title.click()
+            expect(page.get_by_role("button", name=k("related_to"), exact=True)).to_be_visible()
             state = chart_state(page)
             assert {node["id"] for node in state["nodes"]} == {root, target}
             assert len(state["edges"]) == 1

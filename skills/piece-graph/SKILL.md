@@ -36,6 +36,17 @@ description: 使用 Piece CLI 维护知识图谱：实体、有证据的语义�
 
 只在用户要求保存时写入；删除先 `--dry-run` 预览影响，用户确认后才加 `--yes`。失败回执带 `next_command` 时照它执行一次。
 
+## 从文档建图
+
+一次读一段、边读边写，不要先读完整篇再动手：
+
+1. **定位来源**：`<PIECE> file list --name "片段" --json` 找 `file_id`，`<PIECE> chunk list FILE_ID --page 1 --json` 按 `chunk_index` 顺序分页读卡片（带正文）。
+2. **分批**：按 `chunk_index` 连续区间分批，每批约 5–10 张。有没有标题都用同一套规则，标题/页码只用来给批次命名；不要依赖文档大纲，很多文档没有标题。批次之间不重叠——重叠只会让同一关系被抽两次。
+3. **每批**：读完先 `<PIECE> graph search "…" --json` 查重（同名不等于同一记录，不要按名字合并），再用 `graph object add` / `graph relation add` 提交本批的实体、批内关系与证据（`--evidence CHUNK_ID:行号` 或 `CHUNK_ID:grep=子串`）。
+4. **跨批关系**：两个端点分落两批的关系，第一批看不全，不要硬凑；等实体都已入库后，第二遍用 `graph search` 找到已有实体再补关系——实体是持久的，第二遍不必重读原文。
+5. **续建**：进度存在图里。新会话先 `<PIECE> graph references LIBRARY_UUID FILE_ID --json` 查该文件已写入的证据，按 `source_chunk_id` 判断哪些卡片已覆盖，从第一张未覆盖的接着做，不要从头重来。抽不出实体的空卡片不产生证据、会被重读一次，属正常。
+6. **完成判据**：该文件所有卡片都读过、且跨批关系已补，才可报告完成；不要只建了前几批就说建好。
+
 ## 按需读参考
 
 - 建关系、补证据、选谓词 / basis / stance、判断是否合并，以及只读查询命令：`references/semantics.md`

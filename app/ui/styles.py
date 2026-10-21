@@ -733,6 +733,47 @@ THEME_CSS = '''
         border-color: rgba(120, 130, 140, 0.35);
     }
 
+    /* 图谱标签：画布铺满整栏。画布绝对定位后不占布局高度，整栏高度都归它；
+       范围控件收成一条工具条、关系表格收进底部抽屉，都不再挤压画布。
+       这里必须覆盖 NiceGUI 给 .nicegui-echart 的默认 16rem 高度。 */
+    .graph-toolbar {
+        flex-shrink: 0;
+        background: var(--bg-panel);
+        border-bottom: 1px solid var(--border-color);
+    }
+    /* 筛选控件要有最小宽度：多选框空值时没有值可撑宽，只给 max-width 会被挤成一条窄缝。 */
+    .graph-toolbar .graph-control { min-width: 128px; max-width: 168px; }
+    .graph-stage { position: relative; }
+    .graph-canvas {
+        position: absolute !important;
+        inset: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+    }
+    /* 统计只是读图时的参考，不能挡住拖动与缩放。 */
+    .graph-stats {
+        position: absolute;
+        top: 8px;
+        right: 12px;
+        z-index: 1;
+        pointer-events: none;
+    }
+    .graph-drawer {
+        flex-shrink: 0;
+        border-top: 1px solid var(--border-color);
+        background: var(--bg-panel);
+        /* 收起的表格抽屉只留一行标题：去掉 NiceGUI 给 expansion 的默认内边距。 */
+        padding: 0 !important;
+        gap: 0 !important;
+    }
+    .graph-drawer .q-item { min-height: 36px; }
+    /* 图谱标签里的「被资料引用」面板：与表格抽屉同风格，但保留自身内边距。 */
+    .graph-references {
+        flex-shrink: 0;
+        border-top: 1px solid var(--border-color);
+        background: var(--bg-panel);
+    }
+
     .nicegui-content {
         background-color: var(--bg-content);
     }

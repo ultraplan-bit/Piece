@@ -5,6 +5,7 @@
 from copy import deepcopy
 from functools import partial
 import logging
+import math
 
 from nicegui import run, ui
 
@@ -17,6 +18,18 @@ from indexing.services import knowledge_service as service
 from indexing.services.errors import BusinessError
 
 logger = logging.getLogger(__name__)
+
+
+def finite_pair(value):
+    """布局坐标与视口中心必须是有限的二元组。
+
+    非有限值（NaN/Infinity）会让节点或整张图被渲染到画布之外，表现为「点了缩放
+    图就不见了」。这类值只可能来自浏览器端的浮点运算，所以读回时就挡掉。
+    """
+    # bool 是 int 的子类，但不是坐标；显式排除，避免 True 被当成 1。
+    return (isinstance(value, list) and len(value) == 2
+            and all(isinstance(item, (int, float)) and not isinstance(item, bool)
+                    and math.isfinite(item) for item in value))
 
 
 class GraphWorkbench(WorkbenchBase):
@@ -139,7 +152,12 @@ class GraphWorkbench(WorkbenchBase):
         finally:
             self._polling = False
 
-    async def select(self, kind, ident, *, offset=0):
+    async def select(self, kind, ident, *, offset=0, reveal=False):
+        """读取并选中一条记录。
+
+        reveal 只用于画布点击：图谱标签下点画布节点或边时切到「实体」标签读详情。
+        从左栏目录选中实体（reveal=False）时留在图谱标签，并把图谱以该实体为根刷新。
+        """
         self._selection += 1
         generation = self._selection
         data = await self.call(service.get_record, kind=kind, id=ident, limit=25, offset=offset)
@@ -157,6 +175,14 @@ class GraphWorkbench(WorkbenchBase):
             self.local_relations = await self.call(service.graph, root_id=ident, depth=1, edge_types=["relation"])
             if generation != self._selection:
                 return
+        if self.mode == "graph":
+            if kind == "object" and not reveal:
+                # 从目录选中实体：以它为根刷新图谱，留在图谱标签，不切走。
+                await self.load_graph(center=True)
+            else:
+                # 画布点选节点或边：图不动，切到「实体」标签读详情。
+                await self.set_mode("objects")
+            return data
         self.refresh_detail()
         self.refresh_edge_table()
         if self.chart and not self.chart.is_deleted and self.graph:
@@ -185,30 +211,44 @@ class GraphWorkbench(WorkbenchBase):
                         ui.button(self.text(mode), icon=icon, color=None, on_click=partial(self.set_mode, mode)).props("flat dense no-caps").classes("mode-active" if self.mode == mode else "theme-text-secondary")
             self.refresh_modes = modes.refresh
             modes()
-            with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(detail=e.vertical_position)).classes("w-full flex-1") as area:
-                self._scroll_areas["detail"] = area
-                @ui.refreshable
-                def workspace():
-                    self.chart = None
+            @ui.refreshable
+            def workspace():
+                self.chart = None
+                if self.mode == "graph":
+                    # 图谱标签不放进滚动区：画布要吃掉整栏剩余高度，套在滚动区里
+                    # 高度会被内容撑成固定值，下方就留出大片空白。
+                    self.render_graph()
+                    if self.references_data is not None:
+                        with ui.column().classes("graph-references w-full max-h-[220px] overflow-y-auto px-3 py-2 gap-1"):
+                            self.render_references()
+                    # 图谱标签只显示图与关系表：实体详情在「实体」标签读，不在图下方再叠一份。
+                    self.refresh_detail = lambda: None
+                    return
+                with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(detail=e.vertical_position)).classes("w-full flex-1") as area:
+                    self._scroll_areas["detail"] = area
                     with ui.column().classes("w-full min-w-0 p-5 gap-4"):
-                        if self.mode == "graph":
-                            self.render_graph()
-                        elif self.mode == "review":
+                        if self.mode == "review":
                             self.render_review()
                         if self.references_data is not None:
                             self.render_references()
+
                         @ui.refreshable
                         def detail():
                             self.render_detail()
                         self.refresh_detail = detail.refresh
                         detail()
-                self.refresh_workspace = workspace.refresh
-                workspace()
+            self.refresh_workspace = workspace.refresh
+            workspace()
 
-    async def set_mode(self, mode):
+    async def set_mode(self, mode, *, center=False):
         await self.remember_positions()
         self.mode = mode
         self.refresh_modes()
+        # 进入图谱标签时，让图与当前选中实体一致（尚无图或根不同都算），
+        # 否则切过来只看到「先选一个实体」，还要手动点一次刷新范围。
+        if mode == "graph" and self.selected_object and (
+                center or self.graph is None or self.graph["root_id"] != self.selected_object):
+            await self.load_graph(center=True)
         self.refresh_workspace()
 
     # ---- 局部图探索 ----
@@ -227,8 +267,13 @@ class GraphWorkbench(WorkbenchBase):
             }})()""")
             if isinstance(view, dict):
                 self.positions.update({key: tuple(value) for key, value in view.get("points", {}).items()
-                                       if isinstance(value, list) and len(value) == 2})
-                self.viewport = {key: view[key] for key in ("zoom", "center") if view.get(key) is not None}
+                                       if finite_pair(value)})
+                center, zoom = view.get("center"), view.get("zoom")
+                self.viewport = {}
+                if finite_pair(center):
+                    self.viewport["center"] = center
+                if isinstance(zoom, (int, float)) and math.isfinite(zoom):
+                    self.viewport["zoom"] = zoom
         except (TimeoutError, RuntimeError):
             # 断线时保留上次位置；布局从不触发业务写入。
             pass
@@ -263,50 +308,93 @@ class GraphWorkbench(WorkbenchBase):
             if edge:
                 await self.select("relation", edge["id"])
         elif any(n["id"] == data.get("id") for n in self.graph["nodes"]):
-            await self.select("object", data["id"])
+            # 画布点击是探索意图：切到「实体」标签看详情，不重排当前这张图。
+            await self.select("object", data["id"], reveal=True)
 
     def render_graph(self):
-        with ui.row().classes("w-full items-center gap-2"):
-            ui.label(self.text("graph")).classes("text-sm font-medium theme-text")
-            help_hint(self.text("graph_scope"))
-        with ui.row().classes("w-full items-center gap-2"):
+        # 范围与视图控件收成一条工具条；画布吃掉整栏剩余高度，控件不再挤压图。
+        with ui.row().classes("graph-toolbar w-full items-center gap-1 px-3 py-1 flex-nowrap overflow-x-auto"):
             ui.select({1: self.text("one_hop"), 2: self.text("two_hops")}, value=self.depth,
-                      on_change=lambda e: setattr(self, "depth", e.value)).props("dense outlined")
+                      on_change=lambda e: self.reload_on_change("depth", e.value)).props("dense outlined").classes("graph-control shrink-0")
             ui.select(self.choices(PREDICATES), label=self.text("predicate"), value=self.predicates, multiple=True, clearable=True,
-                      on_change=lambda e: setattr(self, "predicates", e.value or None)).props("dense outlined").classes("min-w-32")
+                      on_change=lambda e: self.reload_on_change("predicates", e.value or None)).props("dense outlined").classes("graph-control shrink-0")
             ui.select(self.choices(STATUSES), label=self.text("status"), value=self.relation_statuses, multiple=True, clearable=True,
-                      on_change=lambda e: setattr(self, "relation_statuses", e.value or None)).props("dense outlined").classes("min-w-32")
-        with ui.row().classes("gap-2"):
-            ui.button(self.text("refresh"), on_click=self.load_graph).props("flat no-caps")
-            ui.button(self.text("center"), on_click=partial(self.load_graph, center=True)).props("flat no-caps")
-            ui.button(self.text("expand"), on_click=partial(self.load_graph, expand=True)).props("flat no-caps")
-            ui.button(self.text("reset_view"), on_click=self.reset_graph_view).props("flat no-caps")
-        @ui.refreshable
-        def graph_body():
-            if self.graph is None:
-                ui.label(self.text("choose_root")).classes("theme-text-muted")
-                return
-            data = self.graph
-            ui.label(self.text("graph_count", nodes=len(data["nodes"]), edges=len(data["edges"]), depth=data["depth"])).classes("text-xs theme-text-muted")
-            if data["truncated"]:
-                ui.label(self.text("truncated")).classes("font-semibold theme-text")
-            options = graph_options(data, dark=bool(self.dark()), selected=self.selected_object,
-                                    positions=self.positions, label=self.text)
-            options["series"][0].update(self.viewport)
-            self.positions.update({n["id"]: (n["x"], n["y"]) for n in options["series"][0]["data"]})
-            height = "h-[520px]" if len(data["nodes"]) > 50 else "h-[420px]"
-            # 3.3.1 的 on_point_click 强制读取 value；无数值的图节点/边须用原生事件。
-            self.chart = ui.echart(options).classes(f"w-full {height} min-w-0")
-            self.chart.on("chart:click", self.graph_click, ["data", "dataType"])
-            with ui.expansion(self.text("table"), icon="table_rows", value=True).classes("w-full"), \
-                    ui.column().classes("w-full max-h-[280px] overflow-y-auto"):
+                      on_change=lambda e: self.reload_on_change("relation_statuses", e.value or None)).props("dense outlined").classes("graph-control shrink-0")
+            ui.button(self.text("refresh"), on_click=self.load_graph).props("flat dense no-caps shrink-0")
+            ui.button(self.text("center"), on_click=partial(self.load_graph, center=True)).props("flat dense no-caps shrink-0")
+            ui.button(self.text("expand"), on_click=partial(self.load_graph, expand=True)).props("flat dense no-caps shrink-0")
+            ui.button(self.text("reset_view"), on_click=self.reset_graph_view).props("flat dense no-caps shrink-0")
+            # 缩放按倍率作用于画布；画布铺满后仍可放大看局部。
+            ui.button(icon="zoom_in", on_click=partial(self.zoom_graph, 1.25)).props(
+                f'flat dense round size=sm aria-label="{self.text("zoom_in")}"'
+            ).tooltip(self.text("zoom_in"))
+            ui.button(icon="zoom_out", on_click=partial(self.zoom_graph, 0.8)).props(
+                f'flat dense round size=sm aria-label="{self.text("zoom_out")}"'
+            ).tooltip(self.text("zoom_out"))
+            help_hint(self.text("graph_scope"))
+        with ui.element("div").classes("graph-stage w-full flex-1 min-h-0"):
+            @ui.refreshable
+            def graph_body():
+                if self.graph is None:
+                    with ui.column().classes("absolute inset-0 items-center justify-center"):
+                        ui.label(self.text("choose_root")).classes("theme-text-muted")
+                    return
+                data = self.graph
+                with ui.column().classes("graph-stats items-end gap-0"):
+                    ui.label(self.text("graph_count", nodes=len(data["nodes"]), edges=len(data["edges"]),
+                                      depth=data["depth"])).classes("text-xs theme-text-muted")
+                    if data["truncated"]:
+                        ui.label(self.text("truncated")).classes("text-xs font-semibold theme-text")
+                options = graph_options(data, dark=bool(self.dark()), selected=self.selected_object,
+                                        positions=self.positions, label=self.text)
+                options["series"][0].update(self.viewport)
+                self.positions.update({n["id"]: (n["x"], n["y"]) for n in options["series"][0]["data"]})
+                # 3.3.1 的 on_point_click 强制读取 value；无数值的图节点/边须用原生事件。
+                self.chart = ui.echart(options).classes("graph-canvas min-w-0")
+                self.chart.on("chart:click", self.graph_click, ["data", "dataType"])
+            graph_body_refresh = graph_body.refresh
+            graph_body()
+        # 关系表格默认收起，展开时才占用画布高度。
+        with ui.expansion(self.text("table"), icon="table_rows").classes("graph-drawer w-full"):
+            with ui.column().classes("w-full max-h-[240px] overflow-y-auto px-3 pb-2"):
                 @ui.refreshable
                 def table():
-                    self.edge_table(data)
+                    if self.graph:
+                        self.edge_table(self.graph)
                 self.refresh_edge_table = table.refresh
                 table()
-        self.refresh_graph = graph_body.refresh
-        graph_body()
+
+        def refresh_all():
+            # 图与表是两个独立 refreshable，重绘图时必须一起更新表。
+            graph_body_refresh()
+            self.refresh_edge_table()
+        self.refresh_graph = refresh_all
+
+    async def reload_on_change(self, name, value):
+        """深度或筛选条件变化即重取当前根的子图，不用再手动点一次刷新范围。"""
+        setattr(self, name, value)
+        await self.load_graph()
+
+    async def zoom_graph(self, factor):
+        """按倍率缩放画布。
+
+        graphRoam 的 zoom 是相对倍率而非目标值，且必须同时给出缩放原点：
+        只给 zoom 时 roam 控制器算不出中心，会把它写成 NaN，之后连滚轮缩放也失效。
+        ECharts 自己的滚轮处理同样是 zoom 与 originX/originY 一起派发的。
+        """
+        if not self.chart or self.chart.is_deleted:
+            return
+        # 唯一插值为 NiceGUI 分配的整数元素 ID 与浮点倍率，绝不插入模型文本。
+        ratio = float(factor)
+        try:
+            await ui.run_javascript(f"""(() => {{
+                const chart = getElement({self.chart.id}).chart;
+                chart.dispatchAction({{type: 'graphRoam', zoom: {ratio},
+                                       originX: chart.getWidth() / 2, originY: chart.getHeight() / 2}});
+            }})()""")
+        except (TimeoutError, RuntimeError):
+            # 断线时放弃这次缩放；缩放从不触发业务写入。
+            pass
 
     def reset_graph_view(self):
         self.positions = {}
@@ -389,8 +477,8 @@ class GraphWorkbench(WorkbenchBase):
         self.refresh_detail()
 
     async def view_graph(self):
-        await self.set_mode("graph")
-        await self.load_graph(center=True)
+        # 详情里的「查看关联」总是以当前对象为根重排，即使图谱标签已有同根的图。
+        await self.set_mode("graph", center=True)
 
     # ---- 写入 ----
     def edit_current(self):

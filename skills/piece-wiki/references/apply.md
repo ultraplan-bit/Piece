@@ -4,7 +4,7 @@
 
 ## 写入契约
 
-- `reason` 非空。正式提交必须有 `request_key`（在 JSON 中提供，或用 `--request-id` 注入；两者同时提供必须一致）。`--dry-run` 只校验，预检返回的 UUID **不是**正式创建的 ID。
+- `reason` 非空。正式提交必须有 `request_key`（在 JSON 中提供，或用 `--request-id` 注入；两者同时提供必须一致）。`--dry-run` 只校验；预览中的新页面 ID 和 `content_hash` 是临时值，不保证与正式提交一致。
 - 新页面填 `ref/kind/title`，可选 `summary/body/aliases/status`；`kind` 为 `concept/entity/topic/synthesis/source_summary`，`status` 为 `active/disputed/outdated`。只有标题、没有摘要或正文的页面也合法。
 - 更新填 `id/expected_revision/expected_content_hash` 与真正要改的字段；省略保持原值，`""` / `[]` 清空，不能传 `null`。不要发送读回响应中的派生字段（`path`、`index_status` 等）或未知字段。`expected_content_hash` 用 `wiki get page` 返回的当前 `content_hash`。
 - `evidence` 必须通过 `page` 引用**本批**新建 ref 或更新 id：`{"page":{"ref":"本批新增页面名"}}` 或 `{"page":{"id":"本批更新页面 UUID"}}`。不自动创建页面，也不映射到图谱实体。

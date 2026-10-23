@@ -228,6 +228,9 @@ def test_mcp_protocol_schema_validation_and_partial_updates(api, mcp_servers):
             for tool in reads.values():
                 assert tool.annotations.idempotentHint and not tool.annotations.openWorldHint and not tool.annotations.destructiveHint
                 assert "params" in tool.inputSchema["properties"]
+            for name in ("knowledge-apply", "knowledge-delete"):
+                assert "params" in graph_tools[name].inputSchema["properties"]
+            assert "params" not in graph_tools["knowledge-rebuild-index"].inputSchema["properties"]
             intents = {"knowledge-object-add", "knowledge-object-update", "knowledge-relation-add", "knowledge-relation-update"}
             for name in intents:
                 assert not graph_tools[name].annotations.readOnlyHint and not graph_tools[name].annotations.openWorldHint
@@ -259,6 +262,12 @@ def test_mcp_protocol_schema_validation_and_partial_updates(api, mcp_servers):
                 assert wiki_tools[name].annotations.readOnlyHint and wiki_tools[name].annotations.idempotentHint
             for name in ("wiki-apply", "wiki-delete", "wiki-page-update", "wiki-purge-recovery"):
                 assert wiki_tools[name].annotations.destructiveHint
+            for name in ("wiki-list", "wiki-search", "wiki-get", "wiki-references", "wiki-lint",
+                         "wiki-history", "wiki-request", "wiki-apply", "wiki-delete"):
+                assert "params" in wiki_tools[name].inputSchema["properties"]
+            for name in ("wiki-list-recovery", "wiki-purge-recovery", "wiki-page-add", "wiki-page-update"):
+                assert "params" not in wiki_tools[name].inputSchema["properties"]
+            assert "params" not in wiki_tools["wiki-rebuild-index"].inputSchema["properties"]
             apply_schema = json.dumps(graph_tools["knowledge-apply"].inputSchema)
             assert '"maxItems": 20' in apply_schema and '"expected_revision"' in apply_schema
             assert "reason" in graph_tools["knowledge-apply"].inputSchema["$defs"]["ApplyInput"]["required"]
@@ -429,6 +438,16 @@ def test_cross_entry_compile_query_conflict_and_source_lifecycle(api, knowledge_
             edge = next(edge for edge in neighborhood["edges"] if edge["id"] == ids["relation"])
             assert edge["display"] == evidence["record"]["display"]
             assert evidence["evidence"]["items"][0]["location_status"] == "current"
+            # 检索策略由 MCP 服务自身说明提供，不依赖读取 Skill。
+            assert graph.mcp.instructions is not None
+            assert "knowledge-relation-search" in graph.mcp.instructions
+            assert "端点标题" in graph.mcp.instructions
+            assert "只读检索" in graph.mcp.instructions
+            assert '"params":{"query":"关键词"}' in graph.mcp.instructions
+            assert '"title":"实体"' in graph.mcp.instructions
+            assert "knowledge-object-add/update" in graph.mcp.instructions
+            assert '"params":{"reason":"补关系证据"' in graph.mcp.instructions
+            assert "relation: {id: 关系UUID}" in graph.mcp.instructions
             update = _batch(objects=[{"id": ids["summary"], "expected_revision": 1, "title": "增量修订标题"}])
             assert (await client.call_tool("knowledge-apply", {"params": update})).data["success"]
 
@@ -652,6 +671,7 @@ def test_mcp_intent_tools_flat_params_auto_key_and_shared_builder(api, knowledge
                      content="# 来源\n\n第一行正文\n增量维护依赖稳定身份。\n第三行反方观点")
     knowledge_base.drain()
     chunk = _post(api, "chunk/list", file_id=imported["file_id"])["chunks"][0]
+    library_id = _post(api, "knowledge/list")["library_id"]
     locator = f"{chunk['id']}:grep=稳定身份"
 
     async def scenario():
@@ -698,12 +718,38 @@ def test_mcp_intent_tools_flat_params_auto_key_and_shared_builder(api, knowledge
                 "id": oid, "expected_revision": 2, "evidence": [f"{chunk['id']}:3"]})).data
             assert not only_evidence["success"] and only_evidence["error"]["code"] == "INVALID_ARGUMENT"
 
-            # relation：UUID 端点，带证据。
+            # 先给实体挂证据；这不能替代关系本身的证据。
+            object_evidence = _batch(evidence=[{
+                "object": {"id": oid}, "source_kind": "piece", "stance": "supports",
+                "source_library_id": library_id, "source_file_id": imported["file_id"],
+                "source_chunk_id": chunk["id"], "quote": "增量维护依赖稳定身份。",
+            }])
+            object_attached = (await writer.call_tool("knowledge-apply", {"params": object_evidence})).data
+            assert object_attached["success"]
+
+            # 实体证据不会自动算作关系证据；lint 应明确报告缺少关系自身的证据。
             related = (await writer.call_tool("knowledge-relation-add", {
                 "source": oid, "predicate": "related_to", "target": other,
                 "description": "同名不同类型，需要区分", "basis": "user_statement"})).data
             assert related["success"] and related["data"]["refs"]["item"]["kind"] == "relation"
             rid = related["data"]["refs"]["item"]["id"]
+            initial_lint = (await reader.call_tool("knowledge-lint", {"params": {}})).data
+            assert any(issue["code"] == "RELATION_WITHOUT_EVIDENCE" and issue["relation_id"] == rid
+                       for issue in initial_lint["issues"])
+            # 高层更新只接受有字段改动；纯补关系证据走 apply，owner 必须明确是 relation。
+            only_relation_evidence = (await writer.call_tool("knowledge-relation-update", {
+                "id": rid, "expected_revision": 1, "evidence": [f"{chunk['id']}:3"]})).data
+            assert not only_relation_evidence["success"] and only_relation_evidence["error"]["code"] == "INVALID_ARGUMENT"
+            relation_evidence = _batch(evidence=[{
+                "relation": {"id": rid}, "source_kind": "piece", "stance": "context",
+                "source_library_id": library_id, "source_file_id": imported["file_id"],
+                "source_chunk_id": chunk["id"], "quote": "增量维护依赖稳定身份。",
+            }])
+            attached = (await writer.call_tool("knowledge-apply", {"params": relation_evidence})).data
+            assert attached["success"] and attached["data"]["evidence"][0]["action"] == "created"
+            attached_lint = (await reader.call_tool("knowledge-lint", {"params": {}})).data
+            assert not any(issue["code"] == "RELATION_WITHOUT_EVIDENCE" and issue["relation_id"] == rid
+                           for issue in attached_lint["issues"])
 
             # 相同端点/谓词/qualifier 但内容不同 → KNOWLEDGE_CONFLICT，回执带已有关系摘要和可直接调用的修订入口。
             conflict = (await writer.call_tool("knowledge-relation-add", {
@@ -734,7 +780,8 @@ def test_mcp_intent_tools_flat_params_auto_key_and_shared_builder(api, knowledge
             assert relation["record"]["description"] == "另一种说法" and relation["record"]["basis"] == "inference"
             assert relation["record"]["predicate"] == "related_to" and relation["record"]["revision"] == 2
             assert {relation["record"]["source_id"], relation["record"]["target_id"]} == {oid, other}
-            assert [item["stance"] for item in relation["evidence"]["items"]] == ["context"]
+            assert relation["evidence"]["total"] == 2
+            assert {item["stance"] for item in relation["evidence"]["items"]} == {"context"}
             # 过期版本拒绝；空更新拒绝。
             stale_relation = (await writer.call_tool("knowledge-relation-update", {
                 "id": rid, "expected_revision": 1, "status": "disputed"})).data
@@ -767,9 +814,9 @@ def test_mcp_intent_tools_flat_params_auto_key_and_shared_builder(api, knowledge
             assert not empty["success"] and empty["error"]["code"] == "INVALID_ARGUMENT"
             assert (await reader.call_tool("knowledge-list", {"params": {}})).data["total"] == 2
 
-            # wiki：同一套组装逻辑，页面与图实体彼此独立。
+            # wiki：同一套组装逻辑，页面与图实体彼此独立；链接需明确使用稳定 UUID URI。
             page = (await wiki_writer.call_tool("wiki-page-add", {
-                "title": "稳定身份页", "kind": "topic", "body": "# 稳定身份\n\n见 [[其他页]]。",
+                "title": "稳定身份页", "kind": "topic", "body": "# 稳定身份\n\n见 [其他页](piece://wiki/00000000-0000-0000-0000-000000000001)。",
                 "evidence": locator})).data
             assert page["success"] and page["data"]["committed"], page
             pid = page["data"]["pages"][0]["id"]

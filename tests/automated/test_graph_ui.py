@@ -286,9 +286,10 @@ def test_graph_relation_counts_native_clicks_and_review_candidates(knowledge_bas
         assert workbench.detail["kind"] == "relation" and workbench.detail["record"]["id"] == rid
         await workbench.graph_click(SimpleNamespace(args={"dataType": "edge", "data": {"id": str(uuid4())}}))
         assert workbench.detail["record"]["id"] == rid
-        workbench.mode = "review"
         await workbench.show_status("disputed")
         assert workbench.mode == "objects" and workbench.results["objects"][0]["id"] == oid
+        await workbench.set_mode("review")
+        assert workbench.mode == "objects" and workbench.review_open
     asyncio.run(scenario())
     workbench.checks = service.lint()
     with ui.column() as container:

@@ -129,7 +129,9 @@ def test_mcp_service_selection_persists_across_clients(page, knowledge_base):
     page.clear()
     selected["value"] = "zed"
     mcp.render_mcp_config_right(selected)
-    content = _find(page, "Code")[0].content
+    code = _find(page, "Code")[0]
+    content = code.content
+    assert "mcp-config-code" in code._classes
     assert "piece-kb" in content
     assert "piece-index" not in content
 

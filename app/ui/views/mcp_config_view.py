@@ -880,7 +880,9 @@ def _render_client_config(client: dict, selected_client: dict) -> None:
                 button.props("disable")
         if not has_services:
             ui.label(t("mcp_config.no_service_selected")).classes("text-xs theme-text-muted")
-        code = ui.code(config_text, language=_get_config_language(client)).classes("w-full")
+        code = ui.code(config_text, language=_get_config_language(client)).classes(
+            "w-full mcp-config-code"
+        )
         # 内置复制入口会无条件显示成功；本页只使用上方有结果反馈的按钮。
         code.copy_button.classes("hidden").props("aria-hidden=true tabindex=-1")
 

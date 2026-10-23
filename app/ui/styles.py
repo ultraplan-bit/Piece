@@ -436,6 +436,7 @@ THEME_CSS = '''
     .settings-advanced .q-item__section--avatar .q-icon { font-size: 18px; }
     .settings-privacy-note { padding: 12px 0 0; line-height: 1.6; }
     .settings-path { overflow-wrap: anywhere; user-select: text; }
+    .mcp-config-code, .mcp-config-code * { user-select: text !important; -webkit-user-select: text !important; }
     .settings-effect-note { flex-shrink: 0; width: 100%; padding: 10px 20px; font-size: 12px; line-height: 1.65;
         color: var(--text-secondary); background: var(--bg-panel); border-bottom: 1px solid var(--border-color); white-space: pre-line; }
     .settings-save-bar { flex-shrink: 0; min-height: 62px; padding: 12px 20px; background: var(--bg-panel);

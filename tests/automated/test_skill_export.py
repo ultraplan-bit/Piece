@@ -73,6 +73,14 @@ def test_split_skill_meta_without_frontmatter():
     assert body == "# 纯正文"
 
 
+def test_graph_skill_describes_read_only_retrieval_flow():
+    content = read_skill("piece-graph")
+
+    assert content is not None
+    for phrase in ("图谱检索流程", "端点", "truncated", "只读检索", "supports", "contradicts", "context"):
+        assert phrase in content
+
+
 def test_read_skill_rejects_invalid_ids(skills_root: Path):
     assert read_skill("../outside") is None
     assert read_skill("a/b") is None

@@ -42,6 +42,7 @@ class GraphWorkbench(WorkbenchBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.mode = "objects"
+        self.review_open = False
         self.kind = None
         self.status = None
         self.selected_object = None
@@ -207,7 +208,7 @@ class GraphWorkbench(WorkbenchBase):
                 with ui.row().classes("w-full items-center library-heading workspace-toolbar overflow-x-auto"):
                     if controls:
                         controls()
-                    for mode, icon in (("objects", "account_tree"), ("graph", "hub"), ("review", "fact_check")):
+                    for mode, icon in (("objects", "account_tree"), ("graph", "hub")):
                         ui.button(self.text(mode), icon=icon, color=None, on_click=partial(self.set_mode, mode)).props("flat dense no-caps").classes("mode-active" if self.mode == mode else "theme-text-secondary")
             self.refresh_modes = modes.refresh
             modes()
@@ -227,8 +228,10 @@ class GraphWorkbench(WorkbenchBase):
                 with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(detail=e.vertical_position)).classes("w-full flex-1") as area:
                     self._scroll_areas["detail"] = area
                     with ui.column().classes("w-full min-w-0 p-5 gap-4"):
-                        if self.mode == "review":
-                            self.render_review()
+                        if self.mode == "objects":
+                            with ui.expansion(self.text("review"), icon="fact_check", value=self.review_open,
+                                              on_value_change=lambda e: setattr(self, "review_open", e.value)).classes("w-full"):
+                                self.render_review()
                         if self.references_data is not None:
                             self.render_references()
 
@@ -242,7 +245,9 @@ class GraphWorkbench(WorkbenchBase):
 
     async def set_mode(self, mode, *, center=False):
         await self.remember_positions()
-        self.mode = mode
+        self.mode = "objects" if mode == "review" else mode
+        if mode == "review":
+            self.review_open = True
         self.refresh_modes()
         # 进入图谱标签时，让图与当前选中实体一致（尚无图或根不同都算），
         # 否则切过来只看到「先选一个实体」，还要手动点一次刷新范围。

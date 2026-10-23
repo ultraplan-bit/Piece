@@ -198,6 +198,27 @@ def test_missing_and_invalid_files_never_return_index_body(knowledge_base):
     assert wiki.search_pages(query="正文")["total"] == 0
 
 
+def test_search_ranks_exact_title_alias_and_field_match_strength(knowledge_base):
+    exact_title = create("卷积神经网络")
+    exact_alias = create("深度学习基础", aliases=["卷积神经网络"])
+    partial_title = create("卷积神经网络应用综述")
+    summary_match = create("视觉识别方法", summary="卷积神经网络用于特征提取")
+    body_many_terms = create("模型实践", body="卷积神经网络用于图像分类和特征提取")
+    body_one_term = create("算法笔记", body="图像分类任务中的网络结构")
+
+    name_results = wiki.search_pages(query="卷积神经网络")
+    name_ranked = [page["id"] for page in name_results["pages"]]
+    assert name_ranked[:3] == [exact_title, exact_alias, partial_title]
+
+    field_results = wiki.search_pages(query="特征提取")
+    field_ranked = [page["id"] for page in field_results["pages"]]
+    assert field_ranked.index(summary_match) < field_ranked.index(body_many_terms)
+
+    coverage_results = wiki.search_pages(query="图像分类 特征提取")
+    coverage_ranked = [page["id"] for page in coverage_results["pages"]]
+    assert coverage_ranked.index(body_many_terms) < coverage_ranked.index(body_one_term)
+
+
 def test_rebuild_after_cache_clear_and_external_unicode_rename(knowledge_base):
     target = create("目标")
     source = create("中文资料", body=f"[导航](piece://wiki/{target.upper()})", aliases=["别名"])
@@ -376,6 +397,15 @@ def test_delete_evidence_is_versioned_md_change_and_preserves_audit(knowledge_ba
     assert wiki.delete(payload) == done
     assert read(page_id)["revision"] == 2 and wiki.history(id=page_id)["total"] == 2
     assert wiki.get_record(kind="page", id=page_id)["evidence"]["total"] == 0
+
+
+def test_lint_warns_when_page_has_no_evidence(knowledge_base):
+    page_id = create("无证据页")
+
+    report = wiki.lint()
+
+    assert {"code": "MISSING_EVIDENCE", "page_id": page_id, "severity": "warning"} in report["issues"]
+    assert wiki.get_record(kind="page", id=page_id)["has_evidence"] is False
 
 
 def test_delete_detects_file_and_backlink_changes(knowledge_base):

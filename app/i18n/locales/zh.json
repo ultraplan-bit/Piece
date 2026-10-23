@@ -1070,6 +1070,7 @@
     "link_missing": "链接目标不存在",
     "lint_INDEX_STALE": "页面内容已变更，派生索引待重建。",
     "lint_FILE_MISSING_OR_INVALID": "索引对应的 Markdown 文件缺失或无法读取。",
+    "lint_MISSING_EVIDENCE": "页面没有证据（提示：允许无证据页面）。",
     "lint_DUPLICATE_PAGE_ID": "多个文件声明同一页面身份，拒绝猜测真源。",
     "lint_DUPLICATE_EVIDENCE_ID": "证据身份在多个页面重复。"
   },

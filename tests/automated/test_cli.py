@@ -137,6 +137,9 @@ def test_collection_tree_parent_move_and_direct_scope_commands(endpoint, capsys)
     (("lint", "--object-id", "a", "--object-id", "b"), "lint", {"object_ids": ["a", "b"], "limit": 50, "offset": 0}),
     (("history", "relation", "uuid"), "history", {"kind": "relation", "id": "uuid", "limit": 50, "offset": 0}),
     (("request", "stable-key"), "request", {"request_key": "stable-key"}),
+    (("search", "检索词"), "search", {"query": "检索词", "limit": 50, "offset": 0}),
+    (("relation-search", "依赖关系"), "relation-search", {"query": "依赖关系", "limit": 50, "offset": 0}),
+    (("graph", "uuid", "--depth", "1"), "graph", {"root_id": "uuid", "depth": 1, "max_nodes": 100, "max_edges": 300}),
 ])
 def test_graph_read_commands_map_to_http(endpoint, capsys, args, path, payload):
     code, result, _ = invoke(endpoint, capsys, "graph", *args)

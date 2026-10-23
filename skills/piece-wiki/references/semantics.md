@@ -8,8 +8,8 @@
 
 - 页面 `--kind`：概念/方法用 `concept`，人物/机构/产品用 `entity`，主题用 `topic`，综合结论用 `synthesis`，来源摘要用 `source_summary`。更新必须带已读到的 `revision` 和 `content_hash` 及至少一个待改字段；未传字段保持原值。
 - 页面身份是稳定 UUID，重命名不改变身份；显示标题可以相同，按 UUID 区分，不按名称合并。查已有页面用 `wiki search` 找同名与别名，`file list`、`search` 找相关资料；读取候选的类型、摘要、`content_hash` 与证据后判断。
-- 页面内链写 `piece://wiki/<UUID>`，只用于导航，不进入图谱语义关系；链接由 MD 内容派生，`wiki lint` 会报告失效或未登记链接。
-- MD 可以在 Piece 之外被外部编辑。`wiki get`/`wiki list` 返回 `content_hash`、`path`、`index_status`；`index_status` 不是 `current` 时先 `wiki rebuild-index`，不要用数据库旧正文反写文件。
+- 页面内链写 `piece://wiki/<UUID>`，只用于导航，不进入图谱语义关系；链接由 MD 内容派生，`wiki lint` 会报告失效链接。`[[页面标题]]` 是普通文本，不解析为页面链接；不按标题猜 UUID。
+- MD 可以在 Piece 之外被外部编辑。`wiki get`/`wiki list` 返回 `content_hash`、`path`、`index_status`；页面 `content_hash` 是整个 Markdown 文件原始字节（包括 frontmatter、正文和换行）的 SHA-256，不是正文单独的哈希。`index_status` 不是 `current` 时先 `wiki rebuild-index`，不要用数据库旧正文反写文件。
 - 更新或删除会把被替换/移除的页面文件保留为本地恢复副本 `.wiki-recovery-<operation_id>.bak`（不参与扫描，不是另一份真源），回执与历史会给出恢复路径；因此不要宣称操作后内容被彻底擦除。备份须覆盖它。副本不会自动清理，用 `wiki list-recovery` 查看、`wiki purge-recovery` 预览后经用户确认清理（见 `recovery.md`）。
 
 ## 证据

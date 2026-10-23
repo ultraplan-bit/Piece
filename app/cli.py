@@ -910,8 +910,8 @@ def _add_knowledge_commands(commands, namespace):
         descriptions["list-recovery"] = "只读列出本地恢复副本（.wiki-recovery-*.bak）及其是否仍被需要"
         descriptions["purge-recovery"] = "清理可释放的恢复副本；默认预览，正式删除需 --yes，不动页面与审计"
     if not is_wiki:
-        descriptions["graph"] = "读取有界局部语义图"
-        descriptions["relation-search"] = "按关系描述与适用条件检索关系"
+        descriptions["graph"] = "读取有界局部语义图；按实体候选检索时先 search，再展开一跳"
+        descriptions["relation-search"] = "按关系描述与适用条件检索关系；端点名称需先 search 实体再展开图"
     for name, help_text in descriptions.items():
         sub = operations.add_parser(name, help=help_text, description=help_text)
         _add_runtime_options(sub)

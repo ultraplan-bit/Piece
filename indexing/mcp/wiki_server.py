@@ -22,7 +22,10 @@ mcp = FastMCP(
 
 读：wiki-list/search 找候选，wiki-get 读页面正文、分页证据、页面链接与反链，wiki-references 按来源文件反查引用，
 wiki-lint 做只读结构检查，wiki-history/request 读修订与已提交结果。这些工具都收一个 params JSON 对象，ID 是 UUID
-（不是整数 file/chunk ID）。同名页面是不同记录；页面内链只是导航，不是语义关系。
+（不是整数 file/chunk ID）。同名页面是不同记录；页面内链只是导航，不是语义关系，正文使用 piece://wiki/<UUID> 链接，不支持 [[标题]] 自动解析，不按标题猜 UUID。
+
+参数包装速查（仅适用于本 MCP 服务，不代表 REST API）：wiki-list/search/get/references/lint/history/request/apply/delete
+收 params 对象；wiki-list-recovery、wiki-purge-recovery、wiki-page-add/update 使用顶层参数；wiki-rebuild-index 无参数。
 
 写：高频路径用扁平意图工具 wiki-page-add/update（字段直接作为顶层参数，证据写 "CHUNK_ID:行号" 或 "CHUNK_ID:grep=子串"，
 request_key 自动生成并回传）；一次提交多页或需要字段级控制时用 wiki-apply/delete 批次工具（只收一个 params JSON 对象，
@@ -76,7 +79,8 @@ async def wiki_get(params: wm.GetInput) -> dict:
     Returns library_id, kind, record (page includes title/summary/body/aliases/status/revision/content_hash/path/index_status).
     Pages also include evidence {items,total,limit,offset}, page links and backlinks; evidence location_status is
     current/changed/missing/unresolved/unverified, never fact verification. A page has no graph identity.
-    Use record.id, record.revision and record.content_hash as id/expected_revision/expected_content_hash for wiki-page-update.
+    Page content_hash is SHA-256 of the entire raw Markdown file bytes (frontmatter, body and line endings), not just body;
+    any file change updates it. Use record.id, record.revision and record.content_hash as id/expected_revision/expected_content_hash for wiki-page-update.
     """
     return await shared.read(wiki.get_record, params)
 
@@ -95,8 +99,8 @@ async def wiki_lint(params: wm.LintInput) -> dict:
     """Read-only structural checks on Wiki pages; params.page_ids optionally limits UUID scope ([] checks none).
 
     Returns issues, checked_pages, total_pages, truncated, read_only=true, semantic_review=false.
-    Checks missing evidence, broken/through page links, changed/missing sources and ambiguous names.
-    No network, automatic fixes or semantic truth judgement; read candidate pages before proposing edits.
+    Checks pages without evidence (severity=warning), broken page links, and changed/missing sources.
+    No network, automatic fixes or semantic truth judgement; evidence-free pages are allowed, so treat the warning as advisory.
     """
     return await shared.read(wiki.lint, params)
 
@@ -134,7 +138,7 @@ async def wiki_apply(params: wm.ApplyInput) -> dict:
     更新页面填 id/expected_revision/expected_content_hash 与待改字段；省略保留，空字符串/数组清空，null 拒绝。
     给已有页面只追加证据时，pages 中仍须包含该页 {id,expected_revision,expected_content_hash} 并发条件（可无其他改动字段）。
     evidence 的 page 必须是本批新建 ref 或更新 id，不自动创建页面、不跨功能映射到图谱实体；来源字段与图谱证据一致。
-    dry_run=true 只校验不写入；正式提交必填 request_key。返回 data 含 committed/partial/index_status/errors：
+    dry_run=true 只校验不写入；新页面 ID 和 content_hash 是临时预览，不保证与正式提交一致；正式提交必填 request_key。返回 data 含 committed/partial/index_status/errors：
     committed 只表示至少一页真实落盘；partial=true 或 index_status!=current（部分页未写入或索引未更新）时
     success=false 且 error.code=PARTIAL_FAILURE，但 data 保留已提交回执，请按 errors 逐页核对，不要重发。
     一页都没写入（committed=false）时不报 PARTIAL_FAILURE，error.code 直接是首条错误的真实失败码
@@ -150,10 +154,12 @@ async def wiki_apply(params: wm.ApplyInput) -> dict:
 async def wiki_delete(params: wm.DeleteInput) -> dict:
     """删除 Wiki 页面或证据，不删除图谱实体/关系，也不删除原始文件。
 
-    params.kind=page/evidence，id=页面/证据 UUID；页面必填 expected_revision 和 expected_content_hash
-    （证据读取会返回 page_content_hash/page_revision，删除该证据时用这个值），证据不可变、不接受版本。
+    params.kind=page/evidence，id=页面/证据 UUID；页面必须提供 expected_revision 与 expected_content_hash（从 wiki-get 页面 record 读取）；
+    证据必须提供所属页面的 expected_content_hash（从 wiki-get evidence 的 record.page_content_hash 读取），不传 expected_revision。
+    例如页面预览：{"kind":"page","id":"…","expected_revision":3,"expected_content_hash":"<page hash>"}；证据预览：
+    {"kind":"evidence","id":"…","expected_content_hash":"<record.page_content_hash>"}。缺少字段会在输入校验时指出字段名。
     默认 dry_run=true，返回 data.counts、impact_token 及 partial/index_status/errors，不写入。
-    确认后以同输入加 dry_run=false、confirmed=true、request_key、原 impact_token 正式删除；
+    用户确认后用相同 kind/id/version 字段，加 dry_run=false、confirmed=true、request_key 和原 impact_token 正式删除；
     依赖/版本变化返回 IMPACT_CONFLICT/VERSION_CONFLICT，必须重读、重新预览和确认。
     删除页面会清理其证据与页面链接，但保留在线历史（预览 clears_online_history=false、retains_history=true，
     含 counts.history；删除后 history 仍可读），不跨功能删除图谱数据；删除证据不影响页面正文。
@@ -242,7 +248,7 @@ async def wiki_page_add(
     """一步新建一个 Wiki 页面（Markdown 正源）并附带证据；request_key 自动生成并回传。
 
     参数全部是顶层扁平字段，不要套在 params 里。前置：先用 wiki-search 避免重复页面。
-    body 是 Markdown 正文，可直接写 [[其他页标题]] 链接（导航用，不是语义关系）。
+    body 是 Markdown 正文，可直接写 [页面标题](piece://wiki/<UUID>) 链接（导航用，不是语义关系）；UUID 从 wiki-get 读取，[[标题]] 不会自动解析。
     evidence 每项 "CHUNK_ID:定位"，用法同图谱的 knowledge-object-add。页面与图谱实体彼此独立，写页不建图；
     页面 kind 与图实体 kind 同名不代表同一条记录。
     提交后用 wiki-get 读回 data.pages[0].id；index_status!=current 时用 wiki-rebuild-index 恢复。

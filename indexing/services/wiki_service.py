@@ -624,21 +624,49 @@ def _listing(query, search=False):
         tokens = set(tokenize_query(wanted))
         match = " OR ".join('"' + token.replace('"', '""') + '"' for token in sorted(tokens))
         with get_db_cursor() as cursor:
-            matched_ids = {row[0] for row in cursor.execute("SELECT page_id FROM wiki_fts WHERE wiki_fts MATCH ?", (match,))} if match else set()
+            fts_scores = {
+                row[0]: row[1]
+                for row in cursor.execute(
+                    "SELECT page_id, bm25(wiki_fts, 0.0, 5.0, 3.0, 1.0) "
+                    "FROM wiki_fts WHERE wiki_fts MATCH ?", (match,)
+                )
+            } if match else {}
+
         def rank(page):
-            names = [normalize_name(page["title"]), *map(normalize_name, page["aliases"])]
-            if wanted in names:
-                return 0
+            title = normalize_name(page["title"])
+            aliases = list(map(normalize_name, page["aliases"]))
+            names = [title, *aliases]
+            if title == wanted:
+                return 0, 0, 0, 0, page["id"]
+            if wanted in aliases:
+                return 1, 0, 0, 0, page["id"]
             if any(wanted in name for name in names):
-                return 1
+                return 2, 0, 0, 0, page["id"]
+
             if page["index_status"] == "current":
-                return 2 if page["id"] in matched_ids else 3
-            # 外部改动未刷新时仍只返回真实文件命中，旧 FTS 不能制造幽灵结果。
-            content = normalize_name(page["title"] + "\n" + page["summary"] + "\n" + page["body"])
-            return 2 if wanted in content or tokens.intersection(tokenize_query(content)) else 3
-        ranks = {page["id"]: rank(page) for page in items}
-        items = [page for page in items if ranks[page["id"]] < 3]
-        items.sort(key=lambda page: (ranks[page["id"]], page["id"]))
+                score = fts_scores.get(page["id"])
+                return (3, score, 0, 0, page["id"]) if score is not None else None
+
+            # 外部改动未刷新时，只按真实文件内容召回，不让旧 FTS 产生幽灵结果。
+            summary = normalize_name(page["summary"])
+            body = normalize_name(page["body"])
+            fields = (title, *aliases, summary, body)
+            matched = tokens.intersection(tokenize_query("\n".join(fields)))
+            if not (wanted in "\n".join(fields) or matched):
+                return None
+            weighted_matches = sum(
+                len(tokens.intersection(tokenize_query(field))) * weight
+                for field, weight in zip(fields, (5, *([4] * len(aliases)), 3, 1))
+            )
+            return 3, 1, -len(matched), -weighted_matches, page["id"]
+
+        ranked = []
+        for page in items:
+            score = rank(page)
+            if score is not None:
+                ranked.append((score, page))
+        ranked.sort(key=lambda item: item[0])
+        items = [page for _, page in ranked]
     else:
         items.sort(key=lambda page: page["id"])
     stale = bool(errors) or set(indexes) != set(pages) or any(_with_status(page, indexes)["index_status"] != "current" for page in pages.values())
@@ -744,6 +772,8 @@ def lint(**kwargs):
         for page in selected[query.offset:query.offset + query.limit]:
             if _with_status(page, indexes)["index_status"] != "current":
                 issues.append({"code": "INDEX_STALE", "page_id": page["id"]})
+            if not page["evidence"]:
+                issues.append({"code": "MISSING_EVIDENCE", "page_id": page["id"], "severity": "warning"})
             for target in _links(page):
                 if target not in pages:
                     issues.append({"code": "BROKEN_BODY_LINK", "page_id": page["id"], "target_id": target})

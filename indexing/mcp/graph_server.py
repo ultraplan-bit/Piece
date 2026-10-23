@@ -13,7 +13,7 @@ from pydantic import Field
 from indexing import knowledge_models as km
 from indexing.mcp import shared
 from indexing.mcp.auth import apply_bearer_auth
-from indexing.mcp.shared import ContentHash, Evidence, Reason, Revision, Stances
+from indexing.mcp.shared import Evidence, Reason, Revision, Stances
 from indexing.services import knowledge_service as knowledge
 
 mcp = FastMCP(
@@ -22,12 +22,26 @@ mcp = FastMCP(
 
 读：knowledge-list/search 找候选，knowledge-get 读一条实体/关系/证据（实体没有正文），knowledge-graph 取有界邻域，
 knowledge-references 按来源文件反查引用，knowledge-lint 做只读结构检查，knowledge-history/request 读修订与已提交结果。
-这些工具都收一个 params JSON 对象，ID 是 UUID（不是整数 file/chunk ID）。同名对象是不同记录，不要按名字合并。
-证据的 location_status 为 current/changed/missing/unresolved/unverified，即使 current 也不代表断言已被证实。
+
+调用形状速查（MCP arguments）：
+- `params` 包装：knowledge-list/search/relation-search/get/graph/references/lint/history/request/apply/delete，例 `{"params":{"query":"关键词"}}`；批次写入例 `{"params":{"reason":"补关系证据","evidence":[{"relation":{"id":"关系UUID"},"source_kind":"user","quote":"用户明确陈述的原文"}]}}`。
+- 顶层平铺：knowledge-object-add/update、knowledge-relation-add/update，例 `{"title":"实体"}`；不要再套 `params`。
+- 无参数：knowledge-rebuild-index。
+
+ID 是 UUID（不是整数 file/chunk ID）。同名对象是不同记录，不要按名字合并。证据的 location_status 为 current/changed/missing/unresolved/unverified，即使 current 也不代表断言已被证实。
+
+图谱检索按问题选择步骤，不要每次都展开两跳：从问题提取实体名称/别名和关系描述，分别用 knowledge-search 与
+knowledge-relation-search 查候选（可并行）。问两个实体之间的关系时，先区分实体候选，再对候选实体调用
+knowledge-graph（depth=1），按 UUID 对齐关系端点；关系文本搜索不保证按端点标题命中，高连接节点或 truncated
+结果可能不完整。同名候选用 knowledge-get 查看类型、摘要和别名；仍有歧义就说明或询问，不按标题猜 ID、不合并。
+仅涉及间接联系/路径时扩到 depth=2，并检查 truncated；对用于回答的关系用 knowledge-get 读取证据，区分
+supports/contradicts/context 和来源状态。current 只表示来源定位/内容未变，不代表事实已验证。证据足够即停止；
+只读检索不要调用写工具，也不要根据邻接关系创造图中不存在的边。
 
 写：高频路径用扁平意图工具 knowledge_object_add/update、knowledge_relation_add/update（字段直接作为顶层参数，
 证据写 "CHUNK_ID:行号" 或 "CHUNK_ID:grep=子串"，request_key 自动生成并回传）；一次提交多条或需要字段级控制时用
 knowledge_apply/delete 批次工具（只收一个 params JSON 对象，正式提交必填 request_key，dry_run 只校验不消耗键）。
+证据归属必须逐条明确：实体引文不能替代关系证据；纯补关系证据用 knowledge-apply，并在对应 evidence 项写 `relation: {id: 关系UUID}`，不要写成 object owner。
 不要给扁平工具套 params。图谱写入是同步本地事务，不调用模型或嵌入，没有 task_id。
 
 写前先读：用 knowledge-search 查重，写后用 knowledge-get 读回；更新一律带 expected_revision，冲突时重读再决定，
@@ -176,6 +190,7 @@ async def knowledge_apply(params: km.ApplyInput) -> dict:
     谓词 is_a/part_of/depends_on/applies_to/supports 有方向；contradicts/related_to 对称。related_to 须说明关联原因。
     basis=explicit/synthesis/inference/user_statement 区分原文明示、综合、推断、用户陈述，不是可信度认证。
     evidence 恰好填 object 或 relation；source_kind=piece/external/user，quote 必填，stance=supports/contradicts/context。
+    关系断言的引文必须明确归属 relation（如 {"relation":{"id":"关系UUID"}}）；挂在端点实体上的证据不算关系证据。
     piece 必填 source_library_id/source_file_id/source_chunk_id；本库校验归属和精确引文，服务计算 hash/页码；
     可填 expected_content_hash 拒绝旧正文。其他库还需 source_title，标 unresolved，不能宣称已验证哈希。
     external 需 source_title + 安全 http(s) source_url，不抓取网址；user 明确用户说明；两者均 unverified。
@@ -259,11 +274,11 @@ async def knowledge_object_update(
     reason: Reason | None = None,
     dry_run: bool = False,
 ) -> dict:
-    """增量修订一个图实体或只给它补证据；只填要改的字段，省略保留原值，空字符串/数组清空。
+    """增量修订一个图实体；只填要改的字段，省略保留原值，空字符串/数组清空，可同时附证据。
 
     前置：id 与 expected_revision 必须来自 knowledge-get（record.id / record.revision），不要按标题猜。
-    版本不符返回 VERSION_CONFLICT，重读后再决定，不要盲改；至少要有一个待改字段，只补证据请走 knowledge-apply。
-    evidence/stance 用法同 knowledge-object-add。
+    必须至少修改一个实体字段；只补证据请用 knowledge-apply，并在 evidence 中明确填写 object owner。
+    版本不符返回 VERSION_CONFLICT，重读后再决定，不要盲改。evidence/stance 用法同 knowledge-object-add。
     """
     values = {"kind": kind, "title": title, "summary": summary, "status": status,
               "aliases": shared.intent_coerce(aliases)}
@@ -316,9 +331,10 @@ async def knowledge_relation_update(
     reason: Reason | None = None,
     dry_run: bool = False,
 ) -> dict:
-    """增量修订一条已有语义关系或只给它补证据；只填要改的字段，省略保留原值，qualifier 传空字符串可清空。
+    """增量修订一条已有语义关系；只填要改的字段，省略保留原值，qualifier 传空字符串可清空，可同时附关系证据。
 
     id 与 expected_revision 来自 knowledge-get（kind=relation）或 knowledge-relation-add 冲突回执的 data.id；
+    必须至少修改一个关系字段；只补证据请用 knowledge-apply，并在 evidence 中明确填写 relation owner。
     版本不符返回 VERSION_CONFLICT，重读后再决定。改 description 不改结构：纠正谓词传 predicate，
     纠正方向传 source/target。改成与另一条关系相同的端点、谓词和 qualifier 会返回 KNOWLEDGE_CONFLICT。
     evidence/stance 用法同 knowledge-object-add。

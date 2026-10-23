@@ -11,9 +11,11 @@
 <PIECE> wiki delete evidence EVIDENCE_UUID --expected-content-hash PAGE_HASH --dry-run --json
 <PIECE> wiki delete page PAGE_UUID --expected-revision CURRENT_REVISION --expected-content-hash CURRENT_HASH \
         --impact-token PREVIEW_TOKEN --request-id UNIQUE_KEY --yes --json
+<PIECE> wiki delete evidence EVIDENCE_UUID --expected-content-hash PAGE_HASH \
+        --impact-token PREVIEW_TOKEN --request-id UNIQUE_KEY --yes --json
 ```
 
-页面删除按 `wiki get page` 的当前 `revision` 和 `content_hash` 传并发条件；证据读取返回 `record.page_content_hash` 与 `record.page_revision`，删除该证据时传 `--expected-content-hash PAGE_HASH`（所属页面当前哈希），证据不接受 `--expected-revision`。核对预览的 `counts`、`partial`、`index_status`、`errors`、`deletes_files=false`、`retains_history=true`（页面删除保留在线历史，`clears_online_history=false`，删除后 `wiki history` 仍可读）后再确认。页面删除会清理其证据与页面链接，**不删除图谱实体/关系**，也不删除原始文件。
+页面删除按 `wiki get page` 的当前 `revision` 和 `content_hash` 传并发条件；Wiki `content_hash` 是整个 Markdown 文件（frontmatter、正文和换行）的原始字节 SHA-256，任一文件改动都会变化。证据读取返回 `record.page_content_hash` 与 `record.page_revision`，删除该证据时传 `--expected-content-hash PAGE_HASH`（所属页面当前哈希），证据不接受 `--expected-revision`。核对预览的 `counts`、`partial`、`index_status`、`errors`、`deletes_files=false`、`retains_history=true`（页面删除保留在线历史，`clears_online_history=false`，删除后 `wiki history` 仍可读）后再确认。页面删除会清理其证据与页面链接，**不删除图谱实体/关系**，也不删除原始文件。
 
 资料正文修改会使证据 `changed`，删卡片 / 重索引后旧 chunk 消失为 `missing`，不按同标题自动重绑；删原件保留页面和引用快照，彻底移除引用须显式删除相关证据与知识内容（含 `.wiki-recovery-*.bak` 本地恢复副本）。
 

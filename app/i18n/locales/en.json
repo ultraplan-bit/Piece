@@ -1070,6 +1070,7 @@
     "link_missing": "Link target missing",
     "lint_INDEX_STALE": "Page content changed; derived index needs a rebuild.",
     "lint_FILE_MISSING_OR_INVALID": "The Markdown file behind the index is missing or unreadable.",
+    "lint_MISSING_EVIDENCE": "Page has no evidence (advisory; evidence-free pages are allowed).",
     "lint_DUPLICATE_PAGE_ID": "Multiple files declare the same page identity; the true source is not guessed.",
     "lint_DUPLICATE_EVIDENCE_ID": "An evidence identity is duplicated across pages."
   },

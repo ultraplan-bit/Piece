@@ -149,12 +149,11 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             page.keyboard.press("Enter")
             expect(page.get_by_text(k("description") + " · 人工创建的关系", exact=True)).to_be_visible()
 
-            # 只读结构检查与查询索引重建（不改实体、关系、证据）。
-            page.get_by_role("button", name=k("review"), exact=True).click()
-            page.get_by_role("button", name=k("run_checks"), exact=True).click()
-            page.get_by_role("button", name=gk("rebuild_index"), exact=True).click()
-            expect(page.get_by_role("button", name=gk("rebuild_index"), exact=True)).to_be_visible()
+            # 实体页内展开只读结构检查（不改实体、关系、证据）。
             page.get_by_role("button", name=gk("objects"), exact=True).click()
+            page.get_by_text(k("review"), exact=True).click()
+            page.get_by_role("button", name=k("run_checks"), exact=True).click()
+            expect(page.get_by_text("本次检查 2 个对象", exact=True)).to_be_visible()
 
             # 删除节点会影响其关系与证据，预览范围由服务给出。
             page.get_by_role("button", name="图谱中心", exact=True).first.click()

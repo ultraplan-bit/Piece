@@ -210,6 +210,13 @@ class GraphInput(Input):
     max_edges: Annotated[int, Field(strict=True, ge=1, le=300)] = 300
 
 
+class GraphOverviewInput(Input):
+    predicates: Annotated[list[Predicate], Field(max_length=7)] | None = None
+    statuses: Annotated[list[Status], Field(max_length=3)] | None = None
+    max_nodes: Annotated[int, Field(strict=True, ge=1, le=400)] = 400
+    max_edges: Annotated[int, Field(strict=True, ge=1, le=1000)] = 1000
+
+
 class ReferencesInput(Input):
     source_library_id: Uuid
     source_file_id: PositiveInt

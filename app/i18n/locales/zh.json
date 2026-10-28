@@ -88,8 +88,8 @@
     "new_file": "新增文档与索引任务",
     "preview_first": "请先按当前选项更新预览，并勾选至少一个可用附件。",
     "import_selected": "导入勾选附件",
-    "accepted_hint": "受理不等于索引完成；请查看任务终态。重复文件也可能仍在处理或已有错误。",
-    "refresh_status": "刷新索引状态",
+    "accepted_hint": "受理不等于索引完成；任务状态会自动更新。重复文件也可能仍在处理或已有错误。",
+    "refresh_status": "手动刷新状态",
     "organize": "整理标签与集合",
     "add_tags": "添加标签（每行一个）",
     "remove_tags": "移除标签（每行一个）",
@@ -230,6 +230,7 @@
     "choose_root": "选择一个知识对象，然后点击“以此为中心”。",
     "edge_required": "至少选择一种边类型。",
     "graph_scope": "仅展示有界局部关联。位置与距离不代表语义相似度，连接数量不代表可信度；拖动只调整布局。",
+    "overview_scope": "全局概览优先展示关联较多的实体，最多 400 个实体 / 1000 条关系；数据较大时可筛选，点选实体进入局部探索。",
     "one_hop": "一跳",
     "two_hops": "两跳",
     "predicate": "关系类型",
@@ -1090,6 +1091,10 @@
     "broken_link": "该记录已不存在或已失效；上次的阅读内容仍保留，可返回重选。",
     "references": "被资料引用",
     "zoom_in": "放大",
-    "zoom_out": "缩小"
+    "zoom_out": "缩小",
+    "global_graph": "全局概览",
+    "local_graph": "局部探索",
+    "overview_count": "已展示 {nodes}/{total_nodes} 个实体 · {edges}/{total_edges} 条符合筛选的关系",
+    "overview_truncated": "全库较大：当前优先展示关联较多的实体；可筛选或点选实体进入局部图。"
   }
 }

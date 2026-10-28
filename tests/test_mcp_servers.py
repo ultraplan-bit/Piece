@@ -228,7 +228,7 @@ def test_shutdown_waits_for_inflight_request_before_lifespan_cleanup():
     _run(scenario())
 
 
-def test_split_keys_are_enforced_over_real_http():
+def test_split_keys_are_enforced_over_real_http(caplog):
     async def scenario():
         settings.get_settings().mcp = settings.McpSettings(api_key="read-key", index_api_key="write-key")
         read = _service("piece-kb", [])
@@ -238,6 +238,7 @@ def test_split_keys_are_enforced_over_real_http():
         manager = MCPServerManager()
         try:
             await manager.start([(read, 0), (write, 0)], host="127.0.0.1")
+            caplog.set_level("INFO", logger="indexing.mcp.auth")
             for index, name, correct, wrong in (
                 (0, "piece-kb", "read-key", "write-key"),
                 (1, "piece-index", "write-key", "read-key"),
@@ -254,6 +255,9 @@ def test_split_keys_are_enforced_over_real_http():
                                 await client.list_tools()
                             result = await client.call_tool("identity", raise_on_error=False)
                             assert result.is_error
+            assert "[MCP] service='retrieval' tool='identity' status=ok" in caplog.text
+            assert "[MCP] service='index' tool='identity' status=error error_type=unauthorized" in caplog.text
+            assert "duration_ms=" in caplog.text and "read-key" not in caplog.text and "write-key" not in caplog.text
         finally:
             await manager.stop()
 

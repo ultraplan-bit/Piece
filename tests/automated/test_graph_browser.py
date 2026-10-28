@@ -35,21 +35,9 @@ def apply(**parts):
 def chart_state(page):
     return page.locator(".nicegui-echart").evaluate("""el => {
         const chart = getElement(el.id.slice(1)).chart;
-        const series = chart.getModel().getSeriesByIndex(0);
-        const nodes = series.getData();
-        const edges = series.getEdgeData();
-        return {
-            nodes: Array.from({length: nodes.count()}, (_, i) => {
-                const symbol = nodes.getItemGraphicEl(i).childAt(0);
-                const rect = symbol.getBoundingRect().clone();
-                rect.applyTransform(symbol.getComputedTransform());
-                return {id: nodes.getId(i), x: rect.x + rect.width / 2, y: rect.y + rect.height / 2};
-            }),
-            edges: Array.from({length: edges.count()}, (_, i) => {
-                const line = edges.getItemGraphicEl(i).childAt(0);
-                return {id: edges.getId(i), point: line.transformCoordToGlobal(...line.pointAt(0.5))};
-            }),
-        };
+        return chart.getOption().series.map(series => ({type: series.type,
+            count: (series.data || series.edges || []).length,
+            data: series.data || series.edges || []}));
     }""")
 
 
@@ -143,15 +131,34 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             table_title.click()
             expect(page.get_by_role("button", name=k("related_to"), exact=True)).to_be_visible()
             state = chart_state(page)
-            assert {node["id"] for node in state["nodes"]} == {root, target}
-            assert len(state["edges"]) == 1
+            assert state[0]["type"] == "graph"
+            assert {node["id"] for node in state[0]["data"]} == {root, target}
+            assert state[0]["count"] == 2
             page.get_by_role("button", name=k("related_to"), exact=True).focus()
             page.keyboard.press("Enter")
             expect(page.get_by_text(k("description") + " · 人工创建的关系", exact=True)).to_be_visible()
 
+            # 关系表选择会切到实体详情；重新打开局部图后再切换全局概览。
+            page.get_by_role("button", name="图谱中心", exact=True).first.click()
+            page.get_by_role("button", name=k("view_graph"), exact=True).click()
+            # 显式切换全局概览：展示完整小图，点击实体可进入其局部图。
+            page.get_by_role("button", name=gk("global_graph"), exact=True).click()
+            expect(page.get_by_text(t("graph.overview_count", nodes=2, edges=1,
+                                      total_nodes=2, total_edges=1), exact=True)).to_be_visible()
+            global_state = chart_state(page)
+            assert [series["type"] for series in global_state] == ["lines3D", "scatter3D", "scatter3D"]
+            global_nodes = [node for series in global_state[1:] for node in series["data"]]
+            assert {node["id"] for node in global_nodes} == {root, target}
+            assert all(all(-180 <= point[0] <= 180 for point in edge["coords"])
+                       for edge in global_state[0]["data"])
+            page.screenshot(path=str(service["path"] / "graph-sphere.png"))
+            page.get_by_role("button", name="目标图节点", exact=True).first.click()
+            expect(page.get_by_role("button", name=gk("local_graph"), exact=True)).to_be_visible()
+            assert chart_state(page)[0]["type"] == "graph"
+
             # 实体页内展开只读结构检查（不改实体、关系、证据）。
             page.get_by_role("button", name=gk("objects"), exact=True).click()
-            page.get_by_text(k("review"), exact=True).click()
+            page.get_by_role("button", name='Expand "' + k("review") + '"').click()
             page.get_by_role("button", name=k("run_checks"), exact=True).click()
             expect(page.get_by_text("本次检查 2 个对象", exact=True)).to_be_visible()
 

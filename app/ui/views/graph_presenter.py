@@ -120,8 +120,75 @@ def _label_position(x, y):
     return "left"
 
 
+def _overview_options(graph, *, dark, selected, label):
+    """可旋转的 3D 球面全局概览。"""
+    surface, ink = ("#1a1a19", "#ffffff") if dark else ("#fcfcfb", "#0b0b0b")
+    adjacency = _adjacency(graph)
+    degree = {node_id: len(neighbors) for node_id, neighbors in adjacency.items()}
+    ordered = sorted(graph["nodes"], key=lambda node: (-degree.get(node["id"], 0), node["id"]))
+    count = max(1, len(ordered))
+    points = {}
+    for index, item in enumerate(ordered):
+        depth = 1 - 2 * (index + 0.5) / count
+        angle = index * math.pi * (3 - math.sqrt(5))
+        longitude = (math.degrees(angle) + 180) % 360 - 180
+        points[item["id"]] = (longitude, math.degrees(math.asin(depth)), 1)
+    if len(ordered) == 1:
+        points[ordered[0]["id"]] = (0.0, 0.0, 1)
+
+    names = {node["id"]: node["title"] for node in graph["nodes"]}
+    edges = []
+    for edge in graph["edges"]:
+        edge_name = label(edge.get("predicate") or "relation")
+        arrow = " ↔ " if edge.get("symmetric") else " → "
+        edges.append({"name": edge_name,
+                      "coords": [points[edge["source_id"]], points[edge["target_id"]]],
+                      "tooltip_text": names[edge["source_id"]] + arrow + names[edge["target_id"]] + " · " + edge_name,
+                      "lineStyle": {"color": "#93a6b4" if dark else "#718795", "opacity": 0.62,
+                                    "width": 1.2 + 0.7 * min(int(edge.get("evidence_count") or 0), 5)}})
+
+    node_series = []
+    for kind in KINDS:
+        color, symbol = TYPE_MARKS[kind]
+        data = []
+        for item in graph["nodes"]:
+            if item["kind"] != kind:
+                continue
+            node_id = item["id"]
+            data.append({"id": node_id, "name": item["title"], "value": points[node_id],
+                         "symbolSize": _node_size(degree.get(node_id, 0)) * 0.72,
+                         "tooltip_text": item["title"] + " · " + label(kind),
+                         "label": {"show": node_id == selected or degree.get(node_id, 0) >= LABEL_MIN_DEGREE,
+                                   "formatter": "{b}",
+                                   "textStyle": {"color": ink, "textBorderColor": surface, "textBorderWidth": 3}},
+                         "itemStyle": {"color": PALETTES[dark][color], "borderColor": surface, "borderWidth": 1}})
+        node_series.append({"name": label(kind), "type": "scatter3D", "symbol": symbol,
+                            "data": data, "label": {"show": True},
+                            "emphasis": {"label": {"show": True, "textStyle": {"color": ink}}}})
+
+    return {"backgroundColor": surface, "animation": False,
+            "tooltip": {"renderMode": "html", "enterable": False, "confine": True,
+                        "extraCssText": "max-width:320px;white-space:normal;overflow-wrap:anywhere",
+                        ":formatter": "p => { const el = document.createElement('div'); el.textContent = p.data.tooltip_text || ''; return el; }"},
+            "legend": {"data": [label(kind) for kind in KINDS], "bottom": 4,
+                       "textStyle": {"color": ink}, "selectedMode": False},
+            "globe": {"globeRadius": 82, "globeOuterRadius": 82, "show": False,
+                      "environment": "none", "baseColor": surface,
+                      "viewControl": {"autoRotate": False, "alpha": 22, "beta": 35,
+                                      "distance": 170, "rotateSensitivity": 1,
+                                      "rotateMouseButton": "left", "panMouseButton": "right",
+                                      "zoomSensitivity": 1, "panSensitivity": 0}},
+            "series": [{"type": "lines3D", "coordinateSystem": "globe", "polyline": True,
+                        "silent": True, "data": edges,
+                        "lineStyle": {"color": "#93a6b4" if dark else "#718795", "opacity": 0.62, "width": 1}},
+                      *[{**series, "coordinateSystem": "globe", "silent": False}
+                        for series in node_series]]}
+
+
 def graph_options(graph, *, dark=False, selected=None, positions=None, label=lambda value: value):
     """分层环布局；用户拖动过的位置优先，避免重绘把手工摆放冲掉。"""
+    if graph.get("overview"):
+        return _overview_options(graph, dark=dark, selected=selected, label=label)
     surface, ink = ("#1a1a19", "#ffffff") if dark else ("#fcfcfb", "#0b0b0b")
     adjacency = _adjacency(graph)
     degree = {node_id: len(neighbors) for node_id, neighbors in adjacency.items()}

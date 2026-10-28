@@ -162,8 +162,20 @@ def test_zotero_import_uses_selected_available_attachments_once(workbench, monke
                 "accepted_count": 1, "duplicate_count": 0, "failed_count": 0, "skipped_count": 0, "failures": []}
 
     monkeypatch.setattr(view.zotero, "import_library", import_library)
-    monkeypatch.setattr(view.task_service, "get_tasks_by_ids", lambda ids: [{"id": 12, "status": "processing", "progress": 25}])
+    task_statuses = iter(("processing", "completed"))
+    monkeypatch.setattr(view.task_service, "get_tasks_by_ids", lambda ids: [
+        {"id": 12, "status": next(task_statuses), "progress": 25}
+    ])
     monkeypatch.setattr(view.file_service, "get_file_by_id", lambda file_id: {"status": "pending"})
+    timers = []
+
+    def make_timer(interval, callback):
+        timer = SimpleNamespace(interval=interval, callback=callback, is_deleted=False, cancelled=False)
+        timer.cancel = lambda: setattr(timer, "cancelled", True)
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(view.ui, "timer", make_timer)
     async def open_import():
         with container:
             await bench.import_dialog(item_keys=[PAPER["key"]])
@@ -179,6 +191,10 @@ def test_zotero_import_uses_selected_available_attachments_once(workbench, monke
                       "server_id": "SRVTEST1", "max_items": 50}]
     assert any("processing" in label and "25%" in label for label in _labels(dialog))
     assert t("zotero.accepted_hint") in _labels(dialog)
+    assert len(timers) == 1 and timers[0].interval == 2.0
+    _run(timers[0].callback)
+    assert any("completed" in label for label in _labels(dialog))
+    assert timers[0].cancelled
 
 
 def test_zotero_note_preview_locks_instance_and_apply_only_uses_plan(workbench, monkeypatch):

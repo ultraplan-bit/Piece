@@ -8,6 +8,7 @@ import logging
 import os
 import secrets
 import shutil
+import time
 import urllib.parse
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -30,6 +31,43 @@ logger = logging.getLogger(__name__)
 API_VERSION = 1
 APP_VERSION = get_version()
 MAX_JSON_BYTES = 2 * 1024 * 1024
+
+
+class CliRequestTimingMiddleware:
+    """Log timings for CLI-tagged API requests without recording request data."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope["path"].startswith("/api/") \
+                or scope["path"] == "/api/v1/handshake":
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers", []))
+        if headers.get(b"x-piece-client") != b"cli":
+            await self.app(scope, receive, send)
+            return
+
+        started = time.perf_counter()
+        status_code = 500
+
+        async def log_send(message):
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+            await send(message)
+
+        try:
+            await self.app(scope, receive, log_send)
+        finally:
+            try:
+                route = scope.get("route")
+                path = getattr(route, "path", "/api/{unmatched}")
+                logger.info("[CLI] method=%s route=%r status=%d duration_ms=%.2f",
+                            scope["method"], path, status_code, (time.perf_counter() - started) * 1000)
+            except Exception:
+                pass
 
 
 def envelope(data=None, message="成功", *, code=None):
@@ -241,6 +279,9 @@ def create_api(runtime):
     from indexing.services import zotero_write_service
 
     app = FastAPI(title="Piece local API", version="1", docs_url=None, redoc_url=None, openapi_url=None)
+
+    # Add timing first so it wraps security checks and records rejected CLI requests too.
+    app.add_middleware(CliRequestTimingMiddleware)
     app.add_middleware(LocalSecurity, runtime=runtime)
 
     @app.exception_handler(BusinessError)
@@ -432,6 +473,7 @@ def create_api(runtime):
     register("knowledge/relation-search", "read", km.RelationSearchInput, knowledge.search_relations)
     register("knowledge/get", "read", km.GetInput, knowledge.get_record)
     register("knowledge/graph", "read", km.GraphInput, knowledge.graph)
+    register("knowledge/graph-overview", "read", km.GraphOverviewInput, knowledge.graph_overview)
     register("knowledge/references", "read", km.ReferencesInput, knowledge.references)
     register("knowledge/lint", "read", km.LintInput, knowledge.lint)
     register("knowledge/history", "read", km.HistoryInput, knowledge.history)

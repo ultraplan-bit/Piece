@@ -130,6 +130,7 @@ def test_real_nicegui_graph_forms_construct(knowledge_base, monkeypatch):
         workbench.graph = service.graph(root_id=oid, edge_types=["relation"])
         workbench.render_graph()
         assert workbench.chart._props["options"]["series"][0]["data"][0]["id"] == oid
+        assert workbench.chart._props["enable_3d"] is False
         assert "chart:click" in {listener.type for listener in workbench.chart._event_listeners.values()}
         # 画布铺满整栏：不写死像素高度，由 graph-canvas 的绝对定位吃掉剩余高度；
         # 关系表格收进默认收起的抽屉，展开时才占用画布高度。
@@ -240,6 +241,14 @@ def test_graph_zoom_dispatches_origin_and_filters_reload(knowledge_base, monkeyp
             assert len(scripts) == 1
             assert "graphRoam" in scripts[0] and "originX" in scripts[0] and "originY" in scripts[0]
 
+            # 全局球体的缩放是相机距离，不应调用局部图的 graphRoam。
+            workbench.graph = service.graph_overview()
+            scripts.clear()
+            await workbench.zoom_graph(1.25)
+            assert len(scripts) == 1 and "globe" in scripts[0] and "setOption" in scripts[0]
+            assert "graphRoam" not in scripts[0]
+            workbench.graph = service.graph(root_id=root, edge_types=["relation"])
+
             # 深度变化即重取子图：两跳多出「链端」。
             workbench.selected_object = root
             await workbench.reload_on_change("depth", 2)
@@ -297,6 +306,49 @@ def test_graph_relation_counts_native_clicks_and_review_candidates(knowledge_bas
         workbench.edge_table(workbench.graph)
         labels = [getattr(e, "text", "") for e in container.descendants()]
         assert "候选说明" in labels
+    container.delete()
+
+
+def test_graph_global_overview_switching_and_node_drilldown(knowledge_base, monkeypatch):
+    from nicegui import ui
+    from app.ui.views.graph_view import GraphWorkbench
+    from indexing.services import knowledge_service as service
+
+    monkeypatch.setattr(ui, "notify", lambda *args, **kwargs: None)
+    result = service.apply({"request_key": str(uuid4()), "reason": "test", "objects": [
+        {"ref": "hub", "kind": "concept", "title": "中心"},
+        {"ref": "leaf", "kind": "entity", "title": "叶子"}],
+        "relations": [{"ref": "edge", "source": {"ref": "hub"}, "target": {"ref": "leaf"},
+                       "predicate": "related_to", "description": "关联", "basis": "inference"}]})
+    hub, leaf = result["refs"]["hub"]["id"], result["refs"]["leaf"]["id"]
+    workbench = GraphWorkbench()
+    workbench.mode = "graph"
+    workbench.refresh_workspace = lambda: None
+    workbench.refresh_graph = lambda: None
+    container = ui.column()
+
+    async def scenario():
+        await workbench.show_global_graph()
+        with container:
+            workbench.render_graph()
+            assert workbench.chart is not None
+            chart = workbench.chart
+            assert chart._props["enable_3d"] is True
+            options = chart._props["options"]
+            assert options["series"][0]["type"] == "lines3D"
+            assert options["globe"]["viewControl"]["rotateSensitivity"] > 0
+        # render_graph installs a refreshable; this controller test has no NiceGUI server loop.
+        workbench.refresh_graph = lambda: None
+        assert workbench.overview and workbench.graph["overview"]
+        assert {node["id"] for node in workbench.graph["nodes"]} == {hub, leaf}
+        await workbench.graph_click(SimpleNamespace(args={"dataType": "node", "data": {"id": hub}}))
+        assert not workbench.overview and workbench.graph["root_id"] == hub
+        await workbench.show_global_graph()
+        await workbench.show_local_graph()
+        assert not workbench.overview and workbench.graph["root_id"] == hub
+
+    asyncio.run(scenario())
+    workbench.refresh_graph = lambda: None
     container.delete()
 
 

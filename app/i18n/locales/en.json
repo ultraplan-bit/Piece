@@ -88,8 +88,8 @@
     "new_file": "New document and indexing task",
     "preview_first": "Refresh the preview with the current options and select at least one available attachment.",
     "import_selected": "Import selected attachments",
-    "accepted_hint": "Accepted does not mean indexed. Check task terminal states; duplicates may still be processing or have errors.",
-    "refresh_status": "Refresh indexing status",
+    "accepted_hint": "Accepted does not mean indexed. Task status updates automatically; duplicates may still be processing or have errors.",
+    "refresh_status": "Refresh status now",
     "organize": "Organize tags and collections",
     "add_tags": "Add tags (one per line)",
     "remove_tags": "Remove tags (one per line)",
@@ -230,6 +230,7 @@
     "choose_root": "Choose an object, then select Center here.",
     "edge_required": "Select at least one edge type.",
     "graph_scope": "Bounded local connections only. Distance does not encode similarity, nor degree credibility. Dragging changes layout only.",
+    "overview_scope": "The overview prioritizes highly connected entities and is capped at 400 entities / 1,000 relations. Filter larger graphs or select an entity to explore locally.",
     "one_hop": "One hop",
     "two_hops": "Two hops",
     "predicate": "Relation type",
@@ -1090,6 +1091,10 @@
     "broken_link": "This record no longer exists or is invalid. Your previous reading is retained; go back and pick again.",
     "references": "Referenced by documents",
     "zoom_in": "Zoom in",
-    "zoom_out": "Zoom out"
+    "zoom_out": "Zoom out",
+    "global_graph": "Global overview",
+    "local_graph": "Local exploration",
+    "overview_count": "Showing {nodes}/{total_nodes} entities · {edges}/{total_edges} matching relations",
+    "overview_truncated": "Large graph: highly connected entities are prioritized. Filter or select an entity to explore locally."
   }
 }

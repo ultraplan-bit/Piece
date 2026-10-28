@@ -532,7 +532,7 @@ class ZoteroWorkbench:
         scope = {"item_keys" if item_keys is not None else "attachment_keys": list(keys)}
         server_id = self.server_id
         dialog, body = _dialog(t("zotero.preview_import"), "w-[840px] max-w-[94vw]")
-        state = {"preview": None, "selected": set(), "result": None}
+        state = {"preview": None, "selected": set(), "result": None, "timer": None, "polling": False}
 
         async def open_result(file_id):
             dialog.close()
@@ -599,38 +599,66 @@ class ZoteroWorkbench:
                     preview_button.disable()
                     import_button.disable()
                     options.set_visibility(False)
-                    await refresh_status()
+                    pending = await refresh_status()
+                    if pending is not False:
+                        state["timer"] = ui.timer(2.0, poll_status)
                 if self.refresh_files:
                     await self.refresh_files()
 
             async def refresh_status():
                 result = state["result"]
-                if not result:
-                    return
-                tasks = await self.call(task_service.get_tasks_by_ids, result["task_ids"]) if result["task_ids"] else []
-                files = {}
-                for row in result["items"]:
-                    file = await self.call(file_service.get_file_by_id, row["file_id"])
-                    if file:
-                        files[row["file_id"]] = file
-                if dialog.is_deleted:
-                    return
-                output.clear()
-                with output:
-                    ui.label(t("import.zotero_done", accepted=result["accepted_count"], duplicates=result["duplicate_count"],
-                               failed=result["failed_count"], skipped=result["skipped_count"])).classes("text-sm theme-text")
-                    ui.label(t("zotero.accepted_hint")).classes("text-xs theme-text-muted")
+                if not result or state["polling"]:
+                    return None
+                state["polling"] = True
+                try:
+                    tasks = await self.call(task_service.get_tasks_by_ids, result["task_ids"]) if result["task_ids"] else []
+                    if tasks is None:
+                        return None
+                    files = {}
                     for row in result["items"]:
-                        status = files.get(row["file_id"], {}).get("status", row.get("file_status", "missing"))
-                        ui.label(f"#{row['file_id']} · {row['filename']} · {t(f'file_status.{status}')}").classes("text-sm theme-text")
-                        if self.open_file:
-                            ui.button(t("zotero.open_piece"), on_click=partial(open_result, row["file_id"]), color=None).props("flat dense no-caps")
-                    for task in tasks or []:
-                        ui.label(f"#{task['id']} · {task['status']} · {task.get('progress', 0)}% · {task.get('error_message') or ''}").classes(
-                            "text-xs theme-text-secondary break-words")
-                    for failure in result["failures"]:
-                        ui.label(f"{failure.get('filename') or failure.get('attachment_key')} · {failure['reason']}").classes("text-xs theme-danger")
-                    ui.button(t("zotero.refresh_status"), on_click=refresh_status, color=None).props("flat dense no-caps")
+                        file = await self.call(file_service.get_file_by_id, row["file_id"])
+                        if file:
+                            files[row["file_id"]] = file
+                    if dialog.is_deleted:
+                        return None
+                    output.clear()
+                    with output:
+                        ui.label(t("import.zotero_done", accepted=result["accepted_count"], duplicates=result["duplicate_count"],
+                                   failed=result["failed_count"], skipped=result["skipped_count"])).classes("text-sm theme-text")
+                        if any(task["status"] in task_service.ACTIVE_STATUSES for task in tasks):
+                            ui.label(t("zotero.accepted_hint")).classes("text-xs theme-text-muted")
+                        for row in result["items"]:
+                            status = files.get(row["file_id"], {}).get("status", row.get("file_status", "missing"))
+                            ui.label(f"#{row['file_id']} · {row['filename']} · {t(f'file_status.{status}')}").classes("text-sm theme-text")
+                            if self.open_file:
+                                ui.button(t("zotero.open_piece"), on_click=partial(open_result, row["file_id"]), color=None).props("flat dense no-caps")
+                        for task in tasks:
+                            ui.label(f"#{task['id']} · {task['status']} · {task.get('progress', 0)}% · {task.get('error_message') or ''}").classes(
+                                "text-xs theme-text-secondary break-words")
+                        for failure in result["failures"]:
+                            ui.label(f"{failure.get('filename') or failure.get('attachment_key')} · {failure['reason']}").classes("text-xs theme-danger")
+                        ui.button(t("zotero.refresh_status"), on_click=refresh_status, color=None).props("flat dense no-caps")
+                    return any(task["status"] in task_service.ACTIVE_STATUSES for task in tasks)
+                finally:
+                    state["polling"] = False
+
+            async def poll_status():
+                if dialog.is_deleted:
+                    stop_status_polling()
+                    return
+                pending = await refresh_status()
+                if pending is False:
+                    stop_status_polling()
+                    if self.refresh_files:
+                        await self.refresh_files()
+
+            def stop_status_polling():
+                timer = state["timer"]
+                if timer is not None and not timer.is_deleted:
+                    timer.cancel()
+                state["timer"] = None
+
+            dialog.on("close", stop_status_polling)
             with ui.row().classes("w-full justify-end gap-2"):
                 preview_button = ui.button(t("import.preview"), on_click=preview, color=None).props("flat dense no-caps")
                 import_button = ui.button(t("zotero.import_selected"), on_click=import_selected).props("dense unelevated no-caps")

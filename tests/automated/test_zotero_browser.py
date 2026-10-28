@@ -46,12 +46,7 @@ def test_zotero_browser_read_import_and_confirmed_note(app_page):
     expect(dialog.get_by_role("checkbox")).to_be_checked()
     dialog.get_by_role("button", name=t("zotero.import_selected"), exact=True).click()
     expect(dialog.get_by_text(t("zotero.accepted_hint"), exact=True)).to_be_visible()
-    for _ in range(40):
-        dialog.get_by_role("button", name=t("zotero.refresh_status"), exact=True).click()
-        if t("file_status.indexed") in dialog.inner_text():
-            break
-        page.wait_for_timeout(250)
-    expect(dialog).to_contain_text(t("file_status.indexed"))
+    expect(dialog).to_contain_text(t("file_status.indexed"), timeout=10000)
     page.screenshot(path=str(service["path"] / "zotero-import-indexed.png"))
     dialog.get_by_role("button", name=t("knowledge.close"), exact=True).click()
 

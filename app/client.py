@@ -230,7 +230,8 @@ class PieceClient:
             self.handshake()
         if not self.api_key:
             raise ClientError("未找到 API 密钥；请设置 PIECE_API_KEY 或显式初始化配置", code="AUTH_REQUIRED")
-        return {"Authorization": f"Bearer {self.api_key}", "X-Piece-Target": self.expected_target_id}
+        return {"Authorization": f"Bearer {self.api_key}", "X-Piece-Target": self.expected_target_id,
+                "X-Piece-Client": "cli"}
 
     def request(self, method: str, path: str, payload: Any = None) -> dict[str, Any]:
         try:

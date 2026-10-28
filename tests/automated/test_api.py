@@ -1,6 +1,7 @@
 """真实 ASGI/SQLite 的本地 API 合同；不调用外部模型。"""
 
 import base64
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,25 @@ from fastapi.testclient import TestClient
 
 from app.api import create_api
 from app.runtime import BootstrapTokens
+
+
+def test_cli_api_timing_logs_only_marked_requests(api, caplog):
+    caplog.set_level(logging.INFO, logger="app.api")
+    body = {"name": "sensitive-name"}
+    assert api.post("/api/v1/file/list", json=body).status_code == 200
+    assert "[CLI]" not in caplog.text
+
+    marked = {"X-Piece-Client": "cli"}
+    assert api.post("/api/v1/file/list", json=body, headers=marked).status_code == 200
+    assert "[CLI] method=POST route='/api/v1/file/list' status=200 duration_ms=" in caplog.text
+    assert "sensitive-name" not in caplog.text
+
+    caplog.clear()
+    assert api.get("/api/v1/status", headers=marked).status_code == 200
+    assert "[CLI] method=GET route='/api/v1/status' status=200 duration_ms=" in caplog.text
+    caplog.clear()
+    assert api.get("/api/v1/handshake", headers=marked).status_code == 200
+    assert "[CLI]" not in caplog.text
 
 
 def test_identity_permissions_and_origin(api, knowledge_base):

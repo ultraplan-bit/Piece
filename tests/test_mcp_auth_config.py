@@ -70,8 +70,10 @@ def test_service_auth_rejects_cross_service_and_missing_keys(monkeypatch, servic
     settings.get_settings().mcp = settings.McpSettings(api_key="read", index_api_key="write")
     middleware = []
     auth.apply_bearer_auth(SimpleNamespace(add_middleware=middleware.append), service)
-    assert len(middleware) == 1
-    handler = getattr(middleware[0], method)
+    assert len(middleware) == 2
+    bearer = next(item for item in middleware if isinstance(item, auth.BearerAuthMiddleware))
+    assert isinstance(middleware[0], auth.CallTimingMiddleware)
+    handler = getattr(bearer, method)
     call_next = AsyncMock(return_value="allowed")
 
     for header in ("", f"Bearer {wrong}", "Basic abc", f"Bearer {correct}extra"):
@@ -85,13 +87,43 @@ def test_service_auth_rejects_cross_service_and_missing_keys(monkeypatch, servic
     call_next.assert_awaited_once()
 
 
+def test_call_timing_logs_status_without_arguments_or_exception_text(caplog):
+    caplog.set_level("INFO", logger=auth.__name__)
+    from fastmcp.tools.tool import ToolResult
+    from fastmcp.server.middleware import MiddlewareContext
+    from mcp.types import CallToolRequestParams
+
+    middleware = auth.CallTimingMiddleware("graph")
+    context = MiddlewareContext(message=CallToolRequestParams(
+        name="knowledge-search", arguments={"query": "private text"}))
+
+    async def business_error(context):
+        return ToolResult(structured_content={"success": False})
+
+    asyncio.run(middleware.on_call_tool(context, business_error))
+    assert "service='graph' tool='knowledge-search' status=business_error" in caplog.text
+    assert "duration_ms=" in caplog.text and "private text" not in caplog.text
+
+    caplog.clear()
+
+    async def failure(context):
+        _ = context
+        raise RuntimeError("private exception text")
+
+    with pytest.raises(RuntimeError, match="private exception"):
+        asyncio.run(middleware.on_call_tool(context, failure))
+    assert "status=error error_type=RuntimeError" in caplog.text
+    assert "private text" not in caplog.text and "private exception text" not in caplog.text
+
+
 def test_legacy_key_is_accepted_by_both_services(monkeypatch):
     settings.get_settings().mcp = settings.McpSettings(api_key="legacy")
     monkeypatch.setattr(auth, "get_http_headers", lambda: {"authorization": "Bearer legacy"})
     for service in ("retrieval", "index"):
         middleware = []
         auth.apply_bearer_auth(SimpleNamespace(add_middleware=middleware.append), service)
-        assert middleware[0]._verify_token()
+        assert isinstance(middleware[0], auth.CallTimingMiddleware)
+        assert next(item for item in middleware if isinstance(item, auth.BearerAuthMiddleware))._verify_token()
 
 
 @pytest.mark.parametrize("service", ["retrieval", "index"])
@@ -101,7 +133,7 @@ def test_auth_switch_disables_both_services(service):
     )
     middleware = []
     auth.apply_bearer_auth(SimpleNamespace(add_middleware=middleware.append), service)
-    assert not middleware
+    assert len(middleware) == 1 and isinstance(middleware[0], auth.CallTimingMiddleware)
     assert not settings.is_mcp_auth_enabled(service)
 
 

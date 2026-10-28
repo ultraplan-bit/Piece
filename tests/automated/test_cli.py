@@ -97,8 +97,11 @@ def test_file_name_and_stats_commands(endpoint, capsys):
     assert code == 0 and result["success"]
     assert endpoint.calls[-1]["payload"]["name"] == "100%_中文"
     assert endpoint.calls[-1]["payload"]["collections"] == ["论文"]
+    assert endpoint.calls[-1]["headers"]["X-Piece-Client"] == "cli"
+    assert "X-Piece-Client" not in next(call for call in endpoint.calls if call["path"] == "/api/v1/handshake")["headers"]
     code, result, _ = invoke(endpoint, capsys, "stats")
     assert code == 0 and endpoint.calls[-1]["path"] == "/api/v1/storage/stats"
+    assert result["success"]
 
 
 def test_collection_tree_parent_move_and_direct_scope_commands(endpoint, capsys):

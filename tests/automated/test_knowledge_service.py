@@ -527,6 +527,31 @@ def test_graph_budget_truncates_without_breaking_endpoints(knowledge_base):
         assert edge["source_id"] in node_ids and edge["target_id"] in node_ids
 
 
+def test_graph_overview_is_bounded_and_filters_edges(knowledge_base):
+    ids = _create_objects(
+        {"ref": "hub", "title": "中心"}, {"ref": "a", "title": "甲"},
+        {"ref": "b", "title": "乙"}, {"ref": "isolated", "title": "孤立"},
+    )
+    knowledge.apply(_batch(relations=[
+        {"ref": "supports", "source": {"id": ids[0]}, "target": {"id": ids[1]},
+         "predicate": "supports", "description": "支持", "basis": "explicit"},
+        {"ref": "related", "source": {"id": ids[0]}, "target": {"id": ids[2]},
+         "predicate": "related_to", "description": "关联", "basis": "inference"},
+    ]))
+    result = knowledge.graph_overview(max_nodes=4, max_edges=10, predicates=["supports"])
+    node_ids = {node["id"] for node in result["nodes"]}
+    assert result["overview"] and result["root_id"] in node_ids
+    assert node_ids == set(ids)
+    assert result["total_nodes"] == 4 and result["total_edges"] == 1
+    assert len(result["edges"]) == 1 and result["edges"][0]["predicate"] == "supports"
+    assert result["edges"][0]["source_id"] == ids[0] and result["edges"][0]["target_id"] == ids[1]
+
+    bounded = knowledge.graph_overview(max_nodes=2, max_edges=1)
+    node_ids = {node["id"] for node in bounded["nodes"]}
+    assert bounded["truncated"] and len(node_ids) <= 2 and len(bounded["edges"]) <= 1
+    assert all(edge["source_id"] in node_ids and edge["target_id"] in node_ids for edge in bounded["edges"])
+
+
 # --------------------------------------------------------------------------- #
 # 证据来源：本库校验、跨库、外部/用户与定位状态
 # --------------------------------------------------------------------------- #

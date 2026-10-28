@@ -52,6 +52,7 @@ class GraphWorkbench(WorkbenchBase):
         self.positions = {}
         self.viewport = {}
         self.depth = 1
+        self.overview = False
         self.edge_types = ["relation"]
         self.predicates = None
         self.relation_statuses = None
@@ -177,9 +178,11 @@ class GraphWorkbench(WorkbenchBase):
             if generation != self._selection:
                 return
         if self.mode == "graph":
-            if kind == "object" and not reveal:
-                # 从目录选中实体：以它为根刷新图谱，留在图谱标签，不切走。
+            if kind == "object" and (not reveal or self.overview):
+                # 从目录或全局概览选中实体：切回局部探索并以它为根刷新图谱。
+                self.overview = False
                 await self.load_graph(center=True)
+                self.refresh_workspace()
             else:
                 # 画布点选节点或边：图不动，切到「实体」标签读详情。
                 await self.set_mode("objects")
@@ -251,14 +254,18 @@ class GraphWorkbench(WorkbenchBase):
         self.refresh_modes()
         # 进入图谱标签时，让图与当前选中实体一致（尚无图或根不同都算），
         # 否则切过来只看到「先选一个实体」，还要手动点一次刷新范围。
-        if mode == "graph" and self.selected_object and (
-                center or self.graph is None or self.graph["root_id"] != self.selected_object):
-            await self.load_graph(center=True)
+        if mode == "graph":
+            if self.overview:
+                if center or self.graph is None or not self.graph.get("overview"):
+                    await self.load_overview(center=True)
+            elif self.selected_object and (
+                    center or self.graph is None or self.graph["root_id"] != self.selected_object):
+                await self.load_graph(center=True)
         self.refresh_workspace()
 
     # ---- 局部图探索 ----
     async def remember_positions(self):
-        if not self.chart or self.chart.is_deleted:
+        if not self.chart or self.chart.is_deleted or (self.graph and self.graph.get("overview")):
             return
         try:
             # 唯一插值为 NiceGUI 分配的整数元素 ID，绝不插入模型文本。
@@ -284,10 +291,11 @@ class GraphWorkbench(WorkbenchBase):
             pass
 
     async def load_graph(self, *, center=False, expand=False):
+        self.overview = False
         self._graph_generation += 1
         generation = self._graph_generation
         await self.remember_positions()
-        root = self.selected_object if center or self.graph is None else self.graph["root_id"]
+        root = self.selected_object if center or self.graph is None or self.graph.get("overview") else self.graph["root_id"]
         if not root:
             self.notify(self.text("choose_root"), type="info")
             return
@@ -304,6 +312,20 @@ class GraphWorkbench(WorkbenchBase):
                 self.viewport = {}
             self.refresh_graph()
 
+    async def load_overview(self, *, center=False):
+        self._graph_generation += 1
+        generation = self._graph_generation
+        await self.remember_positions()
+        incoming = await self.call(service.graph_overview, predicates=self.predicates,
+                                   statuses=self.relation_statuses)
+        if incoming and generation == self._graph_generation:
+            self.graph = incoming
+            self._graph_filters = (tuple(self.predicates or ()), tuple(self.relation_statuses or ()))
+            if center:
+                self.positions = {}
+                self.viewport = {}
+            self.refresh_graph()
+
     async def graph_click(self, event):
         data = event.args.get("data")
         if not isinstance(data, dict) or not self.graph:
@@ -313,22 +335,36 @@ class GraphWorkbench(WorkbenchBase):
             if edge:
                 await self.select("relation", edge["id"])
         elif any(n["id"] == data.get("id") for n in self.graph["nodes"]):
-            # 画布点击是探索意图：切到「实体」标签看详情，不重排当前这张图。
-            await self.select("object", data["id"], reveal=True)
+            # 全局概览点选节点直接切入以该节点为根的局部图。
+            if self.overview:
+                await self.select("object", data["id"])
+            else:
+                # 画布点击是探索意图：切到「实体」标签看详情，不重排当前这张图。
+                await self.select("object", data["id"], reveal=True)
 
     def render_graph(self):
         # 范围与视图控件收成一条工具条；画布吃掉整栏剩余高度，控件不再挤压图。
         with ui.row().classes("graph-toolbar w-full items-center gap-1 px-3 py-1 flex-nowrap overflow-x-auto"):
-            ui.select({1: self.text("one_hop"), 2: self.text("two_hops")}, value=self.depth,
-                      on_change=lambda e: self.reload_on_change("depth", e.value)).props("dense outlined").classes("graph-control shrink-0")
-            ui.select(self.choices(PREDICATES), label=self.text("predicate"), value=self.predicates, multiple=True, clearable=True,
-                      on_change=lambda e: self.reload_on_change("predicates", e.value or None)).props("dense outlined").classes("graph-control shrink-0")
-            ui.select(self.choices(STATUSES), label=self.text("status"), value=self.relation_statuses, multiple=True, clearable=True,
-                      on_change=lambda e: self.reload_on_change("relation_statuses", e.value or None)).props("dense outlined").classes("graph-control shrink-0")
-            ui.button(self.text("refresh"), on_click=self.load_graph).props("flat dense no-caps shrink-0")
-            ui.button(self.text("center"), on_click=partial(self.load_graph, center=True)).props("flat dense no-caps shrink-0")
-            ui.button(self.text("expand"), on_click=partial(self.load_graph, expand=True)).props("flat dense no-caps shrink-0")
-            ui.button(self.text("reset_view"), on_click=self.reset_graph_view).props("flat dense no-caps shrink-0")
+            if self.overview:
+                ui.button(self.text("local_graph"), on_click=self.show_local_graph).props("flat dense no-caps shrink-0")
+                ui.select(self.choices(PREDICATES), label=self.text("predicate"), value=self.predicates, multiple=True, clearable=True,
+                          on_change=lambda e: self.reload_on_change("predicates", e.value or None)).props("dense outlined").classes("graph-control shrink-0")
+                ui.select(self.choices(STATUSES), label=self.text("status"), value=self.relation_statuses, multiple=True, clearable=True,
+                          on_change=lambda e: self.reload_on_change("relation_statuses", e.value or None)).props("dense outlined").classes("graph-control shrink-0")
+                ui.button(self.text("refresh"), on_click=self.load_overview).props("flat dense no-caps shrink-0")
+                ui.button(self.text("reset_view"), on_click=self.reset_graph_view).props("flat dense no-caps shrink-0")
+            else:
+                ui.button(self.text("global_graph"), on_click=self.show_global_graph).props("flat dense no-caps shrink-0")
+                ui.select({1: self.text("one_hop"), 2: self.text("two_hops")}, value=self.depth,
+                          on_change=lambda e: self.reload_on_change("depth", e.value)).props("dense outlined").classes("graph-control shrink-0")
+                ui.select(self.choices(PREDICATES), label=self.text("predicate"), value=self.predicates, multiple=True, clearable=True,
+                          on_change=lambda e: self.reload_on_change("predicates", e.value or None)).props("dense outlined").classes("graph-control shrink-0")
+                ui.select(self.choices(STATUSES), label=self.text("status"), value=self.relation_statuses, multiple=True, clearable=True,
+                          on_change=lambda e: self.reload_on_change("relation_statuses", e.value or None)).props("dense outlined").classes("graph-control shrink-0")
+                ui.button(self.text("refresh"), on_click=self.load_graph).props("flat dense no-caps shrink-0")
+                ui.button(self.text("center"), on_click=partial(self.load_graph, center=True)).props("flat dense no-caps shrink-0")
+                ui.button(self.text("expand"), on_click=partial(self.load_graph, expand=True)).props("flat dense no-caps shrink-0")
+                ui.button(self.text("reset_view"), on_click=self.reset_graph_view).props("flat dense no-caps shrink-0")
             # 缩放按倍率作用于画布；画布铺满后仍可放大看局部。
             ui.button(icon="zoom_in", on_click=partial(self.zoom_graph, 1.25)).props(
                 f'flat dense round size=sm aria-label="{self.text("zoom_in")}"'
@@ -336,26 +372,33 @@ class GraphWorkbench(WorkbenchBase):
             ui.button(icon="zoom_out", on_click=partial(self.zoom_graph, 0.8)).props(
                 f'flat dense round size=sm aria-label="{self.text("zoom_out")}"'
             ).tooltip(self.text("zoom_out"))
-            help_hint(self.text("graph_scope"))
+            help_hint(self.text("overview_scope" if self.overview else "graph_scope"))
         with ui.element("div").classes("graph-stage w-full flex-1 min-h-0"):
             @ui.refreshable
             def graph_body():
-                if self.graph is None:
+                if self.graph is None or not self.graph["nodes"]:
                     with ui.column().classes("absolute inset-0 items-center justify-center"):
-                        ui.label(self.text("choose_root")).classes("theme-text-muted")
+                        ui.label(self.text("empty" if self.overview else "choose_root")).classes("theme-text-muted")
                     return
                 data = self.graph
                 with ui.column().classes("graph-stats items-end gap-0"):
-                    ui.label(self.text("graph_count", nodes=len(data["nodes"]), edges=len(data["edges"]),
-                                      depth=data["depth"])).classes("text-xs theme-text-muted")
-                    if data["truncated"]:
-                        ui.label(self.text("truncated")).classes("text-xs font-semibold theme-text")
+                    if data.get("overview"):
+                        ui.label(self.text("overview_count", nodes=len(data["nodes"]), edges=len(data["edges"]),
+                                          total_nodes=data["total_nodes"], total_edges=data["total_edges"])).classes("text-xs theme-text-muted")
+                        if data["truncated"]:
+                            ui.label(self.text("overview_truncated")).classes("text-xs font-semibold theme-text")
+                    else:
+                        ui.label(self.text("graph_count", nodes=len(data["nodes"]), edges=len(data["edges"]),
+                                          depth=data["depth"])).classes("text-xs theme-text-muted")
+                        if data["truncated"]:
+                            ui.label(self.text("truncated")).classes("text-xs font-semibold theme-text")
                 options = graph_options(data, dark=bool(self.dark()), selected=self.selected_object,
                                         positions=self.positions, label=self.text)
-                options["series"][0].update(self.viewport)
-                self.positions.update({n["id"]: (n["x"], n["y"]) for n in options["series"][0]["data"]})
+                if not data.get("overview"):
+                    options["series"][0].update(self.viewport)
+                    self.positions.update({n["id"]: (n["x"], n["y"]) for n in options["series"][0]["data"]})
                 # 3.3.1 的 on_point_click 强制读取 value；无数值的图节点/边须用原生事件。
-                self.chart = ui.echart(options).classes("graph-canvas min-w-0")
+                self.chart = ui.echart(options, enable_3d=bool(data.get("overview"))).classes("graph-canvas min-w-0")
                 self.chart.on("chart:click", self.graph_click, ["data", "dataType"])
             graph_body_refresh = graph_body.refresh
             graph_body()
@@ -375,28 +418,48 @@ class GraphWorkbench(WorkbenchBase):
             self.refresh_edge_table()
         self.refresh_graph = refresh_all
 
+    async def show_global_graph(self):
+        self.overview = True
+        await self.load_overview(center=True)
+        self.refresh_workspace()
+
+    async def show_local_graph(self):
+        self.overview = False
+        if self.selected_object:
+            await self.load_graph(center=True)
+        else:
+            self.graph = None
+        self.refresh_workspace()
+
     async def reload_on_change(self, name, value):
-        """深度或筛选条件变化即重取当前根的子图，不用再手动点一次刷新范围。"""
+        """筛选变化即重取当前全局概览或局部邻域。"""
         setattr(self, name, value)
-        await self.load_graph()
+        if self.overview:
+            await self.load_overview()
+        else:
+            await self.load_graph()
 
     async def zoom_graph(self, factor):
-        """按倍率缩放画布。
-
-        graphRoam 的 zoom 是相对倍率而非目标值，且必须同时给出缩放原点：
-        只给 zoom 时 roam 控制器算不出中心，会把它写成 NaN，之后连滚轮缩放也失效。
-        ECharts 自己的滚轮处理同样是 zoom 与 originX/originY 一起派发的。
-        """
+        """按倍率缩放 2D 图或调整 3D 球体相机距离。"""
         if not self.chart or self.chart.is_deleted:
             return
-        # 唯一插值为 NiceGUI 分配的整数元素 ID 与浮点倍率，绝不插入模型文本。
         ratio = float(factor)
         try:
-            await ui.run_javascript(f"""(() => {{
-                const chart = getElement({self.chart.id}).chart;
-                chart.dispatchAction({{type: 'graphRoam', zoom: {ratio},
-                                       originX: chart.getWidth() / 2, originY: chart.getHeight() / 2}});
-            }})()""")
+            if self.graph and self.graph.get("overview"):
+                await ui.run_javascript(f"""(() => {{
+                    const chart = getElement({self.chart.id}).chart;
+                    const current = chart.getOption().globe[0].viewControl.distance || 170;
+                    chart.setOption({{globe: {{viewControl: {{
+                        distance: Math.max(30, Math.min(400, current / {ratio}))
+                    }}}}}});
+                }})()""")
+            else:
+                # graphRoam 的 zoom 是相对倍率，必须同时给缩放原点。
+                await ui.run_javascript(f"""(() => {{
+                    const chart = getElement({self.chart.id}).chart;
+                    chart.dispatchAction({{type: 'graphRoam', zoom: {ratio},
+                                           originX: chart.getWidth() / 2, originY: chart.getHeight() / 2}});
+                }})()""")
         except (TimeoutError, RuntimeError):
             # 断线时放弃这次缩放；缩放从不触发业务写入。
             pass
@@ -404,6 +467,15 @@ class GraphWorkbench(WorkbenchBase):
     def reset_graph_view(self):
         self.positions = {}
         self.viewport = {}
+        if self.graph and self.graph.get("overview") and self.chart and not self.chart.is_deleted:
+            try:
+                ui.run_javascript(f"""(() => {{
+                    const chart = getElement({self.chart.id}).chart;
+                    chart.setOption({{globe: {{viewControl: {{alpha: 22, beta: 35,
+                        distance: 170, center: [0, 0, 0]}}}}}});
+                }})()""")
+            except (TimeoutError, RuntimeError):
+                pass
         self.refresh_graph()
 
     def edge_table(self, graph, edges=None):

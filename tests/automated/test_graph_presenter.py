@@ -51,6 +51,24 @@ def test_graph_ids_direction_parallel_edges_and_safe_tooltips(dark):
     assert filtered["data"][1]["itemStyle"] == series["data"][1]["itemStyle"]
 
 
+def test_overview_uses_interactive_three_dimensional_sphere():
+    graph = sample_graph()
+    graph.update(overview=True, total_nodes=2, total_edges=2)
+    options = graph_options(graph)
+
+    assert options["globe"]["globeRadius"] == 82
+    assert options["globe"]["show"] is False
+    assert options["globe"]["viewControl"]["rotateSensitivity"] > 0
+    assert [series["type"] for series in options["series"]] == ["lines3D", "scatter3D", "scatter3D"]
+    assert all(series["coordinateSystem"] == "globe" for series in options["series"])
+    assert len(options["series"][0]["data"]) == 2
+    nodes = [item for series in options["series"][1:] for item in series["data"]]
+    assert {node["id"] for node in nodes} == {node["id"] for node in graph["nodes"]}
+    assert all(-180 <= node["value"][0] <= 180 and -90 <= node["value"][1] <= 90
+               and node["value"][2] == 1 for node in nodes)
+    assert options["tooltip"]["enterable"] is False
+
+
 def test_graph_expansion_obeys_combined_budget_and_keeps_positions():
     current = sample_graph()
     current["max_nodes"], current["max_edges"] = 2, 2

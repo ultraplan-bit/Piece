@@ -102,7 +102,8 @@ def test_api_knowledge_read_write_permissions(api):
     _post(api, "knowledge/apply", **committed)
     reads = {
         "list": {}, "search": {"query": "概念"}, "relation-search": {"query": "概念"}, "get": {"kind": "object", "id": oid},
-        "graph": {"root_id": oid}, "references": {"source_library_id": library_id, "source_file_id": 1},
+        "graph": {"root_id": oid}, "graph-overview": {},
+        "references": {"source_library_id": library_id, "source_file_id": 1},
         "lint": {"object_ids": [oid]}, "history": {"kind": "object", "id": oid},
         "request": {"request_key": committed["request_key"]},
     }

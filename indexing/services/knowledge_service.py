@@ -569,6 +569,64 @@ def graph(**kwargs):
                 "hint": "仅返回有界局部邻域；可选择返回节点继续展开，计数不是全图总数"}
 
 
+def graph_overview(**kwargs):
+    """返回按关联度优先采样的全库图概览；节点与关系均有硬上限。"""
+    query = _validate(models.GraphOverviewInput, kwargs)
+    filters, params = "", []
+    for field, values in (("predicate", query.predicates), ("status", query.statuses)):
+        if values is not None:
+            filters += f" AND {field} IN ({','.join('?' for _ in values)})" if values else " AND 0"
+            params.extend(values)
+
+    with get_db_cursor() as cursor:
+        cursor.execute("BEGIN")
+        total_nodes = cursor.execute("SELECT COUNT(*) FROM knowledge_objects").fetchone()[0]
+        total_edges = cursor.execute("SELECT COUNT(*) FROM knowledge_relations WHERE 1=1" + filters,
+                                     params).fetchone()[0]
+        # 高关联节点优先，避免大库截断时只看到任意 UUID 子集；孤立节点仍补入剩余名额。
+        rows = cursor.execute(
+            "WITH selected_relations AS (SELECT source_id,target_id FROM knowledge_relations WHERE 1=1" + filters + "),"
+            " degrees AS (SELECT object_id,COUNT(*) AS degree FROM ("
+            "SELECT source_id AS object_id FROM selected_relations UNION ALL "
+            "SELECT target_id AS object_id FROM selected_relations) GROUP BY object_id),"
+            " selected_nodes AS (SELECT o.id,COALESCE(d.degree,0) AS degree FROM knowledge_objects o "
+            "LEFT JOIN degrees d ON d.object_id=o.id ORDER BY degree DESC,o.id LIMIT ?) "
+            "SELECT o." + SUMMARY_COLUMNS.replace(",", ",o.") + " FROM selected_nodes s "
+            "JOIN knowledge_objects o ON o.id=s.id ORDER BY s.degree DESC,o.id",
+            [*params, query.max_nodes + 1],
+        ).fetchall()
+        truncated = total_nodes > query.max_nodes or total_edges > query.max_edges
+        nodes = [dict(row) for row in rows[:query.max_nodes]]
+        node_ids = {node["id"] for node in nodes}
+        edges = []
+        if node_ids:
+            ordered_ids = sorted(node_ids)
+            placeholders = ",".join("?" for _ in ordered_ids)
+            rows = cursor.execute(
+                "SELECT * FROM knowledge_relations WHERE source_id IN (" + placeholders + ") AND target_id IN (" +
+                placeholders + ")" + filters + " ORDER BY id LIMIT ?",
+                [*ordered_ids, *ordered_ids, *params, query.max_edges + 1],
+            ).fetchall()
+            if len(rows) > query.max_edges:
+                truncated = True
+            edges = [dict(row) for row in rows[:query.max_edges]]
+            titles = {node["id"]: node["title"] for node in nodes}
+            counts = dict(cursor.execute(
+                f"SELECT relation_id,COUNT(*) FROM knowledge_evidence WHERE relation_id IN ({','.join('?' for _ in edges)}) GROUP BY relation_id",
+                [edge["id"] for edge in edges],
+            ).fetchall()) if edges else {}
+            for edge in edges:
+                edge["kind"] = "relation"
+                edge["symmetric"] = edge["predicate"] in SYMMETRIC
+                edge["evidence_count"] = counts.get(edge["id"], 0)
+                edge["display"] = _relation_display(edge, titles)
+        return {"library_id": _library_id(cursor), "root_id": nodes[0]["id"] if nodes else None, "nodes": nodes, "edges": edges,
+                "overview": True, "truncated": truncated, "depth": 0,
+                "max_nodes": query.max_nodes, "max_edges": query.max_edges,
+                "total_nodes": total_nodes, "total_edges": total_edges,
+                "hint": "全库概览按关联度优先展示，节点与关系均受上限约束；截断时需筛选或从节点进入局部图"}
+
+
 def lint(**kwargs):
     query = _validate(models.LintInput, kwargs)
     where, args = "", []

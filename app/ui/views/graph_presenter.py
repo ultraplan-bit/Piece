@@ -122,7 +122,7 @@ def _label_position(x, y):
 
 def _overview_options(graph, *, dark, selected, label):
     """可旋转的 3D 球面全局概览。"""
-    surface, ink = ("#1a1a19", "#ffffff") if dark else ("#fcfcfb", "#0b0b0b")
+    surface, ink = ("#202226", "#e6e9ee") if dark else ("#ffffff", "#1f2328")
     adjacency = _adjacency(graph)
     degree = {node_id: len(neighbors) for node_id, neighbors in adjacency.items()}
     ordered = sorted(graph["nodes"], key=lambda node: (-degree.get(node["id"], 0), node["id"]))
@@ -141,11 +141,14 @@ def _overview_options(graph, *, dark, selected, label):
     for edge in graph["edges"]:
         edge_name = label(edge.get("predicate") or "relation")
         arrow = " ↔ " if edge.get("symmetric") else " → "
+        evidence = min(int(edge.get("evidence_count") or 0), 5)
         edges.append({"name": edge_name,
                       "coords": [points[edge["source_id"]], points[edge["target_id"]]],
                       "tooltip_text": names[edge["source_id"]] + arrow + names[edge["target_id"]] + " · " + edge_name,
-                      "lineStyle": {"color": "#93a6b4" if dark else "#718795", "opacity": 0.62,
-                                    "width": 1.2 + 0.7 * min(int(edge.get("evidence_count") or 0), 5)}})
+                      "lineStyle": {"color": "#87929c" if dark else "#77838e",
+                                    "opacity": 0.17 + 0.025 * evidence,
+                                    "width": 0.75 + 0.1 * evidence},
+                      "emphasis": {"lineStyle": {"opacity": 0.82, "width": 1.3}}})
 
     node_series = []
     for kind in KINDS:
@@ -155,18 +158,24 @@ def _overview_options(graph, *, dark, selected, label):
             if item["kind"] != kind:
                 continue
             node_id = item["id"]
+            is_selected = node_id == selected
             data.append({"id": node_id, "name": item["title"], "value": points[node_id],
                          "symbolSize": _node_size(degree.get(node_id, 0)) * 0.72,
                          "tooltip_text": item["title"] + " · " + label(kind),
-                         "label": {"show": node_id == selected or degree.get(node_id, 0) >= LABEL_MIN_DEGREE,
+                         "label": {"show": is_selected or degree.get(node_id, 0) >= LABEL_MIN_DEGREE,
                                    "formatter": "{b}",
                                    "textStyle": {"color": ink, "textBorderColor": surface, "textBorderWidth": 3}},
-                         "itemStyle": {"color": PALETTES[dark][color], "borderColor": surface, "borderWidth": 1}})
+                         "itemStyle": {"color": PALETTES[dark][color],
+                                       "borderColor": ink if is_selected else surface,
+                                       "borderWidth": 1.6 if is_selected else 0.8}})
         node_series.append({"name": label(kind), "type": "scatter3D", "symbol": symbol,
                             "data": data, "label": {"show": True},
-                            "emphasis": {"label": {"show": True, "textStyle": {"color": ink}}}})
+                            "emphasis": {"itemStyle": {"borderColor": ink, "borderWidth": 1.6},
+                                         "label": {"show": True, "textStyle": {"color": ink}}}})
 
-    return {"backgroundColor": surface, "animation": False,
+    return {"backgroundColor": surface, "animation": True,
+            "animationDuration": 180, "animationDurationUpdate": 420,
+            "animationEasingUpdate": "cubicOut",
             "tooltip": {"renderMode": "html", "enterable": False, "confine": True,
                         "extraCssText": "max-width:320px;white-space:normal;overflow-wrap:anywhere",
                         ":formatter": "p => { const el = document.createElement('div'); el.textContent = p.data.tooltip_text || ''; return el; }"},
@@ -175,12 +184,13 @@ def _overview_options(graph, *, dark, selected, label):
             "globe": {"globeRadius": 82, "globeOuterRadius": 82, "show": False,
                       "environment": "none", "baseColor": surface,
                       "viewControl": {"autoRotate": False, "alpha": 22, "beta": 35,
-                                      "distance": 170, "rotateSensitivity": 1,
+                                      "animationDurationUpdate": 320, "animationEasingUpdate": "cubicOut",
+                                      "damping": 0.86, "distance": 170, "rotateSensitivity": 0.9,
                                       "rotateMouseButton": "left", "panMouseButton": "right",
-                                      "zoomSensitivity": 1, "panSensitivity": 0}},
+                                      "zoomSensitivity": 0.9, "panSensitivity": 0}},
             "series": [{"type": "lines3D", "coordinateSystem": "globe", "polyline": True,
                         "silent": True, "data": edges,
-                        "lineStyle": {"color": "#93a6b4" if dark else "#718795", "opacity": 0.62, "width": 1}},
+                        "lineStyle": {"color": "#87929c" if dark else "#77838e", "opacity": 0.22, "width": 0.8}},
                       *[{**series, "coordinateSystem": "globe", "silent": False}
                         for series in node_series]]}
 
@@ -189,7 +199,7 @@ def graph_options(graph, *, dark=False, selected=None, positions=None, label=lam
     """分层环布局；用户拖动过的位置优先，避免重绘把手工摆放冲掉。"""
     if graph.get("overview"):
         return _overview_options(graph, dark=dark, selected=selected, label=label)
-    surface, ink = ("#1a1a19", "#ffffff") if dark else ("#fcfcfb", "#0b0b0b")
+    surface, ink = ("#202226", "#e6e9ee") if dark else ("#ffffff", "#1f2328")
     adjacency = _adjacency(graph)
     degree = {node_id: len(neighbors) for node_id, neighbors in adjacency.items()}
     layers = _depth_layers(graph, adjacency)
@@ -203,10 +213,12 @@ def graph_options(graph, *, dark=False, selected=None, positions=None, label=lam
         color, symbol = TYPE_MARKS[item["kind"]]
         x, y = override.get(node_id, computed.get(node_id, (0.0, 0.0)))
         size = _node_size(degree.get(node_id, 0))
-        labeled = show_all_labels or node_id in (selected, graph["root_id"]) or degree.get(node_id, 0) >= LABEL_MIN_DEGREE
+        is_selected = node_id == selected
+        labeled = show_all_labels or is_selected or node_id == graph["root_id"] or degree.get(node_id, 0) >= LABEL_MIN_DEGREE
         nodes.append({"id": node_id, "name": item["title"], "category": KINDS.index(item["kind"]),
                       "symbol": symbol, "symbolSize": size, "x": x, "y": y,
-                      "itemStyle": {"color": PALETTES[dark][color], "borderColor": surface, "borderWidth": 2},
+                      "itemStyle": {"color": PALETTES[dark][color], "borderColor": surface,
+                                    "borderWidth": 1.5},
                       # 文字描边光晕代替实心底块：标签压在连线上仍可读，又不遮挡图形。
                       "label": {"show": labeled, "color": ink, "position": _label_position(x, y),
                                 "distance": 6, "width": 160, "overflow": "truncate",
@@ -220,13 +232,14 @@ def graph_options(graph, *, dark=False, selected=None, positions=None, label=lam
         pairs[pair] = ordinal + 1
         edge_name = label(edge.get("predicate") or "relation")
         arrow = " ↔ " if edge.get("symmetric") else " → "
-        # 证据越多线越粗：边是断言，支持它的来源越多就越实。
-        weight = 1.2 + 0.7 * min(int(edge.get("evidence_count") or 0), 5)
         edges.append({"id": edge["id"], "source": edge["source_id"], "target": edge["target_id"], "name": edge_name,
                       "symbol": ["none", "none" if edge.get("symmetric") else "arrow"],
-                      "lineStyle": {"width": weight, "opacity": 0.55, "curveness": 0.12 + ordinal * 0.12, "type": "solid"},
+                      "lineStyle": {"width": 0.9, "opacity": 0.42, "curveness": 0.12 + ordinal * 0.12,
+                                    "type": "solid", "color": "#8b9299" if dark else "#7b858e"},
                       "tooltip_text": names[edge["source_id"]] + arrow + names[edge["target_id"]] + " · " + edge_name})
-    return {"backgroundColor": surface, "animation": False,
+    return {"backgroundColor": surface, "animation": True,
+            "animationDuration": 160, "animationDurationUpdate": 320,
+            "animationEasingUpdate": "cubicOut",
             # HTML tooltip 支持点击穿透；只返回 textContent 节点，模型文本不能成为 HTML。
             "tooltip": {"renderMode": "html", "enterable": False, "confine": True,
                         "extraCssText": "max-width:320px;white-space:normal;overflow-wrap:anywhere",
@@ -244,8 +257,10 @@ def graph_options(graph, *, dark=False, selected=None, positions=None, label=lam
                         "labelLayout": {"hideOverlap": True},
                         "categories": [{"name": label(k), "symbol": TYPE_MARKS[k][1],
                                         "itemStyle": {"color": PALETTES[dark][TYPE_MARKS[k][0]]}} for k in KINDS],
-                        "emphasis": {"focus": "adjacency", "label": {"show": True, "color": ink}},
-                        "lineStyle": {"color": "#898781"}}]}
+                        "emphasis": {"focus": "adjacency", "label": {"show": True, "color": ink},
+                                     "lineStyle": {"opacity": 0.85, "width": 1.6}},
+                        "blur": {"itemStyle": {"opacity": 0.34}, "lineStyle": {"opacity": 0.12}},
+                        "lineStyle": {"color": "#8b9299" if dark else "#7b858e", "opacity": 0.42}}]}
 
 
 def merge_graph(current, incoming):

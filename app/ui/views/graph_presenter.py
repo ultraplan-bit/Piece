@@ -121,20 +121,20 @@ def _label_position(x, y):
 
 
 def _overview_options(graph, *, dark, selected, label):
-    """可旋转的 3D 球面全局概览。"""
+    """可旋转的 3D 球面全局概览，隐藏球面外壳。"""
     surface, ink = ("#202226", "#e6e9ee") if dark else ("#ffffff", "#1f2328")
     adjacency = _adjacency(graph)
     degree = {node_id: len(neighbors) for node_id, neighbors in adjacency.items()}
-    ordered = sorted(graph["nodes"], key=lambda node: (-degree.get(node["id"], 0), node["id"]))
-    count = max(1, len(ordered))
-    points = {}
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    focus = selected if selected in nodes else max(nodes, key=lambda node_id: (degree[node_id], node_id), default=None)
+    ordered = sorted((node for node in graph["nodes"] if node["id"] != focus), key=lambda node: node["id"])
+    count = len(ordered)
+    points = {focus: (0.0, 0.0, 1)} if focus else {}
     for index, item in enumerate(ordered):
-        depth = 1 - 2 * (index + 0.5) / count
-        angle = index * math.pi * (3 - math.sqrt(5))
+        depth = 1 - 2 * (index + 0.5) / max(1, count)
+        angle = (index + 0.5) * math.pi * (3 - math.sqrt(5))
         longitude = (math.degrees(angle) + 180) % 360 - 180
         points[item["id"]] = (longitude, math.degrees(math.asin(depth)), 1)
-    if len(ordered) == 1:
-        points[ordered[0]["id"]] = (0.0, 0.0, 1)
 
     names = {node["id"]: node["title"] for node in graph["nodes"]}
     edges = []
@@ -142,9 +142,10 @@ def _overview_options(graph, *, dark, selected, label):
         edge_name = label(edge.get("predicate") or "relation")
         arrow = " ↔ " if edge.get("symmetric") else " → "
         evidence = min(int(edge.get("evidence_count") or 0), 5)
+        source, target = edge["source_id"], edge["target_id"]
         edges.append({"name": edge_name,
-                      "coords": [points[edge["source_id"]], points[edge["target_id"]]],
-                      "tooltip_text": names[edge["source_id"]] + arrow + names[edge["target_id"]] + " · " + edge_name,
+                      "coords": [points[source], points[target]],
+                      "tooltip_text": names[source] + arrow + names[target] + " · " + edge_name,
                       "lineStyle": {"color": "#87929c" if dark else "#77838e",
                                     "opacity": 0.17 + 0.025 * evidence,
                                     "width": 0.75 + 0.1 * evidence},
@@ -158,16 +159,16 @@ def _overview_options(graph, *, dark, selected, label):
             if item["kind"] != kind:
                 continue
             node_id = item["id"]
-            is_selected = node_id == selected
+            is_focus = node_id == focus
             data.append({"id": node_id, "name": item["title"], "value": points[node_id],
-                         "symbolSize": _node_size(degree.get(node_id, 0)) * 0.72,
+                         "symbolSize": _node_size(degree.get(node_id, 0)) * (1.15 if is_focus else 0.72),
                          "tooltip_text": item["title"] + " · " + label(kind),
-                         "label": {"show": is_selected or degree.get(node_id, 0) >= LABEL_MIN_DEGREE,
+                         "label": {"show": is_focus or degree.get(node_id, 0) >= LABEL_MIN_DEGREE,
                                    "formatter": "{b}",
                                    "textStyle": {"color": ink, "textBorderColor": surface, "textBorderWidth": 3}},
                          "itemStyle": {"color": PALETTES[dark][color],
-                                       "borderColor": ink if is_selected else surface,
-                                       "borderWidth": 1.6 if is_selected else 0.8}})
+                                       "borderColor": ink if is_focus else surface,
+                                       "borderWidth": 2 if is_focus else 0.8}})
         node_series.append({"name": label(kind), "type": "scatter3D", "symbol": symbol,
                             "data": data, "label": {"show": True},
                             "emphasis": {"itemStyle": {"borderColor": ink, "borderWidth": 1.6},

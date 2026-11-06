@@ -53,6 +53,52 @@ class Input(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class ScopedInput(Input):
+    graph_id: Uuid | None = None
+
+
+class GraphCreateInput(Input):
+    name: Title
+
+
+class GraphRenameInput(Input):
+    graph_id: Uuid
+    name: Title
+
+
+class GraphDeleteInput(Input):
+    graph_id: Uuid
+    confirmed: bool = False
+    impact_token: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
+
+    @model_validator(mode="after")
+    def confirmation_token(self):
+        if self.confirmed and self.impact_token is None:
+            raise ValueError("确认删除必须提供预览的 impact_token")
+        return self
+
+
+class ExportInput(ScopedInput):
+    format: Literal["json", "graphml"] = "json"
+
+
+class ImportInput(Input):
+    format: Literal["json", "graphml"]
+    document: str
+    target_graph_id: Uuid | None = None
+    graph_name: Title | None = None
+    dry_run: bool = True
+    confirmed: bool = False
+
+    @model_validator(mode="after")
+    def confirm_import(self):
+        if self.target_graph_id is not None and self.graph_name is not None:
+            raise ValueError("导入到已有图谱时不能提供 graph_name")
+        if not self.dry_run and not self.confirmed:
+            raise ValueError("正式导入必须确认")
+        return self
+
+
 class Target(Input):
     """已有记录用 id，新记录用批次 ref；不按标题猜测身份。"""
     id: Uuid | None = None
@@ -156,7 +202,7 @@ class EvidenceCreate(SourceInput):
         return self
 
 
-class ApplyInput(Input):
+class ApplyInput(ScopedInput):
     request_key: Key | None = None
     reason: Annotated[str, Field(min_length=1, max_length=2000), AfterValidator(nonblank)]
     objects: Annotated[list[ObjectCreate | ObjectUpdate], Field(max_length=20)] = Field(default_factory=list)
@@ -173,7 +219,7 @@ class ApplyInput(Input):
         return self
 
 
-class ListInput(Input):
+class ListInput(ScopedInput):
     kind: ObjectKind | None = None
     status: Status | None = None
     limit: Limit = 50
@@ -184,7 +230,7 @@ class SearchInput(ListInput):
     query: Annotated[str, Field(min_length=1, max_length=1000), AfterValidator(nonblank)]
 
 
-class RelationSearchInput(Input):
+class RelationSearchInput(ScopedInput):
     """按关系自身的描述与适用条件检索；status 可选，端点标题由服务实时读取。"""
     query: Annotated[str, Field(min_length=1, max_length=1000), AfterValidator(nonblank)]
     status: Status | None = None
@@ -192,7 +238,7 @@ class RelationSearchInput(Input):
     offset: Offset = 0
 
 
-class GetInput(Input):
+class GetInput(ScopedInput):
     """kind 省略时按 UUID 在实体/关系/证据三张表中探测；UUID 全局唯一，不会歧义。"""
     kind: RecordKind | None = None
     id: Uuid
@@ -200,7 +246,7 @@ class GetInput(Input):
     offset: Offset = 0
 
 
-class GraphInput(Input):
+class GraphInput(ScopedInput):
     root_id: Uuid
     depth: Literal[1, 2] = 1
     edge_types: Annotated[list[Literal["relation"]], Field(min_length=1, max_length=1)] = Field(default_factory=lambda: ["relation"])
@@ -210,34 +256,34 @@ class GraphInput(Input):
     max_edges: Annotated[int, Field(strict=True, ge=1, le=300)] = 300
 
 
-class GraphOverviewInput(Input):
+class GraphOverviewInput(ScopedInput):
     predicates: Annotated[list[Predicate], Field(max_length=7)] | None = None
     statuses: Annotated[list[Status], Field(max_length=3)] | None = None
     max_nodes: Annotated[int, Field(strict=True, ge=1, le=400)] = 400
     max_edges: Annotated[int, Field(strict=True, ge=1, le=1000)] = 1000
 
 
-class ReferencesInput(Input):
+class ReferencesInput(ScopedInput):
     source_library_id: Uuid
     source_file_id: PositiveInt
     limit: Limit = 50
     offset: Offset = 0
 
 
-class LintInput(Input):
+class LintInput(ScopedInput):
     object_ids: Annotated[list[Uuid], Field(max_length=100)] | None = None
     limit: Limit = 50
     offset: Offset = 0
 
 
-class HistoryInput(Input):
+class HistoryInput(ScopedInput):
     kind: Literal["object", "relation"]
     id: Uuid
     limit: Limit = 50
     offset: Offset = 0
 
 
-class RequestInput(Input):
+class RequestInput(ScopedInput):
     request_key: Key
 
 
@@ -262,7 +308,7 @@ class ChunkExtractInput(Input):
         return self
 
 
-class DeleteInput(Input):
+class DeleteInput(ScopedInput):
     kind: RecordKind
     id: Uuid
     expected_revision: PositiveInt | None = None

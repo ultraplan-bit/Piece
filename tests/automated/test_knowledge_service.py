@@ -527,6 +527,34 @@ def test_graph_budget_truncates_without_breaking_endpoints(knowledge_base):
         assert edge["source_id"] in node_ids and edge["target_id"] in node_ids
 
 
+def test_graph_space_delete_requires_preview_and_cascades_only_its_own_graph(knowledge_base):
+    default_graph = knowledge.list_graphs()["graphs"][0]
+    with pytest.raises(BusinessError, match="默认知识空间不可删除"):
+        knowledge.delete_graph(default_graph["id"])
+
+    created = knowledge.create_graph("待删除空间")
+    graph_id = created["id"]
+    knowledge.apply(_batch(graph_id=graph_id, objects=[{"ref": "a", "kind": "concept", "title": "待删实体"}],
+                           relations=[]))
+    entity_id = knowledge.list_objects(graph_id=graph_id, limit=10)["objects"][0]["id"]
+    knowledge.apply(_batch(graph_id=graph_id, evidence=[{
+        "object": {"id": entity_id}, "source_kind": "user", "quote": "保留到删除时",
+    }]))
+    preview = knowledge.delete_graph(graph_id)
+    assert preview["counts"] == {"entities": 1, "relations": 0, "evidence": 1, "history": 1, "requests": 2}
+    assert preview["committed"] is False
+    with pytest.raises(BusinessError, match="知识输入无效"):
+        knowledge.delete_graph(graph_id, confirmed=True)
+    with pytest.raises(BusinessError, match="已变化"):
+        knowledge.delete_graph(graph_id, confirmed=True, impact_token="0" * 64)
+    deleted = knowledge.delete_graph(graph_id, confirmed=True, impact_token=preview["impact_token"])
+    assert deleted["committed"] is True
+    assert knowledge.list_graphs()["graphs"] == [default_graph]
+    assert knowledge.list_objects(limit=10)["total"] == 0
+    with pytest.raises(BusinessError):
+        knowledge.list_objects(graph_id=graph_id, limit=10)
+
+
 def test_graph_overview_is_bounded_and_filters_edges(knowledge_base):
     ids = _create_objects(
         {"ref": "hub", "title": "中心"}, {"ref": "a", "title": "甲"},

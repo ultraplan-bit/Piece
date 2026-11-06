@@ -78,6 +78,22 @@ def test_wiki_list_recovery_is_read_only_and_filters(endpoint, capsys):
     assert code == 2
 
 
+def test_graph_spaces_delete_previews_and_requires_token_for_confirmation(endpoint, capsys):
+    graph_id = "00000000-0000-0000-0000-0000000000b2"
+    code, preview, _ = invoke(endpoint, capsys, "graph", "spaces", "delete", "--id", graph_id)
+    assert code == 0
+    assert endpoint.calls[-1]["path"] == "/api/v1/knowledge/graph-delete"
+    assert endpoint.calls[-1]["payload"] == {"graph_id": graph_id, "confirmed": False}
+    code, _, _ = invoke(endpoint, capsys, "graph", "spaces", "delete", "--id", graph_id, "--yes")
+    assert code == 1
+    assert endpoint.calls[-1]["payload"] == {"graph_id": graph_id, "confirmed": False}
+    token = "a" * 64
+    invoke(endpoint, capsys, "graph", "spaces", "delete", "--id", graph_id,
+           "--yes", "--impact-token", token)
+    assert endpoint.calls[-1]["payload"] == {
+        "graph_id": graph_id, "confirmed": True, "impact_token": token}
+
+
 def test_wiki_purge_recovery_previews_without_yes_and_confirms_with_yes(endpoint, capsys):
     code, _, _ = invoke(endpoint, capsys, "wiki", "purge-recovery")
     assert code == 0 and endpoint.calls[-1]["path"] == "/api/v1/wiki/purge-recovery"

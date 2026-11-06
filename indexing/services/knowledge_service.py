@@ -22,6 +22,257 @@ RELATION_FIELDS = ("source_id", "predicate", "target_id", "description", "qualif
 SUMMARY_COLUMNS = "id,kind,title,summary,status,revision,created_at,updated_at"
 
 
+def _graph_id(cursor, value=None):
+    if value is None:
+        row = cursor.execute("SELECT id FROM knowledge_graphs WHERE is_default=1").fetchone()
+        if row is None:
+            raise BusinessError("NOT_FOUND", "没有默认知识图谱")
+        return row["id"]
+    row = cursor.execute("SELECT id FROM knowledge_graphs WHERE id=?", (value,)).fetchone()
+    if row is None:
+        raise BusinessError("NOT_FOUND", f"知识图谱不存在：{value}")
+    return row["id"]
+
+
+def list_graphs():
+    with get_db_cursor() as cursor:
+        rows = cursor.execute("SELECT * FROM knowledge_graphs ORDER BY is_default DESC,name,id").fetchall()
+        return {"library_id": _library_id(cursor), "graphs": [dict(row) for row in rows]}
+
+
+@serialized_mutation
+def create_graph(name):
+    name = _validate(models.GraphCreateInput, {"name": name}).name
+    with get_db_cursor(write=True) as cursor:
+        graph_id = str(uuid4())
+        try:
+            cursor.execute("INSERT INTO knowledge_graphs(id,name) VALUES (?,?)", (graph_id, name))
+        except Exception as exc:
+            if "UNIQUE constraint failed" in str(exc):
+                raise BusinessError("KNOWLEDGE_CONFLICT", "同名知识图谱已存在") from exc
+            raise
+        return {"id": graph_id, "name": name, "is_default": 0}
+
+
+@serialized_mutation
+def rename_graph(graph_id, name):
+    data = _validate(models.GraphRenameInput, {"graph_id": graph_id, "name": name})
+    with get_db_cursor(write=True) as cursor:
+        _graph_id(cursor, data.graph_id)
+        try:
+            cursor.execute("UPDATE knowledge_graphs SET name=?,updated_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?",
+                           (data.name, data.graph_id))
+        except Exception as exc:
+            if "UNIQUE constraint failed" in str(exc):
+                raise BusinessError("KNOWLEDGE_CONFLICT", "同名知识图谱已存在") from exc
+            raise
+        return dict(cursor.execute("SELECT * FROM knowledge_graphs WHERE id=?", (data.graph_id,)).fetchone())
+
+
+@serialized_mutation
+def delete_graph(graph_id, *, confirmed=False, impact_token=None):
+    data = _validate(models.GraphDeleteInput, {
+        "graph_id": graph_id, "confirmed": confirmed, "impact_token": impact_token,
+    })
+    with get_db_cursor(write=True) as cursor:
+        cursor.execute("BEGIN IMMEDIATE")
+        _graph_id(cursor, data.graph_id)
+        graph = cursor.execute("SELECT id,name,is_default FROM knowledge_graphs WHERE id=?",
+                               (data.graph_id,)).fetchone()
+        if graph is None:
+            raise BusinessError("NOT_FOUND", "知识空间不存在")
+        graph = dict(graph)
+        if graph["is_default"]:
+            raise BusinessError("INVALID_INPUT", "默认知识空间不可删除")
+        entities = cursor.execute("SELECT id,revision FROM knowledge_objects WHERE graph_id=? ORDER BY id",
+                                  (data.graph_id,)).fetchall()
+        relations = cursor.execute("SELECT id,revision FROM knowledge_relations WHERE graph_id=? ORDER BY id",
+                                   (data.graph_id,)).fetchall()
+        evidence = cursor.execute("SELECT id FROM knowledge_evidence WHERE graph_id=? ORDER BY id",
+                                  (data.graph_id,)).fetchall()
+        history = cursor.execute("SELECT id,object_id,relation_id,after_revision FROM knowledge_revisions WHERE graph_id=? ORDER BY id",
+                                 (data.graph_id,)).fetchall()
+        requests = cursor.execute("SELECT request_key FROM knowledge_requests WHERE graph_id=? ORDER BY request_key",
+                                  (data.graph_id,)).fetchall()
+        counts = {"entities": len(entities), "relations": len(relations), "evidence": len(evidence),
+                  "history": len(history), "requests": len(requests)}
+        impact_token = _digest({"graph_id": data.graph_id, "name": graph["name"],
+                                "entities": [list(row) for row in entities],
+                                "relations": [list(row) for row in relations],
+                                "evidence": [row[0] for row in evidence],
+                                "history": [list(row) for row in history],
+                                "requests": [row[0] for row in requests]})
+        if data.confirmed and impact_token != data.impact_token:
+            raise BusinessError("IMPACT_CONFLICT", "知识空间内容已变化，请重新预览和确认")
+        result = {"graph_id": data.graph_id, "graph_name": graph["name"], "counts": counts,
+                  "impact_token": impact_token, "committed": False}
+        if data.confirmed:
+            cursor.execute("DELETE FROM knowledge_graphs WHERE id=?", (data.graph_id,))
+            result["committed"] = True
+        return result
+
+
+def export_graph(**kwargs):
+    query = _validate(models.ExportInput, kwargs)
+    from .. import knowledge_exchange as exchange
+
+    with get_db_cursor() as cursor:
+        cursor.execute("BEGIN")
+        graph_id = _graph_id(cursor, query.graph_id)
+        graph = dict(cursor.execute("SELECT id,name FROM knowledge_graphs WHERE id=?", (graph_id,)).fetchone())
+        entities = []
+        for row in cursor.execute("SELECT * FROM knowledge_objects WHERE graph_id=? ORDER BY id", (graph_id,)):
+            item = dict(row)
+            item.pop("graph_id")
+            item["aliases"] = json.loads(item.pop("aliases_json"))
+            item.pop("title_norm")
+            item.pop("aliases_norm_json")
+            entities.append(item)
+        relations = []
+        for row in cursor.execute("SELECT * FROM knowledge_relations WHERE graph_id=? ORDER BY id", (graph_id,)):
+            item = dict(row)
+            item.pop("graph_id")
+            relations.append(item)
+        evidence = []
+        for row in cursor.execute("SELECT * FROM knowledge_evidence WHERE graph_id=? ORDER BY id", (graph_id,)):
+            item = dict(row)
+            item.pop("graph_id")
+            item.pop("dedup_key")
+            evidence.append(item)
+        snapshot = {"graph": graph, "entities": entities, "relations": relations, "evidence": evidence}
+    content = exchange.encode_json(snapshot) if query.format == "json" else exchange.encode_graphml(snapshot)
+    return {"graph_id": graph_id, "format": query.format, "content": content,
+            "entities": len(entities), "relations": len(relations), "evidence": len(evidence)}
+
+
+def _decode_import(data):
+    from .. import knowledge_exchange as exchange
+    try:
+        return exchange.decode_json(data.document) if data.format == "json" else exchange.decode_graphml(data.document)
+    except ValueError as exc:
+        raise BusinessError("INVALID_INPUT", str(exc)) from exc
+
+
+def _import_conflicts(cursor, graph_id, snapshot):
+    entities = {row["id"]: row for row in cursor.execute(
+        "SELECT id,kind,title,summary,aliases_json,status,revision,created_at,updated_at FROM knowledge_objects WHERE graph_id=?",
+        (graph_id,))}
+    relations = {row["id"]: row for row in cursor.execute(
+        "SELECT * FROM knowledge_relations WHERE graph_id=?", (graph_id,))}
+    evidence_ids = {row[0] for row in cursor.execute(
+        "SELECT id FROM knowledge_evidence WHERE graph_id=?", (graph_id,))}
+    conflicts = []
+    for item in snapshot["entities"]:
+        existing = entities.get(item["id"])
+        if existing is not None:
+            current = dict(existing)
+            current["aliases"] = json.loads(current.pop("aliases_json"))
+            conflicts.append({"kind": "entity", "id": item["id"],
+                              "reason": "identical" if all(current[key] == item[key] for key in item) else "different"})
+    for item in snapshot["relations"]:
+        existing = relations.get(item["id"])
+        if existing is not None:
+            conflicts.append({"kind": "relation", "id": item["id"],
+                              "reason": "identical" if all(existing[key] == item[key] for key in item) else "different"})
+        elif cursor.execute("SELECT 1 FROM knowledge_relations WHERE graph_id=? AND source_id=? AND predicate=? AND target_id=? AND qualifier=?",
+                            (graph_id, item["source_id"], item["predicate"], item["target_id"], item["qualifier"])).fetchone():
+            conflicts.append({"kind": "relation", "id": item["id"], "reason": "unique_key"})
+    for item in snapshot["evidence"]:
+        if item["id"] in evidence_ids:
+            conflicts.append({"kind": "evidence", "id": item["id"], "reason": "id"})
+        dedup = _digest({key: item.get(key) for key in (
+            "object_id", "relation_id", "source_kind", "stance", "source_library_id", "source_file_id",
+            "source_chunk_id", "source_url", "quote")})
+        if cursor.execute("SELECT 1 FROM knowledge_evidence WHERE graph_id=? AND dedup_key=?", (graph_id, dedup)).fetchone():
+            conflicts.append({"kind": "evidence", "id": item["id"], "reason": "duplicate"})
+    return conflicts
+
+
+@serialized_mutation
+def import_graph(data, *, actor="internal"):
+    request = _validate(models.ImportInput, data)
+    snapshot = _decode_import(request)
+    if request.graph_name is not None:
+        snapshot["graph"]["name"] = request.graph_name
+    with get_db_cursor(write=True) as cursor:
+        cursor.execute("BEGIN IMMEDIATE")
+        target_id = _graph_id(cursor, request.target_graph_id) if request.target_graph_id is not None else str(uuid4())
+        target = cursor.execute("SELECT id,name FROM knowledge_graphs WHERE id=?", (target_id,)).fetchone()
+        if request.target_graph_id is None and not request.dry_run:
+            name = snapshot["graph"]["name"]
+            if cursor.execute("SELECT 1 FROM knowledge_graphs WHERE name=?", (name,)).fetchone():
+                raise BusinessError("KNOWLEDGE_CONFLICT", "同名知识图谱已存在；请指定目标图谱或修改图名")
+            cursor.execute("INSERT INTO knowledge_graphs(id,name) VALUES (?,?)", (target_id, name))
+            target_name = name
+        elif target is not None:
+            target_name = target["name"]
+        elif request.target_graph_id is not None:
+            raise BusinessError("NOT_FOUND", f"知识图谱不存在：{request.target_graph_id}")
+        else:
+            target_name = snapshot["graph"]["name"]
+        snapshot["graph"]["name"] = target_name
+        conflicts = _import_conflicts(cursor, target_id, snapshot) if target is not None else []
+        if conflicts:
+            cursor.connection.rollback()
+            return {"dry_run": request.dry_run, "committed": False, "graph_id": target_id,
+                    "conflicts": conflicts, "counts": {key: len(snapshot[key]) for key in ("entities", "relations", "evidence")}}
+        if request.dry_run:
+            cursor.connection.rollback()
+            return {"dry_run": True, "committed": False, "graph_id": target_id,
+                    "graph_name": snapshot["graph"]["name"], "conflicts": [],
+                    "counts": {key: len(snapshot[key]) for key in ("entities", "relations", "evidence")}}
+        for item in snapshot["entities"]:
+            values = {key: item[key] for key in ("kind", "title", "summary", "aliases", "status", "revision", "created_at", "updated_at")}
+            values["graph_id"] = target_id
+            _save_record(cursor, "object", item["id"], values, target_id)
+        for item in snapshot["relations"]:
+            values = {key: item[key] for key in ("source_id", "predicate", "target_id", "description", "qualifier", "basis", "status", "revision", "created_at", "updated_at")}
+            values["graph_id"] = target_id
+            if item["predicate"] in SYMMETRIC:
+                values["source_id"], values["target_id"] = sorted((values["source_id"], values["target_id"]))
+            _save_record(cursor, "relation", item["id"], values, target_id)
+        batch_id = str(uuid4())
+        from .knowledge_common import normalize_newlines
+        for item in snapshot["evidence"]:
+            if item.get("source_url") is not None:
+                from .knowledge_common import _safe_url
+                item["source_url"] = _safe_url(item["source_url"])
+            if item["source_kind"] == "piece" and item["source_library_id"] == _library_id(cursor):
+                row = cursor.execute("SELECT chunk_text FROM chunks WHERE id=? AND file_id=?",
+                                     (item["source_chunk_id"], item["source_file_id"])).fetchone()
+                if row is None or item["quote"] not in normalize_newlines(row["chunk_text"]):
+                    raise BusinessError("INVALID_SOURCE", "导入引文与本库来源卡片不匹配")
+            values = {key: item[key] for key in (
+                "object_id", "relation_id", "source_kind", "stance", "source_library_id", "source_file_id",
+                "source_chunk_id", "source_title", "source_url", "heading_path", "page_number", "quote", "content_hash", "created_at")}
+            if values["source_kind"] == "piece" and values["source_library_id"] == _library_id(cursor):
+                from .knowledge_common import content_hash, normalize_newlines
+                chunk = cursor.execute("SELECT chunk_text FROM chunks WHERE id=? AND file_id=?",
+                                       (values["source_chunk_id"], values["source_file_id"])).fetchone()
+                if chunk is None or values["quote"] not in normalize_newlines(chunk["chunk_text"]):
+                    raise BusinessError("INVALID_SOURCE", "导入引文与本库来源卡片不匹配")
+                values["content_hash"] = content_hash(chunk["chunk_text"])
+            elif values["source_kind"] == "piece":
+                if not values["source_title"]:
+                    raise BusinessError("INVALID_SOURCE", "跨库 Piece 证据需要 source_title")
+                values["content_hash"] = None
+                values["heading_path"] = None
+                values["page_number"] = None
+                values["quote"] = normalize_newlines(values["quote"])
+            values["graph_id"] = target_id
+            values["dedup_key"] = _digest({key: values.get(key) for key in (
+                "object_id", "relation_id", "source_kind", "stance", "source_library_id", "source_file_id",
+                "source_chunk_id", "source_url", "quote")})
+            _insert(cursor, "knowledge_evidence", {"id": item["id"], **values})
+        for kind, records in (("object", snapshot["entities"]), ("relation", snapshot["relations"])):
+            for item in records:
+                record = _record(cursor, kind, item["id"], target_id)
+                _revision(cursor, kind, None, record, f"导入 {request.format}", batch_id, actor)
+        return {"dry_run": False, "committed": True, "graph_id": target_id,
+                "graph_name": snapshot["graph"]["name"], "conflicts": [],
+                "counts": {key: len(snapshot[key]) for key in ("entities", "relations", "evidence")}}
+
+
 def _locator(section, index, item):
     """逐条处理时的批次位置；报错可直接定位到第几条记录。"""
     context = {"section": section, "index": index}
@@ -44,8 +295,9 @@ def _locate(exc, section, index, item):
     return exc
 
 
-def _record(cursor, kind, record_id):
-    row = cursor.execute(f"SELECT * FROM {TABLES[kind]} WHERE id=?", (record_id,)).fetchone()
+def _record(cursor, kind, record_id, graph_id=None):
+    graph_id = _graph_id(cursor, graph_id)
+    row = cursor.execute(f"SELECT * FROM {TABLES[kind]} WHERE id=? AND graph_id=?", (record_id, graph_id)).fetchone()
     if row is None:
         raise BusinessError("NOT_FOUND", f"知识{kind}不存在：{record_id}")
     result = dict(row)
@@ -71,7 +323,7 @@ def _insert(cursor, table, values):
                    [values[field] for field in fields])
 
 
-def _save_record(cursor, kind, record_id, values, updating=False):
+def _save_record(cursor, kind, record_id, values, graph_id, updating=False):
     values = dict(values)
     aliases = list(values.get("aliases") or [])
     if kind == "object":
@@ -80,15 +332,15 @@ def _save_record(cursor, kind, record_id, values, updating=False):
         values["aliases_json"] = _json(values.pop("aliases"))
     if updating:
         cursor.execute(f"UPDATE {TABLES[kind]} SET " + ",".join(f"{field}=?" for field in values)
-                       + ",updated_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?",
-                       [*values.values(), record_id])
+                       + ",updated_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=? AND graph_id=?",
+                       [*values.values(), record_id, graph_id])
     else:
-        _insert(cursor, TABLES[kind], {"id": record_id, **values})
-    _sync_fts(cursor, kind, record_id, values, aliases)
-    return _record(cursor, kind, record_id)
+        _insert(cursor, TABLES[kind], {"id": record_id, "graph_id": graph_id, **values})
+    _sync_fts(cursor, kind, record_id, graph_id, values, aliases)
+    return _record(cursor, kind, record_id, graph_id)
 
 
-def _sync_fts(cursor, kind, record_id, values, aliases):
+def _sync_fts(cursor, kind, record_id, graph_id, values, aliases):
     """图谱派生全文索引随记录同步；只维护图谱自己的 FTS 表，不触碰资料层索引。
 
     实体收标题、别名、摘要；关系收描述与适用条件。关系端点标题不复制进索引，
@@ -100,35 +352,38 @@ def _sync_fts(cursor, kind, record_id, values, aliases):
         return " ".join(tokenize_query(text or ""))
 
     if kind == "object":
-        cursor.execute("DELETE FROM knowledge_fts WHERE object_id=?", (record_id,))
-        cursor.execute("INSERT INTO knowledge_fts(object_id,title,aliases,summary) VALUES (?,?,?,?)",
-                       (record_id, tokens(values["title"]), tokens(" ".join(aliases)), tokens(values["summary"])))
+        cursor.execute("DELETE FROM knowledge_fts WHERE graph_id=? AND object_id=?", (graph_id, record_id))
+        cursor.execute("INSERT INTO knowledge_fts(graph_id,object_id,title,aliases,summary) VALUES (?,?,?,?,?)",
+                       (graph_id, record_id, tokens(values["title"]), tokens(" ".join(aliases)), tokens(values["summary"])))
     elif kind == "relation":
-        cursor.execute("DELETE FROM knowledge_relation_fts WHERE relation_id=?", (record_id,))
-        cursor.execute("INSERT INTO knowledge_relation_fts(relation_id,description,qualifier) VALUES (?,?,?)",
-                       (record_id, tokens(values["description"]), tokens(values["qualifier"])))
+        cursor.execute("DELETE FROM knowledge_relation_fts WHERE graph_id=? AND relation_id=?", (graph_id, record_id))
+        cursor.execute("INSERT INTO knowledge_relation_fts(graph_id,relation_id,description,qualifier) VALUES (?,?,?,?)",
+                       (graph_id, record_id, tokens(values["description"]), tokens(values["qualifier"])))
 
 
 def _revision(cursor, kind, before, after, reason, batch_id, actor):
     _insert(cursor, "knowledge_revisions", {
-        f"{kind}_id": after["id"], "before_revision": before["revision"] if before else None,
+        "graph_id": after["graph_id"], f"{kind}_id": after["id"], "before_revision": before["revision"] if before else None,
         "after_revision": after["revision"], "before_json": _json(before) if before else None,
         "after_json": _json(after), "reason": reason, "batch_id": batch_id, "actor": actor,
     })
 
 
-def _target(cursor, target, refs, kind):
+def _target(cursor, target, refs, kind, graph_id):
     if target.ref is not None:
         entry = refs.get(target.ref)
         if not entry or entry["kind"] != kind:
             raise BusinessError("INVALID_REFERENCE", f"ref 不存在或类型错误：{target.ref}")
         return entry["id"]
-    _record(cursor, kind, target.id)
+    record = _record(cursor, kind, target.id, graph_id)
+    if record["graph_id"] != graph_id:
+        raise BusinessError("INVALID_REFERENCE", "图谱记录不能引用其他知识图谱中的实体")
     return target.id
 
 
-def _request(cursor, key, digest):
-    row = cursor.execute("SELECT request_hash,result_json FROM knowledge_requests WHERE request_key=?", (key,)).fetchone()
+def _request(cursor, graph_id, key, digest):
+    row = cursor.execute("SELECT request_hash,result_json FROM knowledge_requests WHERE graph_id=? AND request_key=?",
+                         (graph_id, key)).fetchone()
     if row:
         if row["request_hash"] != digest:
             raise BusinessError("REQUEST_CONFLICT", "同一请求键已用于不同内容；不能修改输入后复用键")
@@ -136,23 +391,25 @@ def _request(cursor, key, digest):
     return None
 
 
-def _remember(cursor, key, digest, result):
+def _remember(cursor, graph_id, key, digest, result):
     # 仅存 ID、版本、计数及提交字段名；不得存正文、标题、证据快照或删除前内容。
-    _insert(cursor, "knowledge_requests", {"request_key": key, "request_hash": digest, "result_json": _json(result)})
+    _insert(cursor, "knowledge_requests", {"graph_id": graph_id, "request_key": key,
+                                             "request_hash": digest, "result_json": _json(result)})
 
 
-def _canonical_apply(payload):
+def _canonical_apply(payload, graph_id):
     data = payload.model_dump(exclude={"request_key", "dry_run"})
+    data["graph_id"] = graph_id
     for name in ("objects", "relations"):
         data[name] = [item.model_dump(exclude_unset=isinstance(item, models.Update)) for item in getattr(payload, name)]
     return {"operation": "apply", **data}
 
 
-def _evidence_values(cursor, item, refs, library_id):
+def _evidence_values(cursor, item, refs, graph_id):
     owner_kind = "object" if item.object is not None else "relation"
-    owner = _target(cursor, item.object or item.relation, refs, owner_kind)
+    owner = _target(cursor, item.object or item.relation, refs, owner_kind, graph_id)
     values = source_values(cursor, item)
-    values[f"{owner_kind}_id"] = owner
+    values.update(graph_id=graph_id, **{f"{owner_kind}_id": owner})
     values["dedup_key"] = _digest({key: values.get(key) for key in (
         "object_id", "relation_id", "source_kind", "stance", "source_library_id", "source_file_id",
         "source_chunk_id", "source_url", "quote")})
@@ -164,16 +421,17 @@ def apply(data, *, actor="internal"):
     """一次本地事务；dry_run 执行同样的校验后回滚，不消耗请求键。"""
     _check_size(data)
     payload = _validate(models.ApplyInput, data)
-    digest = _digest(_canonical_apply(payload))
     with get_db_cursor(write=True) as cursor:
         cursor.execute("BEGIN IMMEDIATE")
+        graph_id = _graph_id(cursor, payload.graph_id)
+        digest = _digest(_canonical_apply(payload, graph_id))
         if payload.request_key and not payload.dry_run:
-            existing = _request(cursor, payload.request_key, digest)
+            existing = _request(cursor, graph_id, payload.request_key, digest)
             if existing is not None:
                 return existing
         batch_id, refs = str(uuid4()), {}
         result = {"committed": not payload.dry_run, "dry_run": payload.dry_run,
-                  "library_id": _library_id(cursor), "batch_id": batch_id, "refs": refs,
+                  "library_id": _library_id(cursor), "graph_id": graph_id, "batch_id": batch_id, "refs": refs,
                   "objects": [], "relations": [], "evidence": [],
                   "counts": {"created": 0, "updated": 0, "reused": 0}}
         all_refs, all_updates = set(), set()
@@ -202,7 +460,7 @@ def apply(data, *, actor="internal"):
         for index, item in enumerate(payload.objects):
             updating = isinstance(item, models.ObjectUpdate)
             try:
-                before = _record(cursor, "object", item.id) if updating else None
+                before = _record(cursor, "object", item.id, graph_id) if updating else None
                 if updating:
                     _version(before, item.expected_revision)
                     values = {field: before[field] for field in OBJECT_FIELDS}
@@ -210,7 +468,7 @@ def apply(data, *, actor="internal"):
                 else:
                     values = item.model_dump(exclude={"ref"})
                 values["revision"] = before["revision"] + 1 if before else 1
-                record = _save_record(cursor, "object", item.id if updating else str(uuid4()), values, updating)
+                record = _save_record(cursor, "object", item.id if updating else str(uuid4()), values, graph_id, updating)
             except BusinessError as exc:
                 raise _locate(exc, "objects", index, item) from None
             _revision(cursor, "object", before, record, payload.reason, batch_id, actor)
@@ -219,7 +477,7 @@ def apply(data, *, actor="internal"):
         for index, item in enumerate(payload.relations):
             updating = isinstance(item, models.RelationUpdate)
             try:
-                before = _record(cursor, "relation", item.id) if updating else None
+                before = _record(cursor, "relation", item.id, graph_id) if updating else None
                 if updating:
                     _version(before, item.expected_revision)
                     values = {field: before[field] for field in RELATION_FIELDS}
@@ -228,21 +486,21 @@ def apply(data, *, actor="internal"):
                     values = item.model_dump(exclude={"ref", "source", "target"})
                 for endpoint in ("source", "target"):
                     if getattr(item, endpoint) is not None:
-                        values[f"{endpoint}_id"] = _target(cursor, getattr(item, endpoint), refs, "object")
+                        values[f"{endpoint}_id"] = _target(cursor, getattr(item, endpoint), refs, "object", graph_id)
                 if values["source_id"] == values["target_id"]:
                     raise BusinessError("INVALID_REFERENCE", "语义关系不允许自连接")
                 if values["predicate"] in SYMMETRIC:
                     values["source_id"], values["target_id"] = sorted((values["source_id"], values["target_id"]))
                 existing = cursor.execute("""SELECT * FROM knowledge_relations
-                    WHERE source_id=? AND predicate=? AND target_id=? AND qualifier=?""",
-                                          tuple(values[key] for key in ("source_id", "predicate", "target_id", "qualifier"))).fetchone()
+                    WHERE graph_id=? AND source_id=? AND predicate=? AND target_id=? AND qualifier=?""",
+                                          (graph_id, *(values[key] for key in ("source_id", "predicate", "target_id", "qualifier")))).fetchone()
             except BusinessError as exc:
                 raise _locate(exc, "relations", index, item) from None
             if existing and (not updating or existing["id"] != item.id):
                 if updating or any(existing[field] != values[field] for field in RELATION_FIELDS):
                     # 冲突回执带上已有关系的可读摘要和版本，调用方可直接决定是复用还是修订，不必再读一次。
-                    titles = dict(cursor.execute("SELECT id,title FROM knowledge_objects WHERE id IN (?,?)",
-                                                 (existing["source_id"], existing["target_id"])).fetchall())
+                    titles = dict(cursor.execute("SELECT id,title FROM knowledge_objects WHERE graph_id=? AND id IN (?,?)",
+                                                 (graph_id, existing["source_id"], existing["target_id"])).fetchall())
                     summary = {key: existing[key] for key in ("id", "revision", *RELATION_FIELDS)}
                     summary["display"] = _relation_display(existing, titles)
                     raise BusinessError("KNOWLEDGE_CONFLICT",
@@ -252,14 +510,15 @@ def apply(data, *, actor="internal"):
                 report("relations", dict(existing), "reused", item.ref, submitted=item)
                 continue
             values["revision"] = before["revision"] + 1 if before else 1
-            record = _save_record(cursor, "relation", item.id if updating else str(uuid4()), values, updating)
+            record = _save_record(cursor, "relation", item.id if updating else str(uuid4()), values, graph_id, updating)
             _revision(cursor, "relation", before, record, payload.reason, batch_id, actor)
             report("relations", record, "updated" if updating else "created", None if updating else item.ref, submitted=item)
 
         for index, item in enumerate(payload.evidence):
             try:
-                values = _evidence_values(cursor, item, refs, result["library_id"])
-                row = cursor.execute("SELECT id FROM knowledge_evidence WHERE dedup_key=?", (values["dedup_key"],)).fetchone()
+                values = _evidence_values(cursor, item, refs, graph_id)
+                row = cursor.execute("SELECT id FROM knowledge_evidence WHERE graph_id=? AND dedup_key=?",
+                                     (graph_id, values["dedup_key"])).fetchone()
             except BusinessError as exc:
                 raise _locate(exc, "evidence", index, item) from None
             record = {"id": row["id"] if row else str(uuid4())}
@@ -270,20 +529,22 @@ def apply(data, *, actor="internal"):
         if payload.dry_run:
             cursor.connection.rollback()
         else:
-            _remember(cursor, payload.request_key, digest, result)
+            _remember(cursor, graph_id, payload.request_key, digest, result)
         return result
 
 
-def _evidence_page(cursor, kind, record_id, limit, offset):
-    where = f"{kind}_id=?"
-    total = cursor.execute(f"SELECT COUNT(*) FROM knowledge_evidence WHERE {where}", (record_id,)).fetchone()[0]
-    rows = cursor.execute(f"SELECT * FROM knowledge_evidence WHERE {where} ORDER BY id LIMIT ? OFFSET ?", (record_id, limit, offset)).fetchall()
+def _evidence_page(cursor, kind, record_id, graph_id, limit, offset):
+    where = f"graph_id=? AND {kind}_id=?"
+    total = cursor.execute(f"SELECT COUNT(*) FROM knowledge_evidence WHERE {where}", (graph_id, record_id)).fetchone()[0]
+    rows = cursor.execute(f"SELECT * FROM knowledge_evidence WHERE {where} ORDER BY id LIMIT ? OFFSET ?", (graph_id, record_id, limit, offset)).fetchall()
     return {"items": _evidence_states(cursor, rows), "total": total, "limit": limit, "offset": offset}
 
 
 def list_objects(**kwargs):
     query = _validate(models.ListInput, kwargs)
-    conditions, args = [], []
+    with get_db_cursor() as cursor:
+        graph_id = _graph_id(cursor, query.graph_id)
+    conditions, args = ["graph_id=?"], [graph_id]
     for field in ("kind", "status"):
         if getattr(query, field) is not None:
             conditions.append(f"{field}=?")
@@ -294,12 +555,14 @@ def list_objects(**kwargs):
         total = cursor.execute("SELECT COUNT(*) FROM knowledge_objects" + where, args).fetchone()[0]
         rows = cursor.execute(f"SELECT {SUMMARY_COLUMNS} FROM knowledge_objects" + where + " ORDER BY id LIMIT ? OFFSET ?",
                               [*args, query.limit, query.offset]).fetchall()
-        return {"library_id": _library_id(cursor), "objects": [dict(row) for row in rows],
+        return {"library_id": _library_id(cursor), "graph_id": graph_id, "objects": [dict(row) for row in rows],
                 "total": total, "limit": query.limit, "offset": query.offset}
 
 
 def search_objects(**kwargs):
     query = _validate(models.SearchInput, kwargs)
+    with get_db_cursor() as cursor:
+        graph_id = _graph_id(cursor, query.graph_id)
     from retrieval.nodes.preprocess_node import tokenize_query
     name = models.normalize_name(query.query)
     # instr 将 %、_ 等当普通字符；FTS tokens 总是引用，不暴露 MATCH 表达式。
@@ -312,13 +575,13 @@ def search_objects(**kwargs):
     # 不再让所有 FTS 命中并列同一档后仅按 id 排。
     cte, cte_args, join, rank = "", [], "", ""
     if match:
-        cte = ("WITH fts_hit AS (SELECT object_id, bm25(knowledge_fts, 0.0, 5.0, 3.0, 1.0) AS rank "
-               "FROM knowledge_fts WHERE knowledge_fts MATCH ?) ")
-        cte_args = [match]
-        join = " LEFT JOIN fts_hit ON fts_hit.object_id = o.id"
+        cte = ("WITH fts_hit AS (SELECT object_id, graph_id, bm25(knowledge_fts, 0.0, 0.0, 5.0, 3.0, 1.0) AS rank "
+               "FROM knowledge_fts WHERE knowledge_fts MATCH ? AND graph_id=?) ")
+        cte_args = [match, graph_id]
+        join = " LEFT JOIN fts_hit ON fts_hit.object_id = o.id AND fts_hit.graph_id=o.graph_id"
         candidates.append("fts_hit.object_id IS NOT NULL")
         rank = "fts_hit.rank, "
-    where = "(" + " OR ".join(candidates) + ")"
+    where = "o.graph_id=? AND (" + " OR ".join(candidates) + ")"
     filter_args = []
     for field in ("kind", "status"):
         if getattr(query, field) is not None:
@@ -327,12 +590,12 @@ def search_objects(**kwargs):
     with get_db_cursor() as cursor:
         cursor.execute("BEGIN")
         total = cursor.execute(cte + "SELECT COUNT(*) FROM knowledge_objects o" + join + " WHERE " + where,
-                               [*cte_args, *where_args, *filter_args]).fetchone()[0]
+                               [*cte_args, graph_id, *where_args, *filter_args]).fetchone()[0]
         rows = cursor.execute(cte + f"SELECT {','.join('o.' + c for c in SUMMARY_COLUMNS.split(','))} FROM knowledge_objects o" + join
                               + " WHERE " + where
                               + f" ORDER BY CASE WHEN {exact} THEN 0 WHEN {contains} THEN 1 ELSE 2 END,{rank}o.id LIMIT ? OFFSET ?",
-                              [*cte_args, *where_args, *filter_args, name, name, name, name, query.limit, query.offset]).fetchall()
-        return {"library_id": _library_id(cursor), "objects": [dict(row) for row in rows],
+                              [*cte_args, graph_id, *where_args, *filter_args, name, name, name, name, query.limit, query.offset]).fetchall()
+        return {"library_id": _library_id(cursor), "graph_id": graph_id, "objects": [dict(row) for row in rows],
                 "total": total, "limit": query.limit, "offset": query.offset}
 
 
@@ -344,25 +607,26 @@ def search_relations(**kwargs):
     match = " OR ".join('"' + token.replace('"', '""') + '"' for token in tokens)
     with get_db_cursor() as cursor:
         cursor.execute("BEGIN")
-        result = {"library_id": _library_id(cursor), "relations": [], "total": 0,
+        graph_id = _graph_id(cursor, query.graph_id)
+        result = {"library_id": _library_id(cursor), "graph_id": graph_id, "relations": [], "total": 0,
                   "limit": query.limit, "offset": query.offset}
         if not match:
             return result
-        cte = ("WITH hits AS (SELECT relation_id, bm25(knowledge_relation_fts, 0.0, 3.0, 1.0) AS rank "
-               "FROM knowledge_relation_fts WHERE knowledge_relation_fts MATCH ?) ")
-        where, args = "hits.relation_id IS NOT NULL", [match]
+        cte = ("WITH hits AS (SELECT relation_id, graph_id, bm25(knowledge_relation_fts, 0.0, 0.0, 3.0, 1.0) AS rank "
+               "FROM knowledge_relation_fts WHERE knowledge_relation_fts MATCH ? AND graph_id=?) ")
+        where, args = "hits.relation_id IS NOT NULL AND r.graph_id=?", [match, graph_id, graph_id]
         if query.status is not None:
             where += " AND r.status=?"
             args.append(query.status)
         result["total"] = cursor.execute(
             cte + "SELECT COUNT(*) FROM knowledge_relations r JOIN hits ON hits.relation_id=r.id WHERE " + where, args).fetchone()[0]
         rows = cursor.execute(
-            cte + "SELECT r.*, hits.rank FROM knowledge_relations r JOIN hits ON hits.relation_id=r.id WHERE " + where
+            cte + "SELECT r.*, hits.rank FROM knowledge_relations r JOIN hits ON hits.relation_id=r.id AND hits.graph_id=r.graph_id WHERE " + where
             + " ORDER BY hits.rank, r.id LIMIT ? OFFSET ?", [*args, query.limit, query.offset]).fetchall()
         endpoint_ids = sorted({row[key] for row in rows for key in ("source_id", "target_id")})
         titles = dict(cursor.execute(
-            f"SELECT id,title FROM knowledge_objects WHERE id IN ({','.join('?' for _ in endpoint_ids)})",
-            endpoint_ids).fetchall()) if endpoint_ids else {}
+            f"SELECT id,title FROM knowledge_objects WHERE graph_id=? AND id IN ({','.join('?' for _ in endpoint_ids)})",
+            [graph_id, *endpoint_ids]).fetchall()) if endpoint_ids else {}
         for row in rows:
             item = {key: row[key] for key in ("id", "source_id", "predicate", "target_id", "description",
                                               "qualifier", "basis", "status", "revision", "created_at", "updated_at")}
@@ -380,10 +644,10 @@ def _relation_display(relation, titles):
     return f"{source} —{relation['predicate']}{end} {target}"
 
 
-def _detect_kind(cursor, record_id):
-    """按 UUID 在三张表中探测记录类型；全部缺失时报 NOT_FOUND，不猜。"""
+def _detect_kind(cursor, record_id, graph_id):
+    """按 UUID 在图谱内探测记录类型；全部缺失时报 NOT_FOUND，不猜。"""
     for kind, table in TABLES.items():
-        if cursor.execute(f"SELECT 1 FROM {table} WHERE id=?", (record_id,)).fetchone():
+        if cursor.execute(f"SELECT 1 FROM {table} WHERE id=? AND graph_id=?", (record_id, graph_id)).fetchone():
             return kind
     raise BusinessError("NOT_FOUND", f"知识记录不存在：{record_id}", data={"id": record_id})
 
@@ -392,18 +656,19 @@ def get_record(**kwargs):
     query = _validate(models.GetInput, kwargs)
     with get_db_cursor() as cursor:
         cursor.execute("BEGIN")
-        kind = query.kind or _detect_kind(cursor, query.id)
-        item = _record(cursor, kind, query.id)
+        graph_id = _graph_id(cursor, query.graph_id)
+        kind = query.kind or _detect_kind(cursor, query.id, graph_id)
+        item = _record(cursor, kind, query.id, graph_id)
         if kind == "evidence":
             item = _evidence_states(cursor, [item])[0]
-        result = {"library_id": _library_id(cursor), "kind": kind, "record": item}
+        result = {"library_id": _library_id(cursor), "graph_id": graph_id, "kind": kind, "record": item}
         if kind in ("object", "relation"):
-            result["evidence"] = _evidence_page(cursor, kind, query.id, query.limit, query.offset)
+            result["evidence"] = _evidence_page(cursor, kind, query.id, graph_id, query.limit, query.offset)
             result["has_evidence"] = result["evidence"]["total"] > 0
         if kind == "relation":
             result["record"]["symmetric"] = item["predicate"] in SYMMETRIC
-            titles = dict(cursor.execute("SELECT id,title FROM knowledge_objects WHERE id IN (?,?)",
-                                         (item["source_id"], item["target_id"])).fetchall())
+            titles = dict(cursor.execute("SELECT id,title FROM knowledge_objects WHERE graph_id=? AND id IN (?,?)",
+                                         (graph_id, item["source_id"], item["target_id"])).fetchall())
             result["record"]["display"] = _relation_display(item, titles)
         return result
 
@@ -412,19 +677,20 @@ def references(**kwargs):
     query = _validate(models.ReferencesInput, kwargs)
     with get_db_cursor() as cursor:
         cursor.execute("BEGIN")
-        args = (query.source_library_id, query.source_file_id)
-        where = "source_library_id=? AND source_file_id=?"
+        graph_id = _graph_id(cursor, query.graph_id)
+        args = (graph_id, query.source_library_id, query.source_file_id)
+        where = "graph_id=? AND source_library_id=? AND source_file_id=?"
         total = cursor.execute("SELECT COUNT(*) FROM knowledge_evidence WHERE " + where, args).fetchone()[0]
         rows = cursor.execute("SELECT * FROM knowledge_evidence WHERE " + where + " ORDER BY id LIMIT ? OFFSET ?",
                               (*args, query.limit, query.offset)).fetchall()
         items = _evidence_states(cursor, rows)
         for item in items:
             kind = "object" if item["object_id"] else "relation"
-            owner = _record(cursor, kind, item[f"{kind}_id"])
+            owner = _record(cursor, kind, item[f"{kind}_id"], graph_id)
             item["owner"] = {key: owner[key] for key in (("id", "kind", "title", "summary", "status", "revision")
                                                         if kind == "object" else ("id", *RELATION_FIELDS, "revision"))}
             item["owner_kind"] = kind
-        return {"library_id": _library_id(cursor), "evidence": items, "total": total,
+        return {"library_id": _library_id(cursor), "graph_id": graph_id, "evidence": items, "total": total,
                 "limit": query.limit, "offset": query.offset}
 
 
@@ -432,43 +698,46 @@ def history(**kwargs):
     query = _validate(models.HistoryInput, kwargs)
     with get_db_cursor() as cursor:
         cursor.execute("BEGIN")
-        _record(cursor, query.kind, query.id)
-        where = f"{query.kind}_id=?"
-        total = cursor.execute("SELECT COUNT(*) FROM knowledge_revisions WHERE " + where, (query.id,)).fetchone()[0]
+        graph_id = _graph_id(cursor, query.graph_id)
+        _record(cursor, query.kind, query.id, graph_id)
+        where = f"graph_id=? AND {query.kind}_id=?"
+        total = cursor.execute("SELECT COUNT(*) FROM knowledge_revisions WHERE " + where, (graph_id, query.id)).fetchone()[0]
         rows = cursor.execute("SELECT * FROM knowledge_revisions WHERE " + where + " ORDER BY id DESC LIMIT ? OFFSET ?",
-                              (query.id, query.limit, query.offset)).fetchall()
+                              (graph_id, query.id, query.limit, query.offset)).fetchall()
         items = []
         for row in rows:
             item = dict(row)
             item["before"] = json.loads(item.pop("before_json") or "null")
             item["after"] = json.loads(item.pop("after_json"))
             items.append(item)
-        return {"history": items, "total": total, "limit": query.limit, "offset": query.offset}
+        return {"graph_id": graph_id, "history": items, "total": total, "limit": query.limit, "offset": query.offset}
 
 
-def request_result(request_key):
-    query = _validate(models.RequestInput, {"request_key": request_key})
+def request_result(request_key, graph_id=None):
+    query = _validate(models.RequestInput, {"request_key": request_key, "graph_id": graph_id})
     with get_db_cursor() as cursor:
-        row = cursor.execute("SELECT result_json FROM knowledge_requests WHERE request_key=?", (query.request_key,)).fetchone()
+        graph_id = _graph_id(cursor, query.graph_id)
+        row = cursor.execute("SELECT result_json FROM knowledge_requests WHERE graph_id=? AND request_key=?",
+                             (graph_id, query.request_key)).fetchone()
         if row is None:
             raise BusinessError("NOT_FOUND", "没有已提交的请求结果；超时不等于失败，可原样重试")
         return json.loads(row[0])
 
 
-def _impact(cursor, kind, record_id):
-    record = _record(cursor, kind, record_id)
-    queries = [(kind, f"SELECT id{',revision' if kind in ('object', 'relation') else ''} FROM {TABLES[kind]} WHERE id=?", [record_id])]
+def _impact(cursor, kind, record_id, graph_id):
+    record = _record(cursor, kind, record_id, graph_id)
+    queries = [(kind, f"SELECT id{',revision' if kind in ('object', 'relation') else ''} FROM {TABLES[kind]} WHERE graph_id=? AND id=?", [graph_id, record_id])]
     if kind == "object":
-        relations = "SELECT id FROM knowledge_relations WHERE source_id=? OR target_id=?"
+        relations = "SELECT id FROM knowledge_relations WHERE graph_id=? AND (source_id=? OR target_id=?)"
         queries.extend([
-            ("relations", "SELECT id,revision FROM knowledge_relations WHERE source_id=? OR target_id=?", [record_id, record_id]),
-            ("evidence", f"SELECT id FROM knowledge_evidence WHERE object_id=? OR relation_id IN ({relations})", [record_id] * 3),
-            ("history", f"SELECT id FROM knowledge_revisions WHERE object_id=? OR relation_id IN ({relations})", [record_id] * 3),
+            ("relations", "SELECT id,revision FROM knowledge_relations WHERE graph_id=? AND (source_id=? OR target_id=?)", [graph_id, record_id, record_id]),
+            ("evidence", f"SELECT id FROM knowledge_evidence WHERE graph_id=? AND (object_id=? OR relation_id IN ({relations}))", [graph_id, record_id, graph_id, record_id, record_id]),
+            ("history", f"SELECT id FROM knowledge_revisions WHERE graph_id=? AND (object_id=? OR relation_id IN ({relations}))", [graph_id, record_id, graph_id, record_id, record_id]),
         ])
     elif kind == "relation":
         queries.extend([
-            ("evidence", "SELECT id FROM knowledge_evidence WHERE relation_id=?", [record_id]),
-            ("history", "SELECT id FROM knowledge_revisions WHERE relation_id=?", [record_id]),
+            ("evidence", "SELECT id FROM knowledge_evidence WHERE graph_id=? AND relation_id=?", [graph_id, record_id]),
+            ("history", "SELECT id FROM knowledge_revisions WHERE graph_id=? AND relation_id=?", [graph_id, record_id]),
         ])
     counts, digest = {}, hashlib.sha256()
     for name, sql, args in queries:
@@ -485,26 +754,28 @@ def _impact(cursor, kind, record_id):
 @serialized_mutation
 def delete(data, *, actor="internal"):
     payload = _validate(models.DeleteInput, data)
-    digest = _digest({"operation": "delete", **payload.model_dump(exclude={"request_key", "dry_run", "confirmed"})})
     with get_db_cursor(write=True) as cursor:
         cursor.execute("BEGIN IMMEDIATE")
+        graph_id = _graph_id(cursor, payload.graph_id)
+        digest = _digest({"operation": "delete", "graph_id": graph_id,
+                          **payload.model_dump(exclude={"request_key", "dry_run", "confirmed", "graph_id"})})
         if not payload.dry_run:
             if not payload.confirmed:
                 raise BusinessError("CONFIRMATION_REQUIRED", "删除必须先预览并经用户确认")
-            existing = _request(cursor, payload.request_key, digest)
+            existing = _request(cursor, graph_id, payload.request_key, digest)
             if existing is not None:
                 return existing
-        record = _record(cursor, payload.kind, payload.id)
+        record = _record(cursor, payload.kind, payload.id, graph_id)
         if payload.kind in ("object", "relation"):
             _version(record, payload.expected_revision)
-        impact = _impact(cursor, payload.kind, payload.id)
+        impact = _impact(cursor, payload.kind, payload.id, graph_id)
         if payload.dry_run:
             return {"dry_run": True, "committed": False, **impact}
         if payload.impact_token != impact["impact_token"]:
             raise BusinessError("IMPACT_CONFLICT", "删除影响范围已变化，请重新预览和确认")
-        cursor.execute(f"DELETE FROM {TABLES[payload.kind]} WHERE id=?", (payload.id,))
-        result = {"dry_run": False, "committed": True, **impact, "actor": actor}
-        _remember(cursor, payload.request_key, digest, result)
+        cursor.execute(f"DELETE FROM {TABLES[payload.kind]} WHERE graph_id=? AND id=?", (graph_id, payload.id))
+        result = {"dry_run": False, "committed": True, "graph_id": graph_id, **impact, "actor": actor}
+        _remember(cursor, graph_id, payload.request_key, digest, result)
         return result
 
 
@@ -512,7 +783,8 @@ def graph(**kwargs):
     query = _validate(models.GraphInput, kwargs)
     with get_db_cursor() as cursor:
         cursor.execute("BEGIN")
-        _record(cursor, "object", query.root_id)
+        graph_id = _graph_id(cursor, query.graph_id)
+        _record(cursor, "object", query.root_id, graph_id)
         node_ids, edges, seen_edges = {query.root_id}, [], set()
         frontier, truncated = [query.root_id], False
         for _ in range(query.depth):
@@ -527,8 +799,8 @@ def graph(**kwargs):
                                 filters += f" AND {field} IN ({','.join('?' for _ in values)})" if values else " AND 0"
                                 params.extend(values)
                     for endpoint in ("source_id", "target_id"):
-                        rows = cursor.execute(f"SELECT * FROM {TABLES[kind]} WHERE {endpoint}=?" + filters
-                                              + " ORDER BY id LIMIT ?", [node, *params, query.max_edges + 1]).fetchall()
+                        rows = cursor.execute(f"SELECT * FROM {TABLES[kind]} WHERE graph_id=? AND {endpoint}=?" + filters
+                                              + " ORDER BY id LIMIT ?", [graph_id, node, *params, query.max_edges + 1]).fetchall()
                         if len(rows) > query.max_edges:
                             truncated = True
                         for row in rows:
@@ -551,20 +823,20 @@ def graph(**kwargs):
             frontier = following
             if not frontier:
                 break
-        rows = cursor.execute(f"SELECT {SUMMARY_COLUMNS} FROM knowledge_objects WHERE id IN ({','.join('?' for _ in node_ids)}) ORDER BY id",
-                              sorted(node_ids)).fetchall()
+        rows = cursor.execute(f"SELECT {SUMMARY_COLUMNS} FROM knowledge_objects WHERE graph_id=? AND id IN ({','.join('?' for _ in node_ids)}) ORDER BY id",
+                              [graph_id, *sorted(node_ids)]).fetchall()
         nodes = sorted((dict(row) for row in rows), key=lambda row: (row["id"] != query.root_id, row["id"]))
         relation_ids = [edge["id"] for edge in edges if edge["kind"] == "relation"]
         if relation_ids:
             titles = {node["id"]: node["title"] for node in nodes}
             counts = dict(cursor.execute(
-                f"SELECT relation_id,COUNT(*) FROM knowledge_evidence WHERE relation_id IN ({','.join('?' for _ in relation_ids)}) GROUP BY relation_id",
-                relation_ids).fetchall())
+                f"SELECT relation_id,COUNT(*) FROM knowledge_evidence WHERE graph_id=? AND relation_id IN ({','.join('?' for _ in relation_ids)}) GROUP BY relation_id",
+                [graph_id, *relation_ids]).fetchall())
             for edge in edges:
                 if edge["kind"] == "relation":
                     edge["evidence_count"] = counts.get(edge["id"], 0)
                     edge["display"] = _relation_display(edge, titles)
-        return {"library_id": _library_id(cursor), "root_id": query.root_id, "nodes": nodes, "edges": edges,
+        return {"library_id": _library_id(cursor), "graph_id": graph_id, "root_id": query.root_id, "nodes": nodes, "edges": edges,
                 "truncated": truncated, "depth": query.depth, "max_nodes": query.max_nodes, "max_edges": query.max_edges,
                 "hint": "仅返回有界局部邻域；可选择返回节点继续展开，计数不是全图总数"}
 
@@ -580,20 +852,21 @@ def graph_overview(**kwargs):
 
     with get_db_cursor() as cursor:
         cursor.execute("BEGIN")
-        total_nodes = cursor.execute("SELECT COUNT(*) FROM knowledge_objects").fetchone()[0]
-        total_edges = cursor.execute("SELECT COUNT(*) FROM knowledge_relations WHERE 1=1" + filters,
-                                     params).fetchone()[0]
+        graph_id = _graph_id(cursor, query.graph_id)
+        total_nodes = cursor.execute("SELECT COUNT(*) FROM knowledge_objects WHERE graph_id=?", (graph_id,)).fetchone()[0]
+        total_edges = cursor.execute("SELECT COUNT(*) FROM knowledge_relations WHERE graph_id=?" + filters,
+                                     [graph_id, *params]).fetchone()[0]
         # 高关联节点优先，避免大库截断时只看到任意 UUID 子集；孤立节点仍补入剩余名额。
         rows = cursor.execute(
-            "WITH selected_relations AS (SELECT source_id,target_id FROM knowledge_relations WHERE 1=1" + filters + "),"
+            "WITH selected_relations AS (SELECT source_id,target_id FROM knowledge_relations WHERE graph_id=?" + filters + "),"
             " degrees AS (SELECT object_id,COUNT(*) AS degree FROM ("
             "SELECT source_id AS object_id FROM selected_relations UNION ALL "
             "SELECT target_id AS object_id FROM selected_relations) GROUP BY object_id),"
             " selected_nodes AS (SELECT o.id,COALESCE(d.degree,0) AS degree FROM knowledge_objects o "
-            "LEFT JOIN degrees d ON d.object_id=o.id ORDER BY degree DESC,o.id LIMIT ?) "
+            "LEFT JOIN degrees d ON d.object_id=o.id WHERE o.graph_id=? ORDER BY degree DESC,o.id LIMIT ?) "
             "SELECT o." + SUMMARY_COLUMNS.replace(",", ",o.") + " FROM selected_nodes s "
-            "JOIN knowledge_objects o ON o.id=s.id ORDER BY s.degree DESC,o.id",
-            [*params, query.max_nodes + 1],
+            "JOIN knowledge_objects o ON o.id=s.id AND o.graph_id=? ORDER BY s.degree DESC,o.id",
+            [graph_id, *params, graph_id, query.max_nodes + 1, graph_id],
         ).fetchall()
         truncated = total_nodes > query.max_nodes or total_edges > query.max_edges
         nodes = [dict(row) for row in rows[:query.max_nodes]]
@@ -603,24 +876,24 @@ def graph_overview(**kwargs):
             ordered_ids = sorted(node_ids)
             placeholders = ",".join("?" for _ in ordered_ids)
             rows = cursor.execute(
-                "SELECT * FROM knowledge_relations WHERE source_id IN (" + placeholders + ") AND target_id IN (" +
+                "SELECT * FROM knowledge_relations WHERE graph_id=? AND source_id IN (" + placeholders + ") AND target_id IN (" +
                 placeholders + ")" + filters + " ORDER BY id LIMIT ?",
-                [*ordered_ids, *ordered_ids, *params, query.max_edges + 1],
+                [graph_id, *ordered_ids, *ordered_ids, *params, query.max_edges + 1],
             ).fetchall()
             if len(rows) > query.max_edges:
                 truncated = True
             edges = [dict(row) for row in rows[:query.max_edges]]
             titles = {node["id"]: node["title"] for node in nodes}
             counts = dict(cursor.execute(
-                f"SELECT relation_id,COUNT(*) FROM knowledge_evidence WHERE relation_id IN ({','.join('?' for _ in edges)}) GROUP BY relation_id",
-                [edge["id"] for edge in edges],
+                f"SELECT relation_id,COUNT(*) FROM knowledge_evidence WHERE graph_id=? AND relation_id IN ({','.join('?' for _ in edges)}) GROUP BY relation_id",
+                [graph_id, *[edge["id"] for edge in edges]],
             ).fetchall()) if edges else {}
             for edge in edges:
                 edge["kind"] = "relation"
                 edge["symmetric"] = edge["predicate"] in SYMMETRIC
                 edge["evidence_count"] = counts.get(edge["id"], 0)
                 edge["display"] = _relation_display(edge, titles)
-        return {"library_id": _library_id(cursor), "root_id": nodes[0]["id"] if nodes else None, "nodes": nodes, "edges": edges,
+        return {"library_id": _library_id(cursor), "graph_id": graph_id, "root_id": nodes[0]["id"] if nodes else None, "nodes": nodes, "edges": edges,
                 "overview": True, "truncated": truncated, "depth": 0,
                 "max_nodes": query.max_nodes, "max_edges": query.max_edges,
                 "total_nodes": total_nodes, "total_edges": total_edges,
@@ -629,10 +902,12 @@ def graph_overview(**kwargs):
 
 def lint(**kwargs):
     query = _validate(models.LintInput, kwargs)
-    where, args = "", []
+    with get_db_cursor() as cursor:
+        graph_id = _graph_id(cursor, query.graph_id)
+    where, args = " WHERE graph_id=?", [graph_id]
     if query.object_ids is not None:
-        where = " WHERE id IN (" + ",".join("?" for _ in query.object_ids) + ")" if query.object_ids else " WHERE 0"
-        args = query.object_ids
+        where += " AND id IN (" + ",".join("?" for _ in query.object_ids) + ")" if query.object_ids else " AND 0"
+        args.extend(query.object_ids)
     issues, truncated = [], False
     with get_db_cursor() as cursor:
         cursor.execute("BEGIN")
@@ -643,29 +918,30 @@ def lint(**kwargs):
             oid = obj["id"]
             # 每个对象的附属记录也有上限，避免高出度页将 lint 变成无界全库扫描。
             relations = cursor.execute(
-                "SELECT id,source_id,predicate,target_id,description FROM knowledge_relations WHERE source_id=? OR target_id=? ORDER BY id LIMIT 301",
-                (oid, oid)).fetchall()
+                "SELECT id,source_id,predicate,target_id,description FROM knowledge_relations WHERE graph_id=? AND (source_id=? OR target_id=?) ORDER BY id LIMIT 301",
+                (graph_id, oid, oid)).fetchall()
             if len(relations) > 300:
                 truncated = True
             if not relations:
                 issues.append({"code": "ISOLATED_OBJECT", "object_id": oid, "message": "孤立对象不一定有误"})
             relation_ids = [row["id"] for row in relations[:300]]
             missing_evidence = [row for row in relations[:300]
-                                if not cursor.execute("SELECT 1 FROM knowledge_evidence WHERE relation_id=? LIMIT 1", (row["id"],)).fetchone()]
+                                if not cursor.execute("SELECT 1 FROM knowledge_evidence WHERE graph_id=? AND relation_id=? LIMIT 1", (graph_id, row["id"])).fetchone()]
             if missing_evidence:
                 endpoints = {row[column] for row in missing_evidence for column in ("source_id", "target_id")}
                 titles = dict(cursor.execute(
-                    f"SELECT id,title FROM knowledge_objects WHERE id IN ({','.join('?' for _ in endpoints)})",
-                    sorted(endpoints)).fetchall())
+                    f"SELECT id,title FROM knowledge_objects WHERE graph_id=? AND id IN ({','.join('?' for _ in endpoints)})",
+                    [graph_id, *sorted(endpoints)]).fetchall())
                 for row in missing_evidence:
                     issues.append({"code": "RELATION_WITHOUT_EVIDENCE", "relation_id": row["id"],
                                    "predicate": row["predicate"], "description": row["description"],
                                    "source_id": row["source_id"], "source_title": titles.get(row["source_id"]),
                                    "target_id": row["target_id"], "target_title": titles.get(row["target_id"])})
-            evidence_where = "object_id=?"
-            evidence_args = [oid]
+            evidence_where = "graph_id=? AND object_id=?"
+            evidence_args = [graph_id, oid]
             if relation_ids:
-                evidence_where += f" OR relation_id IN ({','.join('?' for _ in relation_ids)})"
+                evidence_where += f" OR (graph_id=? AND relation_id IN ({','.join('?' for _ in relation_ids)}))"
+                evidence_args.append(graph_id)
                 evidence_args.extend(relation_ids)
             evidence = cursor.execute("SELECT * FROM knowledge_evidence WHERE " + evidence_where + " ORDER BY id LIMIT 201", evidence_args).fetchall()
             if len(evidence) > 200:
@@ -677,9 +953,9 @@ def lint(**kwargs):
             names = list(dict.fromkeys([obj["title_norm"], *json.loads(obj["aliases_norm_json"])]))
             marks = ",".join("?" for _ in names)
             candidates = cursor.execute(f"""SELECT id,kind,title,summary FROM knowledge_objects
-                WHERE id != ? AND (title_norm IN ({marks}) OR EXISTS
+                WHERE graph_id=? AND id != ? AND (title_norm IN ({marks}) OR EXISTS
                 (SELECT 1 FROM json_each(aliases_norm_json) a WHERE a.value IN ({marks})))
-                ORDER BY id LIMIT 21""", [oid, *names, *names]).fetchall()
+                ORDER BY id LIMIT 21""", [graph_id, oid, *names, *names]).fetchall()
             if len(candidates) > 20:
                 truncated = True
             if candidates:
@@ -700,17 +976,18 @@ def rebuild_index():
         return " ".join(tokenize_query(text or ""))
 
     with get_db_cursor(write=True) as cursor:
-        cursor.execute("DELETE FROM knowledge_fts")
-        cursor.execute("DELETE FROM knowledge_relation_fts")
-        rows = cursor.execute("SELECT id,title,aliases_json,summary FROM knowledge_objects ORDER BY id").fetchall()
-        cursor.executemany("INSERT INTO knowledge_fts(object_id,title,aliases,summary) VALUES (?,?,?,?)",
-                           [(row["id"], tokens(row["title"]),
+        graph_id = _graph_id(cursor)
+        cursor.execute("DELETE FROM knowledge_fts WHERE graph_id=?", (graph_id,))
+        cursor.execute("DELETE FROM knowledge_relation_fts WHERE graph_id=?", (graph_id,))
+        rows = cursor.execute("SELECT id,title,aliases_json,summary FROM knowledge_objects WHERE graph_id=? ORDER BY id", (graph_id,)).fetchall()
+        cursor.executemany("INSERT INTO knowledge_fts(graph_id,object_id,title,aliases,summary) VALUES (?,?,?,?,?)",
+                           [(graph_id, row["id"], tokens(row["title"]),
                              tokens(" ".join(json.loads(row["aliases_json"]))), tokens(row["summary"]))
                             for row in rows])
-        relations = cursor.execute("SELECT id,description,qualifier FROM knowledge_relations ORDER BY id").fetchall()
-        cursor.executemany("INSERT INTO knowledge_relation_fts(relation_id,description,qualifier) VALUES (?,?,?)",
-                           [(row["id"], tokens(row["description"]), tokens(row["qualifier"])) for row in relations])
-        return {"committed": True, "dry_run": False, "indexed_objects": len(rows),
+        relations = cursor.execute("SELECT id,description,qualifier FROM knowledge_relations WHERE graph_id=? ORDER BY id", (graph_id,)).fetchall()
+        cursor.executemany("INSERT INTO knowledge_relation_fts(graph_id,relation_id,description,qualifier) VALUES (?,?,?,?)",
+                           [(graph_id, row["id"], tokens(row["description"]), tokens(row["qualifier"])) for row in relations])
+        return {"committed": True, "dry_run": False, "graph_id": graph_id, "indexed_objects": len(rows),
                 "indexed_relations": len(relations), "index_status": "current",
                 "rewrote_records": False, "library_id": _library_id(cursor)}
 

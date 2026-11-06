@@ -37,6 +37,7 @@ from app.skills import get_version
 
 VERSION = get_version()
 _DEFAULT_TIMEOUT = 300
+MAX_GRAPH_IMPORT_BYTES = 2 * 1024 * 1024
 _JSON_REQUESTED = False
 
 
@@ -853,6 +854,27 @@ def _read_text(path_value: str) -> str:
         raise ClientError(f"读取 UTF-8 文件失败：{path}: {exc}", code="FILE_ERROR") from exc
 
 
+def _read_graph_document(path_value: str) -> str:
+    try:
+        if path_value == "-":
+            stream = getattr(sys.stdin, "buffer", None)
+            if stream is not None:
+                raw = stream.read(MAX_GRAPH_IMPORT_BYTES + 1)
+            else:
+                text = sys.stdin.read(MAX_GRAPH_IMPORT_BYTES + 1)
+                raw = text.encode("utf-8")
+        else:
+            with Path(path_value).open("rb") as source:
+                raw = source.read(MAX_GRAPH_IMPORT_BYTES + 1)
+        if len(raw) > MAX_GRAPH_IMPORT_BYTES:
+            raise ClientError("图谱导入文件不能超过 2 MiB", code="INPUT_TOO_LARGE")
+        return raw.decode("utf-8")
+    except ClientError:
+        raise
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ClientError(f"读取 UTF-8 导入文件失败：{exc}", code="FILE_ERROR") from exc
+
+
 def _read_input_json(path_value: str) -> Any:
     if path_value == "-":
         try:
@@ -912,6 +934,9 @@ def _add_knowledge_commands(commands, namespace):
     if not is_wiki:
         descriptions["graph"] = "读取有界局部语义图；按实体候选检索时先 search，再展开一跳"
         descriptions["relation-search"] = "按关系描述与适用条件检索关系；端点名称需先 search 实体再展开图"
+        descriptions["spaces"] = "列出、创建、重命名或删除知识图谱空间"
+        descriptions["export"] = "导出一个全局图为 JSON 或 GraphML"
+        descriptions["import"] = "预览或导入 JSON/GraphML 图谱"
     for name, help_text in descriptions.items():
         sub = operations.add_parser(name, help=help_text, description=help_text)
         _add_runtime_options(sub)
@@ -944,8 +969,31 @@ def _add_knowledge_commands(commands, namespace):
             else:
                 sub.add_argument("kind", choices=kinds if name == "history" else (*kinds, "evidence"))
             sub.add_argument("id", help="记录 UUID，不是文件/卡片整数 ID")
+        if name == "spaces":
+            sub.add_argument("action", choices=("list", "create", "rename", "delete"))
+            sub.add_argument("--id", help="知识图谱 UUID")
+            sub.add_argument("--name", help="知识图谱名称")
+            sub.add_argument("--impact-token", help="spaces delete 预览返回的 token")
+            confirmation = sub.add_mutually_exclusive_group()
+            confirmation.add_argument("--dry-run", action="store_true", help="只预览空间删除，不提交")
+            confirmation.add_argument("--yes", action="store_true", help="确认删除知识空间")
+        if name == "export":
+            sub.add_argument("--graph-id", help="知识图谱 UUID；省略时使用默认图谱")
+            sub.add_argument("--format", choices=("json", "graphml"), default="json")
+            sub.add_argument("--output", type=Path, required=True)
+        if name == "import":
+            sub.add_argument("--input", required=True, help="UTF-8 JSON/GraphML 文件（最大 2 MiB），或 - 读 stdin")
+            sub.add_argument("--format", choices=("json", "graphml"), required=True)
+            sub.add_argument("--target-graph-id", help="并入已有图谱；省略时创建新图谱")
+            sub.add_argument("--graph-name", help="新建图谱时覆盖导入文件中的名称")
+            confirmation = sub.add_mutually_exclusive_group()
+            confirmation.add_argument("--dry-run", action="store_true", default=True, help="只预览，不写入（默认）")
+            confirmation.add_argument("--yes", action="store_true", help="确认正式导入")
+        if name in {"list", "search", "relation-search", "get", "references", "lint", "history", "request", "apply", "delete"} and not is_wiki:
+            sub.add_argument("--graph-id", help="知识图谱 UUID；省略时使用默认图谱")
         if name == "graph":
             sub.add_argument("root_id", help="根图实体 UUID")
+            sub.add_argument("--graph-id", help="知识图谱 UUID；省略时使用默认图谱")
             sub.add_argument("--depth", type=int, choices=(1, 2), default=1)
             sub.add_argument("--predicate", dest="predicates", action="append")
             sub.add_argument("--status", dest="statuses", action="append")
@@ -981,6 +1029,8 @@ def _add_knowledge_commands(commands, namespace):
         for action in ("add", "update"):
             sub = actions.add_parser(action, help=f"{'新增' if action == 'add' else '增量修改'}{label}")
             _add_runtime_options(sub)
+            if not is_wiki:
+                sub.add_argument("--graph-id", help="知识图谱 UUID；省略时使用默认图谱")
             adding = action == "add"
             if not adding:
                 sub.add_argument("id", help="已有记录 UUID；不按标题匹配")
@@ -1015,6 +1065,17 @@ def _add_knowledge_commands(commands, namespace):
                               help="把请求自动保存到数据目录 requests/ 下并回传路径；无需自行命名")
             sub.add_argument("--reason", help="修改原因；省略时记录 CLI 操作名称")
             sub.add_argument("--dry-run", action="store_true", help="只预检不写入；给了请求文件时仍会保存")
+
+
+def _graph_scope(args: argparse.Namespace, payload: dict[str, Any]) -> dict[str, Any]:
+    if getattr(args, "command", None) != "graph":
+        return payload
+    selected = getattr(args, "graph_id", None)
+    embedded = payload.get("graph_id")
+    if selected is not None and embedded is not None and selected != embedded:
+        raise ClientError("--graph-id 与请求 JSON 中的 graph_id 不一致", code="INVALID_ARGUMENT")
+    graph_id = selected or embedded
+    return {**payload, "graph_id": graph_id} if graph_id is not None else payload
 
 
 def _wiki_input(client: PieceClient, value: dict[str, Any]) -> dict[str, Any]:
@@ -1077,12 +1138,13 @@ def _wiki_intent(client: PieceClient, args: argparse.Namespace) -> dict[str, Any
         items.append(item)
     items.extend(_resolve_inline_evidence(client, args, args.evidence))
     try:
-        return intent.build_intent(
+        payload = intent.build_intent(
             kind, action, values, items, args.stance,
             reason=args.reason, record_id=getattr(args, "id", None),
             expected_revision=getattr(args, "expected_revision", None),
             expected_content_hash=getattr(args, "expected_content_hash", None),
             actor=f"CLI {args.command}")
+        return _graph_scope(args, payload)
     except BusinessError as exc:
         raise ClientError(str(exc).replace("stance ", "--stance ", 1), code=exc.code) from None
 
@@ -1434,6 +1496,8 @@ def _wiki_recovery(args: argparse.Namespace, result: dict[str, Any], payload=Non
     if result.get("success"):
         return result
     data = dict(result.get("data") or {})
+    if args.command == "graph" and getattr(args, "graph_id", None):
+        data.setdefault("graph_id", args.graph_id)
     code = (result.get("error") or {}).get("code")
     detail = data
     if args.command == "wiki" and data.get("errors") and isinstance(data["errors"][0], dict):
@@ -1474,6 +1538,9 @@ def _wiki_recovery(args: argparse.Namespace, result: dict[str, Any], payload=Non
                  if request_file is not None else [args.command, "request", key, "--read-back"])
         hint = "先查询原请求；结果未知时不要换键重提，只能在核对后原样重试同一请求文件"
     if words is not None:
+        graph_id = getattr(args, "graph_id", None) or payload.get("graph_id")
+        if args.command == "graph" and graph_id and "--graph-id" not in words:
+            words.extend(("--graph-id", graph_id))
         data.update(_wiki_next(args, words, hint))
     result["data"] = data
     return result
@@ -1510,7 +1577,11 @@ def _wiki_read_back(client: PieceClient, args: argparse.Namespace, result: dict[
     next_record = None
     for (kind, record_id), submitted in items[:limit]:
         try:
-            response = client.post(_knowledge_path(args, "get"), {"kind": kind, "id": record_id})
+            read_payload = {"kind": kind, "id": record_id}
+            graph_id = getattr(args, "graph_id", None) or data.get("graph_id")
+            if args.command == "graph" and graph_id:
+                read_payload["graph_id"] = graph_id
+            response = client.post(_knowledge_path(args, "get"), read_payload)
         except (ClientError, KeyboardInterrupt) as exc:
             issues.append({"kind": kind, "id": record_id,
                            "code": exc.code if isinstance(exc, ClientError) else "INTERRUPTED",
@@ -1566,7 +1637,11 @@ def _wiki_read_back(client: PieceClient, args: argparse.Namespace, result: dict[
         next_record = items[limit][0]
     data["recovery"] = {**data.get("recovery", {}), "do_not_resubmit": True}
     if next_record is not None:
-        data.update(_wiki_next(args, [args.command, "get", *next_record], "写入已提交，只补充读回和比较，不重新提交"))
+        words = [args.command, "get", *next_record]
+        graph_id = getattr(args, "graph_id", None) or data.get("graph_id")
+        if args.command == "graph" and graph_id:
+            words.extend(("--graph-id", graph_id))
+        data.update(_wiki_next(args, words, "写入已提交，只补充读回和比较，不重新提交"))
     return make_envelope(False, "写入已提交，但读回不完整或状态已变化；不要重新写入", data,
                          {"code": "READ_BACK_INCOMPLETE", "message": "提交已成功，需继续只读核查"})
 
@@ -1833,6 +1908,51 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if command in {"wiki", "graph"}:
         operation = args.knowledge_command
         path = _knowledge_path(args, operation)
+        if command == "graph" and operation == "spaces":
+            if args.action == "list":
+                return _simple(client.post("/api/v1/knowledge/graph-list", {}))
+            if args.action == "create":
+                if not args.name:
+                    raise ClientError("spaces create 需要 --name", code="INVALID_ARGUMENT")
+                return _simple(client.post("/api/v1/knowledge/graph-create", {"name": args.name}))
+            if not args.id:
+                raise ClientError("spaces 操作需要 --id", code="INVALID_ARGUMENT")
+            if args.action == "rename":
+                if not args.name:
+                    raise ClientError("spaces rename 需要 --name", code="INVALID_ARGUMENT")
+                return _simple(client.post("/api/v1/knowledge/graph-rename", {
+                    "graph_id": args.id, "name": args.name,
+                }))
+            if not args.yes:
+                preview = client.post("/api/v1/knowledge/graph-delete", {
+                    "graph_id": args.id, "confirmed": False,
+                })
+                return _simple(preview)
+            if not args.impact_token:
+                raise ClientError("正式删除需先预览并提供 --impact-token", code="CONFIRMATION_REQUIRED")
+            return _simple(client.post("/api/v1/knowledge/graph-delete", {
+                "graph_id": args.id, "confirmed": True, "impact_token": args.impact_token,
+            }))
+        if command == "graph" and operation == "export":
+            from urllib.parse import urlencode
+            query_values = {"format": args.format}
+            if args.graph_id is not None:
+                query_values["graph_id"] = args.graph_id
+            query = urlencode(query_values)
+            result = client.download("/api/v1/knowledge/export?" + query, args.output, overwrite=False)
+            return _simple(make_envelope(True, "知识图谱已导出", result))
+        if command == "graph" and operation == "import":
+            document = _read_graph_document(args.input)
+            if not args.yes or args.dry_run:
+                return _simple(client.post("/api/v1/knowledge/import", {
+                    "format": args.format, "document": document,
+                    "target_graph_id": args.target_graph_id, "graph_name": args.graph_name,
+                    "dry_run": True, "confirmed": False,
+                }))
+            payload = {"format": args.format, "document": document,
+                       "target_graph_id": args.target_graph_id, "graph_name": args.graph_name,
+                       "dry_run": False, "confirmed": True}
+            return _simple(client.post("/api/v1/knowledge/import", payload))
         if operation in {"page", "object", "relation"}:
             request_file = _request_file_path(args)
             # 回填到 args，使失败恢复（_wiki_recovery）能引用实际落盘路径。
@@ -1849,7 +1969,7 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             result["data"] = {**(result.get("data") or {}), **location}
             return _simple(result)
         if operation == "apply":
-            payload = _wiki_input(client, _object_input(args.input))
+            payload = _graph_scope(args, _wiki_input(client, _object_input(args.input)))
             if args.request_id is not None:
                 if "request_key" in payload and payload["request_key"] != args.request_id:
                     raise ClientError("--request-id 与输入 request_key 不一致", code="INVALID_ARGUMENT")
@@ -1861,7 +1981,7 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 payload["request_key"] = str(uuid.uuid4())
             return _simple(_wiki_submit(client, args, payload, read_back=args.read_back))
         if operation == "delete":
-            payload = {"kind": args.kind, "id": args.id}
+            payload = _graph_scope(args, {"kind": args.kind, "id": args.id})
             if args.expected_revision is not None:
                 payload["expected_revision"] = args.expected_revision
             if getattr(args, "expected_content_hash", None) is not None:
@@ -1877,7 +1997,9 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 "request_key": args.request_id, "confirmed": _confirm(args, "删除知识记录（不删除来源文件）"),
             }))
         if operation == "request" and args.input is not None:
-            saved = _wiki_input(client, _object_input(args.input))
+            saved = _graph_scope(args, _wiki_input(client, _object_input(args.input)))
+            if command == "graph" and getattr(args, "graph_id", None) is None:
+                args.graph_id = saved.get("graph_id")
             args.request_key = saved.get("request_key")
             if not isinstance(args.request_key, str) or not args.request_key.strip():
                 raise ClientError("请求文件缺少有效 request_key", code="INVALID_ARGUMENT")
@@ -1904,7 +2026,12 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "rebuild-index": (),
             "list-recovery": ("status", "limit", "offset"),
         }[operation]
-        result = client.post(path, {key: getattr(args, key) for key in fields if getattr(args, key) is not None})
+        payload = {key: getattr(args, key) for key in fields if getattr(args, key) is not None}
+        payload = _graph_scope(args, payload)
+        if command == "graph" and operation == "request":
+            payload["graph_id"] = getattr(args, "graph_id", None) or payload.get("graph_id")
+            payload = {key: value for key, value in payload.items() if value is not None}
+        result = client.post(path, payload)
         if operation == "request" and args.read_back:
             if result.get("success"):
                 result["data"] = {"request_key": args.request_key, **(result.get("data") or {})}

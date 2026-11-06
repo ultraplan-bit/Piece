@@ -15,16 +15,21 @@ from indexing.mcp import shared
 from indexing.mcp.auth import apply_bearer_auth
 from indexing.mcp.shared import Evidence, Reason, Revision, Stances
 from indexing.services import knowledge_service as knowledge
+from indexing.services.errors import BusinessError
+from indexing.utils import run_sync
 
 mcp = FastMCP(
     "piece-graph",
     instructions="""用户个人知识图谱：实体、有证据的语义关系，以及只读的结构核查。不读文件/卡片，也不管理 Wiki 页面。
 
+图谱空间：knowledge-space-list 查看空间；knowledge-space-create 新建空间；knowledge-space-rename 重命名空间；knowledge-space-delete 删除非默认空间（正式删除前须先预览并取得用户确认）。knowledge-list/search 等知识读写工具接受可选 graph_id，不传使用默认图谱。
+
 读：knowledge-list/search 找候选，knowledge-get 读一条实体/关系/证据（实体没有正文），knowledge-graph 取有界邻域，
 knowledge-references 按来源文件反查引用，knowledge-lint 做只读结构检查，knowledge-history/request 读修订与已提交结果。
+knowledge-export 导出全图；knowledge-import 默认 dry_run=true 预览，写入须显式 dry_run=false、confirmed=true。无冲突时按 ID merge；可传 target_graph_id 并入已有图谱，否则新建图谱（可用 graph_name 覆盖导入名称）。GraphML 仅支持 Piece 扩展的严格子集，不保证兼容任意 GraphML 工具。
 
 调用形状速查（MCP arguments）：
-- `params` 包装：knowledge-list/search/relation-search/get/graph/references/lint/history/request/apply/delete，例 `{"params":{"query":"关键词"}}`；批次写入例 `{"params":{"reason":"补关系证据","evidence":[{"relation":{"id":"关系UUID"},"source_kind":"user","quote":"用户明确陈述的原文"}]}}`。
+- `params` 包装：knowledge-list/search/relation-search/get/graph/references/lint/history/request/apply/delete/export/import，例 `{"params":{"query":"关键词"}}`；批次写入例 `{"params":{"reason":"补关系证据","evidence":[{"relation":{"id":"关系UUID"},"source_kind":"user","quote":"用户明确陈述的原文"}]}}`。
 - 顶层平铺：knowledge-object-add/update、knowledge-relation-add/update，例 `{"title":"实体"}`；不要再套 `params`。
 - 无参数：knowledge-rebuild-index。
 
@@ -45,7 +50,7 @@ knowledge_apply/delete 批次工具（只收一个 params JSON 对象，正式�
 不要给扁平工具套 params。图谱写入是同步本地事务，不调用模型或嵌入，没有 task_id。
 
 写前先读：用 knowledge-search 查重，写后用 knowledge-get 读回；更新一律带 expected_revision，冲突时重读再决定，
-不要盲改。删除必须先 dry_run 预览并取得用户确认，返回的 impact_token 要在正式删除时原样带回。
+不要盲改。记录删除必须先 dry_run 预览并取得用户确认，返回的 impact_token 要在正式删除时原样带回。删除知识空间也必须先调用 knowledge-space-delete（confirmed=false）预览，再取得用户确认后原样传回 impact_token 并设置 confirmed=true；默认空间不可删除。
 超时或响应丢失用 knowledge-request 按 request_key 查原结果，或原键原样重试，不要换键重复新建。
 
 从文档建图（一次读一段、边读边写，不要先读完整篇再动手）：
@@ -69,6 +74,105 @@ knowledge_apply/delete 批次工具（只收一个 params JSON 对象，正式�
 )
 
 apply_bearer_auth(mcp, "graph")
+
+
+# ==================== 图谱空间与交换 ====================
+
+
+@mcp.tool(name="knowledge-space-list", annotations=shared.READ)
+async def knowledge_graph_list() -> dict:
+    """列出可用知识图谱空间，包含 UUID、名称与默认图标记；服务仅列举空间，不改变默认图谱。"""
+    try:
+        result = await run_sync(knowledge.list_graphs)
+    except BusinessError as exc:
+        return {"success": False, "message": str(exc), "data": exc.data,
+                "error": {"code": exc.code, "message": str(exc)}}
+    return {"success": True, "message": "查询成功", "data": result}
+
+
+@mcp.tool(name="knowledge-space-create", annotations=shared.WRITE_ADD)
+async def knowledge_graph_create(name: Annotated[str, Field(min_length=1, max_length=500)]) -> dict:
+    """创建一个知识图谱空间；名称不可与已有空间重复。返回新空间的 UUID，可用于各知识读写工具的 graph_id。
+    """
+    try:
+        result = await run_sync(knowledge.create_graph, name)
+    except BusinessError as exc:
+        return {"success": False, "message": str(exc), "data": exc.data,
+                "error": {"code": exc.code, "message": str(exc)}}
+    return {"success": True, "message": "图谱空间已创建", "data": result}
+
+
+@mcp.tool(name="knowledge-space-rename", annotations=shared.WRITE)
+async def knowledge_graph_rename(
+    graph_id: Annotated[str, Field(min_length=36, max_length=36)],
+    name: Annotated[str, Field(min_length=1, max_length=500)],
+) -> dict:
+    """按 graph_id 重命名知识图谱空间；空间 UUID 不变。名称不可与其他空间重复。
+    """
+    try:
+        result = await run_sync(knowledge.rename_graph, graph_id, name)
+    except BusinessError as exc:
+        return {"success": False, "message": str(exc), "data": exc.data,
+                "error": {"code": exc.code, "message": str(exc)}}
+    return {"success": True, "message": "图谱空间已重命名", "data": result}
+
+
+@mcp.tool(name="knowledge-space-delete", annotations=shared.INTENT_UPDATE)
+async def knowledge_graph_delete(
+    graph_id: Annotated[str, Field(min_length=36, max_length=36)],
+    confirmed: bool = False,
+    impact_token: Annotated[str | None, Field(pattern=r"^[0-9a-f]{64}$")] = None,
+) -> dict:
+    """预览或删除知识空间。先以 confirmed=false 读取影响；得到用户确认后原样传 impact_token 并设置 confirmed=true。
+
+    默认空间不可删除；正式删除会级联删除空间内实体、关系、证据、历史和请求记录，不删除来源文件或备份。
+    """
+    try:
+        result = await run_sync(knowledge.delete_graph, graph_id,
+                                confirmed=confirmed, impact_token=impact_token)
+    except BusinessError as exc:
+        return {"success": False, "message": str(exc), "data": exc.data,
+                "error": {"code": exc.code, "message": str(exc)}}
+    return {"success": True,
+            "message": "图谱空间已删除" if result["committed"] else "删除影响预览",
+            "data": result}
+
+
+@mcp.tool(name="knowledge-export", annotations={
+    "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False,
+})
+async def knowledge_export(params: km.ExportInput) -> dict:
+    """导出整个知识图谱，默认导出默认空间；可传 params.graph_id 选择空间，format=json/graphml。
+
+    返回 data.content（完整导出文档）与 graph_id、format、实体/关系/证据数量。GraphML 仅支持 Piece 扩展的严格子集，
+    包含 Piece 私有数据编码，不保证与任意 GraphML 文件或通用 GraphML 工具互通；大导出优先使用文件导出接口。
+    """
+    try:
+        result = await run_sync(knowledge.export_graph, **params.model_dump())
+    except BusinessError as exc:
+        return {"success": False, "message": str(exc), "data": exc.data,
+                "error": {"code": exc.code, "message": str(exc)}}
+    return {"success": True, "message": "知识图谱已导出", "data": result}
+
+
+@mcp.tool(name="knowledge-import", annotations={
+    "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False,
+})
+async def knowledge_import(params: km.ImportInput) -> dict:
+    """导入 JSON 或 Piece 扩展 GraphML 图谱。默认 dry_run=true，只校验冲突并预览，不写入。
+
+    正式写入必须显式设置 dry_run=false 且 confirmed=true。传 target_graph_id 并入指定已有图谱；
+    不传则以导入图谱名称新建图谱，可用 graph_name 覆盖名称。只有无冲突时才 merge 新记录，不覆盖或自动合并既有记录；
+    冲突须读取 conflicts 并人工处理。GraphML 仅支持 Piece 扩展的严格子集，不保证任意 GraphML 兼容。
+    返回 data 含 committed、graph_id、conflicts 与各类数量。
+    """
+    try:
+        result = await run_sync(knowledge.import_graph, params.model_dump(), actor="mcp:graph")
+    except BusinessError as exc:
+        return {"success": False, "message": str(exc), "data": exc.data,
+                "error": {"code": exc.code, "message": str(exc)}}
+    return {"success": True, "message": "知识图谱已导入" if result.get("committed") else "导入预览完成，未写入",
+            "data": result}
 
 
 # ==================== 只读查询 ====================

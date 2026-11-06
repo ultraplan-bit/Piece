@@ -91,6 +91,8 @@ class WorkbenchBase:
         self._scroll_areas = {}
         self._scroll_positions = {}
         self._list_rows = {}
+        self._catalog_search = None
+        self._catalog_filters = []
         self.refresh_list = lambda: None
         self.refresh_detail = lambda: None
         self.refresh_workspace = lambda: None
@@ -173,6 +175,7 @@ class WorkbenchBase:
                                       on_change=self.query_changed).props(
                         "outlined dense clearable debounce=300"
                     ).classes("flex-1 min-w-0")
+                    self._catalog_search = search
                     search.on("update:model-value", self.query_committed)
                     search.on("keydown.enter", self.query_entered, js_handler="""(event) => {
                         const field = event.target.closest && event.target.closest('.q-field');
@@ -185,12 +188,13 @@ class WorkbenchBase:
                         f'flat dense round size=sm aria-label="{self.text("search")}"'
                     ).tooltip(self.text("search"))
                 with ui.row().classes("w-full gap-2 flex-nowrap"):
-                    ui.select(self.choices(kinds), label=self.text("kind"), value=self.kind, clearable=True,
-                              on_change=lambda e: setattr(self, "kind", e.value)).props(
+                    kind_filter = ui.select(self.choices(kinds), label=self.text("kind"), value=self.kind, clearable=True,
+                                            on_change=lambda e: setattr(self, "kind", e.value)).props(
                         "dense outlined").classes("flex-1 min-w-0").on("update:model-value", self.filters_changed)
-                    ui.select(self.choices(STATUSES), label=self.text("status"), value=self.status, clearable=True,
-                              on_change=lambda e: setattr(self, "status", e.value)).props(
+                    status_filter = ui.select(self.choices(STATUSES), label=self.text("status"), value=self.status, clearable=True,
+                                              on_change=lambda e: setattr(self, "status", e.value)).props(
                         "dense outlined").classes("flex-1 min-w-0").on("update:model-value", self.filters_changed)
+                    self._catalog_filters = [kind_filter, status_filter]
             with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(list=e.vertical_position)).classes("w-full flex-1 scroll-flush") as area:
                 self._scroll_areas["list"] = area
                 @ui.refreshable

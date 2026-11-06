@@ -29,7 +29,7 @@ from . import knowledge_schema
 from .fts import tokenize_fts_text
 
 logger = logging.getLogger(__name__)
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # 全局连接池（线程安全）
 _connection_pool = None

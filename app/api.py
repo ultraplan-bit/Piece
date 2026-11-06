@@ -10,6 +10,7 @@ import secrets
 import shutil
 import time
 import urllib.parse
+import uuid
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 API_VERSION = 1
 APP_VERSION = get_version()
 MAX_JSON_BYTES = 2 * 1024 * 1024
+MAX_IMPORT_REQUEST_BYTES = MAX_JSON_BYTES * 6 + 4096
 
 
 class CliRequestTimingMiddleware:
@@ -316,13 +318,14 @@ def create_api(runtime):
     # 图谱与 Wiki 的 apply 共用 512 KiB 批次上限（服务端 knowledge_common._check_size）；
     # Wiki 单页 8 MiB 只是文件存储上限，不改变批次 JSON 大小限制。
     apply_limits = {"knowledge/apply": knowledge_common.MAX_REQUEST_BYTES,
-                    "wiki/apply": knowledge_common.MAX_REQUEST_BYTES}
+                    "wiki/apply": knowledge_common.MAX_REQUEST_BYTES,
+                    "knowledge/import": MAX_IMPORT_REQUEST_BYTES}
 
     def register(operation, role, schema, function, *, exclude_unset=False):
         async def endpoint(request: Request):
             _require_role(request, role)
             try:
-                limit = min(MAX_JSON_BYTES, apply_limits[operation]) if operation in apply_limits else MAX_JSON_BYTES
+                limit = apply_limits.get(operation, MAX_JSON_BYTES)
                 payload = schema.model_validate(await _json_body(request, limit)).model_dump(exclude_unset=exclude_unset)
             except ValidationError as exc:
                 fields = [".".join(map(str, e["loc"])) for e in exc.errors(include_input=False)]
@@ -468,6 +471,28 @@ def create_api(runtime):
     register("task/cancel", "write", task_id_model, lambda task_id: public_task(tasks.cancel_task(task_id)))
     register("task/retry", "write", task_id_model, retry)
     register("search", "read", _model("Search", **descendants, query=(str, ...), file_ids=(Ids | None, None), collections=(Names | None, None), limit=(Annotated[int, Field(ge=1, le=50)], 20), diagnostics=(bool, False)), search)
+    @app.get("/api/v1/knowledge/export")
+    async def export_knowledge_graph(
+        request: Request,
+        graph_id: Annotated[str | None, Query()] = None,
+        format: Annotated[Literal["json", "graphml"], Query()] = "json",
+    ):
+        from fastapi.responses import Response
+        _require_role(request, "read")
+        result = await run_sync(knowledge.export_graph, graph_id=graph_id, format=format)
+        extension = "json" if format == "json" else "graphml"
+        filename_id = str(uuid.UUID(result["graph_id"]))
+        content_type = "application/json; charset=utf-8" if format == "json" else "application/graphml+xml; charset=utf-8"
+        return Response(result["content"], media_type=content_type,
+                        headers={"Content-Disposition": f'attachment; filename="piece-graph-{filename_id}.{extension}"'})
+
+    register("knowledge/graph-list", "read", empty, knowledge.list_graphs)
+    register("knowledge/graph-create", "write", km.GraphCreateInput, knowledge.create_graph)
+    register("knowledge/graph-rename", "write", km.GraphRenameInput, knowledge.rename_graph)
+    register("knowledge/graph-delete", "write", km.GraphDeleteInput,
+             lambda **payload: knowledge.delete_graph(**payload))
+    register("knowledge/import", "write", km.ImportInput,
+             lambda **payload: knowledge.import_graph(payload, actor="api:write"))
     register("knowledge/list", "read", km.ListInput, knowledge.list_objects)
     register("knowledge/search", "read", km.SearchInput, knowledge.search_objects)
     register("knowledge/relation-search", "read", km.RelationSearchInput, knowledge.search_relations)
@@ -492,7 +517,8 @@ def create_api(runtime):
     register("wiki/references", "read", wm.ReferencesInput, wiki.references)
     register("wiki/lint", "read", wm.LintInput, wiki.lint)
     register("wiki/history", "read", wm.HistoryInput, wiki.history)
-    register("wiki/request", "read", wm.RequestInput, wiki.request_result)
+    register("wiki/request", "read", wm.RequestInput,
+             lambda request_key, **_: wiki.request_result(request_key))
     register("wiki/apply", "write", wm.ApplyInput,
              lambda **payload: wiki.apply(payload, actor="api:write"), exclude_unset=True)
     register("wiki/delete", "write", wm.DeleteInput,

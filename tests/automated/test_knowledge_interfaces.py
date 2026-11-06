@@ -221,16 +221,33 @@ def test_mcp_protocol_schema_validation_and_partial_updates(api, mcp_servers):
         async with Client(graph.mcp) as graph_client, Client(wiki_server.mcp) as wiki_client:
             graph_tools = {tool.name: tool for tool in await graph_client.list_tools()}
             assert set(graph_tools) == {"knowledge-" + name for name in (
+                "space-list", "space-create", "space-rename", "space-delete", "export", "import",
                 "list", "search", "relation-search", "get", "graph", "references", "lint", "history", "request",
                 "apply", "delete", "rebuild-index", "object-add", "object-update", "relation-add", "relation-update")}
             reads = {name: tool for name, tool in graph_tools.items() if tool.annotations.readOnlyHint}
             assert set(reads) == {"knowledge-" + name for name in (
-                "list", "search", "relation-search", "get", "graph", "references", "lint", "history", "request")}
+                "space-list", "export", "list", "search", "relation-search", "get", "graph", "references", "lint", "history", "request")}
             for tool in reads.values():
                 assert tool.annotations.idempotentHint and not tool.annotations.openWorldHint and not tool.annotations.destructiveHint
-                assert "params" in tool.inputSchema["properties"]
-            for name in ("knowledge-apply", "knowledge-delete"):
+                if tool.name != "knowledge-space-list":
+                    assert "params" in tool.inputSchema["properties"]
+            for name in ("knowledge-apply", "knowledge-delete", "knowledge-import"):
                 assert "params" in graph_tools[name].inputSchema["properties"]
+            assert "params" not in graph_tools["knowledge-space-create"].inputSchema["properties"]
+            assert "params" not in graph_tools["knowledge-space-rename"].inputSchema["properties"]
+            assert "params" not in graph_tools["knowledge-space-delete"].inputSchema["properties"]
+            assert set(graph_tools["knowledge-space-delete"].inputSchema["properties"]) == {
+                "graph_id", "confirmed", "impact_token"}
+            assert graph_tools["knowledge-space-create"].annotations.destructiveHint is False
+            assert graph_tools["knowledge-space-rename"].annotations.destructiveHint is True
+            assert graph_tools["knowledge-space-delete"].annotations.destructiveHint is True
+            assert graph_tools["knowledge-space-delete"].annotations.idempotentHint is False
+            assert graph_tools["knowledge-import"].annotations.idempotentHint is False
+            assert graph_tools["knowledge-import"].inputSchema["properties"]["params"]["$ref"].endswith("ImportInput")
+            import_schema = graph_tools["knowledge-import"].inputSchema["$defs"]["ImportInput"]
+            assert import_schema["properties"]["dry_run"]["default"] is True
+            assert "GraphML 仅支持 Piece 扩展的严格子集" in graph_tools["knowledge-import"].description
+            assert "无冲突时才 merge" in graph_tools["knowledge-import"].description
             assert "params" not in graph_tools["knowledge-rebuild-index"].inputSchema["properties"]
             intents = {"knowledge-object-add", "knowledge-object-update", "knowledge-relation-add", "knowledge-relation-update"}
             for name in intents:
@@ -299,6 +316,70 @@ def test_mcp_protocol_schema_validation_and_partial_updates(api, mcp_servers):
             rejected = (await wiki_client.call_tool("wiki-apply", {"params": large})).data
             assert rejected["error"]["code"] == "INPUT_TOO_LARGE"
             assert (await graph_client.call_tool("knowledge-list", {"params": {}})).data["total"] == 1
+
+            # 空间与 graph_id 自动透传；交换默认预览，确认后 merge。
+            spaces = (await graph_client.call_tool("knowledge-space-list")).data["data"]["graphs"]
+            default_graph = next(graph for graph in spaces if graph["is_default"])
+            created_space = (await graph_client.call_tool("knowledge-space-create", {"name": "MCP交换目标"})).data
+            assert created_space["success"] and created_space["data"]["id"] != default_graph["id"]
+            new_graph_id = created_space["data"]["id"]
+            renamed = (await graph_client.call_tool("knowledge-space-rename", {
+                "graph_id": new_graph_id, "name": "MCP交换目标修订"})).data
+            assert renamed["success"] and renamed["data"]["name"] == "MCP交换目标修订"
+            graph_preview = (await graph_client.call_tool("knowledge-space-delete", {
+                "graph_id": new_graph_id})).data
+            assert graph_preview["success"] and not graph_preview["data"]["committed"]
+            assert graph_preview["data"]["counts"] == {
+                "entities": 0, "relations": 0, "evidence": 0, "history": 0, "requests": 0}
+            assert (await graph_client.call_tool("knowledge-space-delete", {
+                "graph_id": new_graph_id, "confirmed": True,
+                "impact_token": graph_preview["data"]["impact_token"]})).data["success"]
+            new_graph_id = (await graph_client.call_tool("knowledge-space-create", {"name": "MCP交换目标"})).data["data"]["id"]
+
+            export_result = (await graph_client.call_tool("knowledge-export", {
+                "params": {"graph_id": default_graph["id"], "format": "json"}})).data
+            assert export_result["success"] and export_result["data"]["entities"] == 1
+            document = export_result["data"]["content"]
+            # 让导入记录使用新的 UUID，避免与源图谱中全局唯一的记录 ID 重叠。
+            exchange_document = json.loads(document)
+            id_map = {item["id"]: str(uuid4())
+                      for section in ("entities", "relations", "evidence")
+                      for item in exchange_document[section]}
+            for item in exchange_document["entities"] + exchange_document["relations"] + exchange_document["evidence"]:
+                item["id"] = id_map[item["id"]]
+            for relation in exchange_document["relations"]:
+                relation["source_id"] = id_map[relation["source_id"]]
+                relation["target_id"] = id_map[relation["target_id"]]
+            for evidence in exchange_document["evidence"]:
+                for owner in ("object_id", "relation_id"):
+                    if evidence[owner] is not None:
+                        evidence[owner] = id_map[evidence[owner]]
+            document = json.dumps(exchange_document, ensure_ascii=False)
+            preview_import = (await graph_client.call_tool("knowledge-import", {
+                "params": {"format": "json", "document": document}})).data
+            assert preview_import["success"] and preview_import["data"]["dry_run"]
+            assert not preview_import["data"]["committed"]
+            assert preview_import["data"]["conflicts"] == []
+            assert (await graph_client.call_tool("knowledge-list", {"params": {"graph_id": new_graph_id}})).data["total"] == 0
+            unconfirmed = await graph_client.call_tool("knowledge-import", {"params": {
+                "format": "json", "document": document, "dry_run": False}}, raise_on_error=False)
+            assert unconfirmed.is_error
+            committed_import = (await graph_client.call_tool("knowledge-import", {"params": {
+                "format": "json", "document": document, "target_graph_id": new_graph_id,
+                "dry_run": False, "confirmed": True}})).data
+            assert committed_import["success"] and committed_import["data"]["committed"]
+            assert committed_import["data"]["graph_id"] == new_graph_id
+            assert (await graph_client.call_tool("knowledge-list", {
+                "params": {"graph_id": new_graph_id}})).data["total"] == 1
+            assert (await graph_client.call_tool("knowledge-list", {"params": {}})).data["total"] == 1
+            protected_preview = (await graph_client.call_tool("knowledge-space-delete", {
+                "graph_id": default_graph["id"]})).data
+            assert not protected_preview["success"]
+            assert protected_preview["error"]["code"] == "INVALID_INPUT"
+            default_delete = (await graph_client.call_tool("knowledge-space-delete", {
+                "graph_id": default_graph["id"]})).data
+            assert not default_delete["success"]
+            assert default_delete["error"]["code"] == "INVALID_INPUT"
             return oid
 
     oid = asyncio.run(scenario())

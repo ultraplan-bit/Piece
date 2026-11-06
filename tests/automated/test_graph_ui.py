@@ -122,6 +122,9 @@ def test_real_nicegui_graph_forms_construct(knowledge_base, monkeypatch):
     asyncio.run(workbench.search())
     with ui.column() as container:
         workbench.render_middle()
+        assert isinstance(workbench.query_input, ui.input)
+        assert len(workbench.filter_controls) == 2
+        assert all(isinstance(control, ui.select) for control in workbench.filter_controls)
         workbench.render_right()
         workbench.edit_object(deepcopy(workbench.detail["record"]))
         workbench.edit_edge(oid)
@@ -241,7 +244,7 @@ def test_graph_zoom_dispatches_origin_and_filters_reload(knowledge_base, monkeyp
             assert len(scripts) == 1
             assert "graphRoam" in scripts[0] and "originX" in scripts[0] and "originY" in scripts[0]
 
-            # 全局球体的缩放是相机距离，不应调用局部图的 graphRoam。
+            # 全局概览缩放通过调整 3D 球体的相机距离实现。
             workbench.graph = service.graph_overview()
             scripts.clear()
             await workbench.zoom_graph(1.25)
@@ -333,10 +336,10 @@ def test_graph_global_overview_switching_and_node_drilldown(knowledge_base, monk
             workbench.render_graph()
             assert workbench.chart is not None
             chart = workbench.chart
-            assert chart._props["enable_3d"] is True
             options = chart._props["options"]
+            assert chart._props["enable_3d"] is True
+            assert options["globe"]["show"] is False
             assert options["series"][0]["type"] == "lines3D"
-            assert options["globe"]["viewControl"]["rotateSensitivity"] > 0
         # render_graph installs a refreshable; this controller test has no NiceGUI server loop.
         workbench.refresh_graph = lambda: None
         assert workbench.overview and workbench.graph["overview"]
@@ -349,6 +352,65 @@ def test_graph_global_overview_switching_and_node_drilldown(knowledge_base, monk
 
     asyncio.run(scenario())
     workbench.refresh_graph = lambda: None
+    container.delete()
+
+
+def test_graph_workspace_toolbar_groups_space_actions_and_modes(knowledge_base):
+    from nicegui import ui
+    from app.ui.views.graph_view import GraphWorkbench
+    from indexing.services import knowledge_service as service
+
+    spaces = service.list_graphs()["graphs"]
+    default = next(space for space in spaces if space["is_default"])
+    workbench = GraphWorkbench()
+    workbench.graphs = spaces
+    workbench._graphs_loaded = True
+    workbench.graph_id = default["id"]
+
+    with ui.column() as container:
+        workbench.render_right()
+        picker = next(element for element in container.descendants()
+                      if "graph-space-picker" in element.classes)
+        mode_switch = next(element for element in container.descendants()
+                           if "graph-mode-switch" in element.classes)
+        mode_buttons = [element for element in mode_switch.descendants()
+                        if isinstance(element, ui.button)]
+        assert picker.value == default["id"]
+        assert [button._props["aria-pressed"] for button in mode_buttons] == ["true", "false"]
+
+        assert any("mode-active" in button.classes for button in mode_buttons)
+        assert all("no-ripple" in button._props for button in mode_buttons)
+    container.delete()
+
+
+def test_graph_space_delete_control_is_hidden_for_default_only(knowledge_base):
+    from nicegui import ui
+    from app.ui.views.graph_view import GraphWorkbench
+    from indexing.services import knowledge_service as service
+
+    spaces = service.list_graphs()["graphs"]
+    default = next(space for space in spaces if space["is_default"])
+    secondary = service.create_graph("可删除空间")
+
+    for graph_id, visible in ((default["id"], False), (secondary["id"], True)):
+        workbench = GraphWorkbench()
+        workbench.graphs = [*spaces, secondary]
+        workbench._graphs_loaded = True
+        workbench.graph_id = graph_id
+        with ui.column() as container:
+            workbench.render_right()
+            labels = [getattr(element, "text", "") for element in container.descendants()]
+            assert (workbench.text("delete_graph") in labels) is visible
+        container.delete()
+
+    workbench = GraphWorkbench()
+    workbench.graphs = [*spaces, secondary]
+    workbench._graphs_loaded = True
+    workbench.graph_id = secondary["id"]
+    with ui.column() as container:
+        workbench.delete_graph_dialog()
+        labels = [getattr(element, "text", "") for element in container.descendants()]
+        assert workbench.text("confirm_delete_graph") in labels
     container.delete()
 
 

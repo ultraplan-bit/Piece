@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 playwright = pytest.importorskip("playwright.sync_api")
-from test_collection_browser import gui_service  # noqa: F401
+from test_collection_browser import gui_service
 from app.i18n import t
 
 
@@ -33,6 +33,10 @@ def apply(**parts):
 
 
 def chart_state(page):
+    page.wait_for_function("""() => {
+        const el = document.querySelector('.nicegui-echart');
+        return el && getElement(el.id.slice(1))?.chart?.getOption()?.series?.length;
+    }""")
     return page.locator(".nicegui-echart").evaluate("""el => {
         const chart = getElement(el.id.slice(1)).chart;
         return chart.getOption().series.map(series => ({type: series.type,
@@ -141,7 +145,7 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             # 关系表选择会切到实体详情；重新打开局部图后再切换全局概览。
             page.get_by_role("button", name="图谱中心", exact=True).first.click()
             page.get_by_role("button", name=k("view_graph"), exact=True).click()
-            # 显式切换全局概览：展示完整小图，点击实体可进入其局部图。
+            # 全局概览使用 3D 球状布局，但不显示球体外壳。
             page.get_by_role("button", name=gk("global_graph"), exact=True).click()
             expect(page.get_by_text(t("graph.overview_count", nodes=2, edges=1,
                                       total_nodes=2, total_edges=1), exact=True)).to_be_visible()
@@ -149,9 +153,15 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             assert [series["type"] for series in global_state] == ["lines3D", "scatter3D", "scatter3D"]
             global_nodes = [node for series in global_state[1:] for node in series["data"]]
             assert {node["id"] for node in global_nodes} == {root, target}
-            assert all(all(-180 <= point[0] <= 180 for point in edge["coords"])
-                       for edge in global_state[0]["data"])
-            page.screenshot(path=str(service["path"] / "graph-sphere.png"))
+            focus = next(node for node in global_nodes if node["id"] == root)
+            assert focus["value"] == [0, 0, 1]
+            assert any(focus["value"] in edge["coords"] for edge in global_state[0]["data"])
+            globe_visible = page.locator(".nicegui-echart").evaluate("""el => {
+                const chart = getElement(el.id.slice(1)).chart;
+                return chart.getOption().globe[0].show;
+            }""")
+            assert globe_visible is False
+            page.screenshot(path=str(service["path"] / "graph-overview.png"))
             page.get_by_role("button", name="目标图节点", exact=True).first.click()
             expect(page.get_by_role("button", name=gk("local_graph"), exact=True)).to_be_visible()
             assert chart_state(page)[0]["type"] == "graph"

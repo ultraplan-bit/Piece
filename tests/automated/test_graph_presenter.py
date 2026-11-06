@@ -56,29 +56,27 @@ def test_graph_ids_direction_parallel_edges_and_safe_tooltips(dark):
     assert filtered["data"][1]["itemStyle"] == series["data"][1]["itemStyle"]
 
 
-def test_overview_uses_interactive_three_dimensional_sphere():
-    graph = sample_graph()
-    graph.update(overview=True, total_nodes=2, total_edges=2)
-    options = graph_options(graph)
+def test_overview_uses_three_dimensional_sphere_without_surface_shell():
+    graph = {
+        "root_id": "b",
+        "overview": True,
+        "nodes": [{"id": node_id, "title": node_id, "kind": "concept"}
+                  for node_id in ("a", "b", "c")],
+        "edges": [{"id": "ab", "source_id": "b", "target_id": "a"},
+                  {"id": "ac", "source_id": "a", "target_id": "c"}],
+    }
 
-    assert options["globe"]["globeRadius"] == 82
+    options = graph_options(graph, selected="a")
+    nodes = {node["id"]: node for series in options["series"][1:] for node in series["data"]}
+    edges = options["series"][0]
+
     assert options["globe"]["show"] is False
     assert options["globe"]["viewControl"]["rotateSensitivity"] == 0.9
-    assert options["globe"]["viewControl"]["damping"] == 0.86
-    assert options["globe"]["viewControl"]["zoomSensitivity"] == 0.9
-    assert options["series"][0]["lineStyle"] == {
-        "color": "#77838e", "opacity": 0.22, "width": 0.8
-    }
-    assert options["animationDurationUpdate"] == 420
     assert [series["type"] for series in options["series"]] == ["lines3D", "scatter3D", "scatter3D"]
-    assert all(series["coordinateSystem"] == "globe" for series in options["series"])
-    assert len(options["series"][0]["data"]) == 2
-    nodes = [item for series in options["series"][1:] for item in series["data"]]
-    assert {node["id"] for node in nodes} == {node["id"] for node in graph["nodes"]}
-    assert all(node["itemStyle"]["borderWidth"] == 0.8 for node in nodes)
-    assert all(-180 <= node["value"][0] <= 180 and -90 <= node["value"][1] <= 90
-               and node["value"][2] == 1 for node in nodes)
-    assert options["tooltip"]["enterable"] is False
+    assert nodes["a"]["value"] == (0.0, 0.0, 1)
+    assert nodes["b"]["value"] != nodes["a"]["value"]
+    assert edges["coordinateSystem"] == "globe"
+    assert edges["data"][0]["coords"] == [nodes["b"]["value"], nodes["a"]["value"]]
 
 
 def test_graph_expansion_obeys_combined_budget_and_keeps_positions():

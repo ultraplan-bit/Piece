@@ -742,6 +742,26 @@ THEME_CSS = '''
         background: var(--bg-panel);
         border-bottom: 1px solid var(--border-color);
     }
+    .graph-space-picker { width: 156px; }
+    /* 知识空间同时显示字段标签和所选值，不能套用普通按钮的 30px 高度。 */
+    .graph-space-picker .q-field__control { height: 44px; min-height: 44px; }
+    .graph-space-picker .q-field__native { font-size: 13px; }
+    .graph-mode-switch {
+        margin-left: auto;
+        padding: 2px;
+        gap: 2px;
+        border: 1px solid var(--border-color);
+        border-radius: var(--control-radius);
+        background: var(--bg-content);
+    }
+    .graph-mode-switch .q-btn {
+        min-height: 26px;
+        padding: 3px 9px;
+        border-radius: 3px;
+        color: var(--text-muted);
+        font-size: 12px;
+    }
+    .graph-mode-switch .q-btn.mode-active { background: var(--bg-hover); color: var(--text-primary); }
     /* 筛选控件要有最小宽度：多选框空值时没有值可撑宽，只给 max-width 会被挤成一条窄缝。 */
     .graph-toolbar .graph-control { min-width: 128px; max-width: 168px; }
     .graph-stage { position: relative; }

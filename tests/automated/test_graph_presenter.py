@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.ui.views.graph_presenter import KINDS, TYPE_MARKS, graph_options, merge_graph
+from app.ui.views.graph_presenter import EDGE_LABEL_ALL_MAX, KINDS, TYPE_MARKS, graph_options, merge_graph
 
 
 def sample_graph():
@@ -56,6 +56,30 @@ def test_graph_ids_direction_parallel_edges_and_safe_tooltips(dark):
     assert filtered["data"][1]["itemStyle"] == series["data"][1]["itemStyle"]
 
 
+@pytest.mark.parametrize("dark", [False, True])
+@pytest.mark.parametrize("edge_count,selected", [(EDGE_LABEL_ALL_MAX, None), (EDGE_LABEL_ALL_MAX + 1, None),
+                                                 (EDGE_LABEL_ALL_MAX + 1, "n12"), (EDGE_LABEL_ALL_MAX + 1, "missing")])
+def test_local_graph_relation_labels_follow_density_and_focus(dark, edge_count, selected):
+    graph = {"root_id": "n0",
+             "nodes": [{"id": f"n{i}", "title": f"节点 {i}", "kind": "concept"} for i in range(edge_count + 1)],
+             "edges": [{"id": f"e{i}", "source_id": f"n{i}", "target_id": f"n{i + 1}",
+                        "predicate": "depends_on", "description": "完整描述不放在线上"} for i in range(edge_count)]}
+    options = graph_options(graph, dark=dark, selected=selected, label=lambda value: "依赖" if value == "depends_on" else value)
+    series = options["series"][0]
+    focus = selected if selected == "n12" else "n0"
+    for edge in series["links"]:
+        assert edge["name"] == edge["label"]["formatter"] == "依赖"
+        assert edge["label"]["show"] == (edge_count <= EDGE_LABEL_ALL_MAX or focus in (edge["source"], edge["target"]))
+        assert edge["tooltip_text"].endswith(" · 依赖")
+        assert edge["emphasis"]["label"]["show"] is True
+    assert series["edgeLabel"]["position"] == "middle" and series["edgeLabel"]["distance"] == 0
+    assert series["edgeLabel"]["textBorderColor"] == options["backgroundColor"]
+    assert series["edgeLabel"]["opacity"] < series["emphasis"]["edgeLabel"]["opacity"]
+    assert series["emphasis"]["edgeLabel"]["show"] is True
+    assert series["emphasis"]["focus"] == "adjacency"
+    assert "labelLayout" not in series  # ECharts 6 的统一布局会破坏原生边标签的坐标和缩放。
+
+
 def test_overview_uses_three_dimensional_sphere_without_surface_shell():
     graph = {
         "root_id": "b",
@@ -76,6 +100,7 @@ def test_overview_uses_three_dimensional_sphere_without_surface_shell():
     assert nodes["a"]["value"] == (0.0, 0.0, 1)
     assert nodes["b"]["value"] != nodes["a"]["value"]
     assert edges["coordinateSystem"] == "globe"
+    assert "edgeLabel" not in edges and all("label" not in edge for edge in edges["data"])
     assert edges["data"][0]["coords"] == [nodes["b"]["value"], nodes["a"]["value"]]
 
 

@@ -32,17 +32,15 @@ def apply(**parts):
     return knowledge_service.apply({"request_key": uuid4().hex, "reason": "浏览器验收", **parts})
 
 
-def chart_state(page):
-    page.wait_for_function("""() => {
+def chart_state(page, expected_type):
+    return page.wait_for_function("""expected => {
         const el = document.querySelector('.nicegui-echart');
-        return el && getElement(el.id.slice(1))?.chart?.getOption()?.series?.length;
-    }""")
-    return page.locator(".nicegui-echart").evaluate("""el => {
-        const chart = getElement(el.id.slice(1)).chart;
-        return chart.getOption().series.map(series => ({type: series.type,
-            count: (series.data || series.edges || []).length,
-            data: series.data || series.edges || []}));
-    }""")
+        const series = el && getElement(el.id.slice(1))?.chart?.getOption()?.series;
+        if (!series?.length || series[0].type !== expected) return false;
+        return series.map(item => ({type: item.type,
+            count: (item.data || item.edges || []).length,
+            data: item.data || item.edges || []}));
+    }""", arg=expected_type).json_value()
 
 
 def test_graph_browser_independent_roundtrip(graph_gui):
@@ -134,10 +132,35 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             expect(page.get_by_role("button", name=k("related_to"), exact=True)).to_have_count(0)
             table_title.click()
             expect(page.get_by_role("button", name=k("related_to"), exact=True)).to_be_visible()
-            state = chart_state(page)
+            state = chart_state(page, "graph")
             assert state[0]["type"] == "graph"
             assert {node["id"] for node in state[0]["data"]} == {root, target}
             assert state[0]["count"] == 2
+            # 检查真实 Canvas 上的关系文字，而不只检查传入的 ECharts 配置。
+            page.wait_for_function("""() => {
+                const el = document.querySelector('.nicegui-echart');
+                const data = getElement(el.id.slice(1)).chart.getModel().getSeriesByIndex(0).getEdgeData();
+                return data.getItemGraphicEl(0)?.getLinePath()?.shape.percent === 1;
+            }""")
+            labels = page.locator(".nicegui-echart").evaluate("""el => {
+                const data = getElement(el.id.slice(1)).chart.getModel().getSeriesByIndex(0).getEdgeData();
+                const labels = [];
+                data.eachItemGraphicEl(line => {
+                    const label = line.getTextContent();
+                    const transform = label.getComputedTransform();
+                    const path = line.getLinePath();
+                    const point = path.pointAt(0.5);
+                    const middle = path.transformCoordToGlobal(...point);
+                    labels.push({text: label.style.text, visible: !label.ignore,
+                        scale: Math.hypot(transform[0], transform[1]),
+                        middle_distance: Math.hypot(transform[4] - middle[0], transform[5] - middle[1])});
+                });
+                return labels;
+            }""")
+            assert len(labels) == 1 and labels[0]["text"] == k("related_to") and labels[0]["visible"], labels
+            assert labels[0]["scale"] == pytest.approx(1), labels
+            assert labels[0]["middle_distance"] < 15, labels
+            page.locator(".graph-stage").screenshot(path=str(service["path"] / "graph-local-labels.png"))
             page.get_by_role("button", name=k("related_to"), exact=True).focus()
             page.keyboard.press("Enter")
             expect(page.get_by_text(k("description") + " · 人工创建的关系", exact=True)).to_be_visible()
@@ -149,7 +172,7 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             page.get_by_role("button", name=gk("global_graph"), exact=True).click()
             expect(page.get_by_text(t("graph.overview_count", nodes=2, edges=1,
                                       total_nodes=2, total_edges=1), exact=True)).to_be_visible()
-            global_state = chart_state(page)
+            global_state = chart_state(page, "lines3D")
             assert [series["type"] for series in global_state] == ["lines3D", "scatter3D", "scatter3D"]
             global_nodes = [node for series in global_state[1:] for node in series["data"]]
             assert {node["id"] for node in global_nodes} == {root, target}
@@ -164,7 +187,7 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             page.screenshot(path=str(service["path"] / "graph-overview.png"))
             page.get_by_role("button", name="目标图节点", exact=True).first.click()
             expect(page.get_by_role("button", name=gk("local_graph"), exact=True)).to_be_visible()
-            assert chart_state(page)[0]["type"] == "graph"
+            assert chart_state(page, "graph")[0]["type"] == "graph"
 
             # 实体页内展开只读结构检查（不改实体、关系、证据）。
             page.get_by_role("button", name=gk("objects"), exact=True).click()
@@ -188,4 +211,5 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             assert not external_requests, external_requests
         finally:
             page.screenshot(path=str(service["path"] / "graph-final.png"))
+            print("Graph screenshots:", service["path"])
             browser.close()

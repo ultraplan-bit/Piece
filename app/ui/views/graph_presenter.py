@@ -24,9 +24,11 @@ NODE_MAX = 34.0
 # 同一环上相邻节点的最小弧距：小于它节点会挤在一起，按节点数放大环半径。
 RING_MIN_ARC = 46.0
 # 少于这个节点数就全部显示标签；超过后只标注根、选中和连接较多的节点，其余靠悬停。
-# 上限内让 ECharts 的 labelLayout.hideOverlap 处理碰撞，比按度数硬性裁剪更接近主流图工具。
+# ponytail: 按数量分级显示；ECharts 6 的 labelLayout 会使边标签错位，修复后再恢复自动避让。
 LABEL_ALL_MAX = 60
 LABEL_MIN_DEGREE = 2
+# 少量关系常驻显示；密集时只标注选中节点（未选中时为根）的邻接边，其余靠悬停。
+EDGE_LABEL_ALL_MAX = 24
 
 
 def _adjacency(graph):
@@ -227,6 +229,8 @@ def graph_options(graph, *, dark=False, selected=None, positions=None, label=lam
                       "tooltip_text": item["title"] + " · " + label(item["kind"])})
 
     edges, pairs = [], {}
+    show_all_edges = len(graph["edges"]) <= EDGE_LABEL_ALL_MAX
+    focus = selected if selected in adjacency else graph["root_id"]
     for edge in graph["edges"]:
         pair = tuple(sorted((edge["source_id"], edge["target_id"])))
         ordinal = pairs.get(pair, 0)
@@ -234,6 +238,8 @@ def graph_options(graph, *, dark=False, selected=None, positions=None, label=lam
         edge_name = label(edge.get("predicate") or "relation")
         arrow = " ↔ " if edge.get("symmetric") else " → "
         edges.append({"id": edge["id"], "source": edge["source_id"], "target": edge["target_id"], "name": edge_name,
+                      "label": {"show": show_all_edges or focus in pair, "formatter": edge_name},
+                      "emphasis": {"label": {"show": True}},
                       "symbol": ["none", "none" if edge.get("symmetric") else "arrow"],
                       "lineStyle": {"width": 0.9, "opacity": 0.42, "curveness": 0.12 + ordinal * 0.12,
                                     "type": "solid", "color": "#8b9299" if dark else "#7b858e"},
@@ -254,11 +260,13 @@ def graph_options(graph, *, dark=False, selected=None, positions=None, label=lam
                         # 上下留白要给径向朝外的标签留出空间，否则靠边的标签会被画布裁掉。
                         "top": 48, "bottom": 64, "left": "10%", "right": "10%",
                         "draggable": True, "data": nodes, "links": edges,
-                        # 标签重叠时自动隐藏，避免长中文标题糊成一团。
-                        "labelLayout": {"hideOverlap": True},
+                        "edgeLabel": {"show": False, "position": "middle", "distance": 0,
+                                      "fontSize": 12, "color": ink, "opacity": 0.8,
+                                      "textBorderColor": surface, "textBorderWidth": 3},
                         "categories": [{"name": label(k), "symbol": TYPE_MARKS[k][1],
                                         "itemStyle": {"color": PALETTES[dark][TYPE_MARKS[k][0]]}} for k in KINDS],
                         "emphasis": {"focus": "adjacency", "label": {"show": True, "color": ink},
+                                     "edgeLabel": {"show": True, "opacity": 1},
                                      "lineStyle": {"opacity": 0.85, "width": 1.6}},
                         "blur": {"itemStyle": {"opacity": 0.34}, "lineStyle": {"opacity": 0.12}},
                         "lineStyle": {"color": "#8b9299" if dark else "#7b858e", "opacity": 0.42}}]}

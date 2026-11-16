@@ -1,212 +1,140 @@
 <div align="center">
 
-<img src="assets/maple-leaf.png" width="120" alt="Piece">
+<img src="assets/maple-leaf.png" width="88" alt="Piece">
 
 # Piece
 
-**Turn the documents on your machine into a local knowledge base your AI can cite and you can verify.**
+**Keep your documents local. Let AI find them. Check the sources yourself.**
 
 [![Release](https://img.shields.io/github/v/release/ultraplan-bit/Piece?style=flat-square)](https://github.com/ultraplan-bit/Piece/releases)
 [![License](https://img.shields.io/github/license/ultraplan-bit/Piece?style=flat-square)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.12%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-![Platform](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-555?style=flat-square)
+
+[Download for Windows](https://github.com/ultraplan-bit/Piece/releases) · [Quick start](#quick-start) · [User guide](docs/guide.en.md)
 
 [简体中文](README.md) | **English**
 
 </div>
 
-<a href="assets/一图看懂%20Piece.png"><img src="assets/一图看懂%20Piece.png" alt="Piece at a glance: turning your documents into a local knowledge base AI can cite" width="100%"></a>
+<a href="assets/一图看懂%20Piece.png"><img src="assets/一图看懂%20Piece.png" alt="Piece concept illustration: organize local documents into a searchable, verifiable knowledge base for AI" width="100%"></a>
 
-## ✨ What it is
+Piece is a **local knowledge management tool**. Import PDFs, Office documents, and notes; search and edit their contents; and check the extracted text against original pages. Connect your usual AI client to look up documents, cite sources, and organize Wiki pages or a knowledge graph when you ask it to.
 
-PDFs, Word files, and slide decks pile up, and finding one sentence means hunting through folders from memory. Handing them to an AI doesn't scale past a few long documents, and online knowledge bases want your files on someone else's server first.
+**Piece manages documents and knowledge; the conversation stays in your AI client.** Files and the knowledge base are stored locally, but relevant content may still be sent to cloud models, document parsing services, or your AI client's provider. Piece is not a built-in chatbot, and local storage does not mean fully offline processing.
 
-Piece keeps it simple: **your documents stay on your machine, get indexed, and the retrieval capability is handed to your AI over MCP**. The conversation still happens in Claude, Cursor, or whatever you use — Piece just supplies the relevant content and its source.
+## What you can do with Piece
 
-<a href="assets/为什么选%20Piece.png"><img src="assets/为什么选%20Piece.png" alt="Before versus with Piece: hunting through files, answers with no source, unreadable scans, redoing setup per AI client, and documents sent to the cloud, paired with search by meaning, cited answers that link back to the original page, parsing services, MCP and skills for every AI client, and files and database kept on your machine" width="100%"></a>
+### Bring scattered documents together
 
-## 🧩 What it does
+- Import PDF, Word, PowerPoint, Excel (`.xlsx`), Markdown, TXT, HTML, and EPUB into searchable, editable content fragments called **knowledge cards**.
+- Organize documents with hierarchical collections. A document can belong to several collections, and one-shot imports from Obsidian and Zotero are supported.
+- Configure OCR or a dedicated parsing service for scans, formulas, and complex tables rather than relying only on a PDF's text layer.
 
-- **Import becomes cards**: PDF, Word, PowerPoint, Excel (`.xlsx`), Markdown, TXT, HTML, and EPUB, parsed into individual knowledge cards.
-- **Editable and verifiable**: fix titles and text on the spot, with the original PDF page alongside so parsing errors are easy to spot.
-- **Hybrid retrieval**: BM25 plus vector search, fused and ranked with RRF.
-- **Connects to your AI**: MCP is split by capability — read-only `piece-kb` for searching, plus `piece-index` when you want the AI to write notes and edit cards, `piece-graph` to maintain the knowledge graph, and `piece-wiki` to compile knowledge pages. Skills can also be exported for terminal-based AI.
-- **Organize as you go**: hierarchical collections, Wiki pages, a knowledge graph, and one-shot imports from Obsidian and Zotero.
-- **Local-first**: SQLite + FTS5 + sqlite-vec for storage, a NiceGUI interface, and a service that runs on your own machine.
+### Find content and check its sources
 
-## 🖼️ Screenshots
+- Search by keywords or meaning without remembering the exact wording, with optional file or collection scope.
+- Read relevant cards, correct their titles and text, and compare extraction results with original pages.
+- Let your AI client retrieve documents and cite sources instead of uploading the same files for each conversation.
 
-The screenshots show the Chinese interface. Click any image to view it at full size.
+### Turn reading into reusable knowledge
+
+- **Wiki pages**: organize explanations, comparisons, or conclusions as Markdown pages linked to source evidence.
+- **Knowledge graph**: maintain entities and relationships separately, and inspect the sources supporting those connections.
+- Manage them through the interface or ask AI to write and update them. **Importing documents does not automatically create a Wiki or graph, and conversations are not automatically saved.**
+
+## A look at the Piece interface
+
+Click any image to view it at full size. The Wiki and graph screenshots use sample content from a local isolated acceptance test.
 
 <table>
   <tr>
     <td width="50%" align="center" valign="top">
-      <a href="assets/原页对比图.jpg"><img src="assets/原页对比图.jpg" alt="Knowledge cards alongside the original PDF page" width="100%"></a>
-      <br><b>Source comparison</b> · Check content against the original
+      <a href="assets/原页对比图.jpg"><img src="assets/原页对比图.jpg" alt="Read extracted content in the Library and compare it with the original PDF page" width="100%"></a>
+      <br><b>Library · Source check</b><br>Compare extracted text with the original
     </td>
     <td width="50%" align="center" valign="top">
-      <a href="assets/知识卡片编辑.png"><img src="assets/知识卡片编辑.png" alt="Editing a knowledge card's title and text" width="100%"></a>
-      <br><b>Card editing</b> · Correct content whenever needed
+      <a href="assets/召回测试.png"><img src="assets/召回测试.png" alt="Search and review matching knowledge cards in Piece Recall Test" width="100%"></a>
+      <br><b>Recall Test</b><br>Ask a question and inspect the results
     </td>
   </tr>
   <tr>
     <td width="50%" align="center" valign="top">
-      <a href="assets/召回测试.png"><img src="assets/召回测试.png" alt="A search query and the related knowledge cards it finds" width="100%"></a>
-      <br><b>Recall Test</b> · Ask a question and see what comes back
+      <a href="assets/wiki-reading.png"><img src="assets/wiki-reading.png" alt="Example of reading a Wiki knowledge page in Piece" width="100%"></a>
+      <br><b>Wiki page</b><br>Read and maintain topic knowledge
     </td>
     <td width="50%" align="center" valign="top">
-      <a href="assets/skill导出.png"><img src="assets/skill导出.png" alt="Exporting Piece skills for searching and organizing a knowledge base" width="100%"></a>
-      <br><b>Skill Export</b> · Let terminal-based AI use your knowledge base
+      <a href="assets/graph-overview.png"><img src="assets/graph-overview.png" alt="Example of the Piece knowledge graph global overview" width="100%"></a>
+      <br><b>Knowledge graph</b><br>Explore entities and their relationships
     </td>
   </tr>
 </table>
 
-<details>
-<summary>Another example: PowerPoint formulas and source pages</summary>
+## An example: read a manual, check the evidence, keep a note
 
-[![PowerPoint formulas alongside the original page](assets/ppt原页对比图.jpg)](assets/ppt原页对比图.jpg)
+Suppose you import an STM32 chip manual and want to check its power supply requirements:
 
-</details>
+1. **Find the evidence**: search in Piece's **Recall Test**, or ask an AI client connected to Piece:
 
-## 🚀 Getting started
+   > Summarize the power supply precautions in the STM32 manual I imported. Quote the relevant text and identify the file and page numbers. Do not add claims that the manual does not support.
+
+2. **Verify it**: use the returned source locations to open the content in Piece and compare the text, tables, and diagrams with the original PDF pages.
+3. **Save only if needed**: after enabling Wiki access, explicitly ask AI to organize the verified conclusions into a knowledge page with source evidence for future reference.
+
+The division of work is simple: **Piece supplies and stores documents, AI interprets and organizes them, and you decide what to keep.** Citations make checking easier; they do not guarantee that AI interpreted the source correctly.
+
+## Quick start
 
 ### 1. Download and open
 
-Grab the latest build from [**Releases**](https://github.com/ultraplan-bit/Piece/releases), unzip it fully, and double-click `Piece.exe`. The Windows build needs no Python install — just don't move the exe out on its own.
+Download the Windows portable build from [Releases](https://github.com/ultraplan-bit/Piece/releases), **unzip it fully**, and double-click `Piece.exe`. No Python installation is needed; do not move the exe out of its folder.
 
-### 2. Configure an embedding model
+macOS and Linux can [run from source](docs/guide.en.md#running-from-source) with the browser interface. Real-hardware compatibility is still being refined.
 
-Open **Settings → Embedding Model**. It's what lets your documents be searched by meaning, and it needs setting up once. New users can start with the default [SiliconFlow](https://siliconflow.cn/) service:
+**For existing users**: v0.1.3 cannot open databases from v0.1.2 or earlier and provides no automatic migration. Keep the previous application and a full backup, and try this version in a new location with an empty data directory. See [Fully quit and back up](docs/guide.en.md#fully-quit-and-back-up).
 
-1. Get an **API Key** from the provider's console;
-2. Paste it into Piece — leave the default URL and model as they are;
-3. Click "Test Connection" and save once it succeeds.
+### 2. Configure the search model
 
-Other compatible services work too. Third-party services may charge, and their quotas and pricing are their own.
+Open **Settings → Embedding & Indexing** and configure an embedding model. It creates the index used to search by meaning; it is not a chat model.
 
-### 3. Import documents
+You can start with the default [SiliconFlow](https://siliconflow.cn/) provider: get an API key, enter it, leave the default endpoint and model unchanged, click **Test current input**, and then **Save this section** after a successful test. Other compatible services work too; external providers set their own prices and privacy policies.
 
-On the **Library** page, click **+ → Upload File**, choose your files, and wait for processing to finish — knowledge cards will appear. For scans, complex formulas, or tables, first set up a parsing service under **Settings → PDF Parsing** (PaddleOCR, MinerU, or a custom multimodal model); plain text PDFs can be imported directly. Then open **Recall Test** and ask a question to see whether it finds what you expect.
+### 3. Import a document and check that search works
 
-### 4. Connect your AI
+Open **Library → + → Upload File**, choose a file, and wait for processing to finish. Start with a clearly readable text PDF or a Markdown file.
 
-**Option 1 · MCP**: open the **MCP Configuration** page, pick your client, copy the config, save it, and reload.
+Then open **Tools & integrations → Recall Test** and search for something whose answer you know is in the document. Check the returned content. Scans or complex layouts need a suitable PDF parsing service configured first; see [Importing and organizing documents](docs/guide.en.md#importing-and-organizing-documents).
 
-- Search only: choose the read-only `piece-kb` service;
-- Also let the AI write notes and edit cards: add the `piece-index` service;
-- Maintain the knowledge graph: enable the `piece-graph` service;
-- Compile Markdown knowledge pages: enable the `piece-wiki` service;
-- Look up Zotero references: choose `piece-zotero` separately.
+### 4. Give your AI access to the documents
 
-**Option 2 · Skills**: if your AI can run local commands, export workflows from the **Skill Export** page — `piece-search` to look things up, `piece-index` to import and organize, `piece-wiki` to compile pages, `piece-graph` to maintain the graph, and `piece-zotero` for references.
+If your AI client supports MCP, open **Tools & integrations → MCP Configuration**, choose the read-only **`piece-kb`** retrieval service first, and save and reload the client configuration provided by the page.
 
 Once connected, ask in your AI client:
 
-> Find what my documents say about this topic and cite the sources.
+> Search the Piece knowledge base for material about this question. Quote the original text and cite the sources.
 
-Piece supplies the documents; the chat and the answer still happen in your AI client.
+Get retrieval working first, then enable writes, Wiki, or graph access as needed. AI clients that can run local commands can also use exported skills; see [Connecting your AI](docs/guide.en.md#connecting-your-ai). Keep the Piece service running while using it.
 
-## 🔒 Data and privacy
+## More capabilities and guides
 
-<a href="assets/安心用.png"><img src="assets/安心用.png" alt="Where your documents live: originals, knowledge cards, and database, plus the resident service, all on your machine — sent elsewhere only when you choose to use an embedding model, OCR or MinerU parsing service, or WebDAV sync" width="100%"></a>
+| What you want to do | Where to start |
+| --- | --- |
+| Choose MCP services or export search and indexing skills | [Connecting your AI](docs/guide.en.md#connecting-your-ai) |
+| Organize Wiki pages and evidence, or maintain entities and relationships | [Wiki and knowledge graph](docs/guide.en.md#wiki-and-knowledge-graph) |
+| Import or export a graph for use with other tools | [Graph data exchange](docs/guide.en.md#graph-data-exchange) |
+| Read local Zotero references, notes, and PDF annotations; import attachments when needed | [Working with Zotero](docs/guide.en.md#working-with-zotero) |
+| Run from source or manage a knowledge base through the CLI | [Running from source](docs/guide.en.md#running-from-source) · [Command line](docs/guide.en.md#command-line) |
+| Organize, export, or reparse documents; troubleshoot search | [Importing and organizing documents](docs/guide.en.md#importing-and-organizing-documents) · [FAQ](docs/guide.en.md#faq) |
 
-Files and the database are stored locally. Only when you choose to use a cloud model, OCR, or parsing service is the relevant text sent to that service, and your AI client reads the content you retrieve. Before handling sensitive material, check the privacy policy of the services you use.
+## Data, privacy, and backups
 
-Closing the window does not stop the background service; to exit completely, choose "Quit" from the system tray. Data lives in the `data/` folder next to the program by default — fully exit before upgrading or moving, and back up the `wiki/` Markdown files together with the SQLite database, not the database alone.
+- **Stored locally**: originals, knowledge cards, the database, and Wiki Markdown files. The actual location is configured by `data_path`; the Windows portable build defaults to `data/` beside the program.
+- **May go to external services**: cloud embedding models receive indexing and search text; cloud parsers may receive documents or page images; your AI client receives the material you ask it to read. Check each service and its privacy policy before using sensitive documents.
+- **Sync is not backup**: WebDAV cloud sync transfers files only, not a complete knowledge base. Before upgrading or moving, fully exit Piece and back up the whole data directory, including both the database and `wiki/`. Do not copy just the database.
+- **Closing the window is not quitting**: to stop the Windows background service completely, choose **Quit** from the system tray.
 
-## ❓ FAQ
+See [Data and maintenance](docs/guide.en.md#data-and-maintenance) for more sync limits and maintenance precautions.
 
-**Imports fail, or the AI can't find anything.**
-Check the model connection, file processing status, and client configuration. Scans also need a parsing service. Look in "Logs" for the specific error.
+## Community and license
 
-**Can I sync across machines?**
-Yes, via "Cloud Sync" with a WebDAV service such as Nutstore. It syncs files only and is not a full knowledge base backup — other devices need to rebuild their index. Later syncs favor the local side and may overwrite cloud files, so back up first.
+For problems or suggestions, open an [issue](https://github.com/ultraplan-bit/Piece/issues) with reproduction steps and redacted screenshots. Do not upload keys or private documents.
 
-<details>
-<summary>Advanced: running from source, CLI, MCP writes, Wiki and graph, Zotero</summary>
-
-<a href="assets/资料的一生.png"><img src="assets/资料的一生.png" alt="Six steps a document goes through in Piece: import, parse, split into cards, organize, retrieve, and cite" width="100%"></a>
-
-### Running from source
-
-Piece requires Python 3.12+. Managing the environment with [uv](https://docs.astral.sh/uv/getting-started/installation/) is recommended:
-
-```bash
-git clone https://github.com/ultraplan-bit/Piece.git
-cd Piece
-uv sync --python 3.12 --locked --extra desktop
-uv run --extra desktop piece serve --open
-```
-
-macOS and Linux can run from source with the browser interface, though real-hardware compatibility is still being polished. For command help, run `uv run --extra desktop piece --help`; the Windows portable build uses `piece-cli.exe` in the terminal.
-
-### Managing a knowledge base from the CLI
-
-In the commands below, replace `piece` with `uv run --no-sync piece` in a source environment, or `piece-cli.exe` in the portable build. Business commands require the Piece service to be running.
-
-```bash
-piece config init --interactive   # Configure the embedding model in the terminal; the key is hidden and only saved after confirmation
-piece start                       # Start the core service in the background and return once it is ready
-piece config test embedding       # Explicitly reach the configured model service and check the connection and dimensions
-piece file import "document.md" --wait
-piece file list --name "document" # Substring match on file names, not full-text search or wildcards
-piece stats                       # Imported files, indexed files, chunk count, and total original size
-piece status
-piece stop                        # Request a stop; the service finishes in-flight work before exiting
-```
-
-- Without `--interactive`, `config init` is still non-interactive, and a script can follow up with `config update --offline --input patch.json`. The wizard never goes online on its own and leaves existing admin/MCP keys untouched; saving offline is refused while the service is running, and an existing index cannot switch embedding model, endpoint, or dimensions directly.
-- `start` enables neither GUI, MCP, nor tray by default; use `start --gui --mcp` or `start --open --mcp` when you need them. Background startup waits up to 60 seconds by default (adjust with `--timeout`); a timeout or Ctrl+C only stops waiting and does not kill the background process.
-- With a custom knowledge base, keep the same `--data-dir` and `--port` for every command. `--data-dir` is the config directory; actual storage is still governed by the configured `data_path`.
-- If files are already in `files/originals/`, preview with `piece file scan --dry-run` and then register and index them with `piece file scan --wait`.
-
-### MCP writes, Wiki, and graph
-
-For MCP writes, prefer the intent tools on the graph and Wiki services: `knowledge-object-add` / `knowledge-object-update` / `knowledge-relation-add` / `knowledge-relation-update` (on `piece-graph`) and `wiki-page-add` / `wiki-page-update` (on `piece-wiki`). Arguments are flat, evidence is inlined as `CHUNK_ID:line` or `CHUNK_ID:grep=substring`, and `request_key` is generated and returned automatically. They share assembly logic with the CLI's `graph object add` and `wiki page add`; use the batch tools `knowledge-apply` / `wiki-apply` when submitting many records at once or when you need field-level control.
-
-Wiki text and metadata are stored as Markdown files under `wiki/` in the configured `data_path`, while SQLite keeps only a rebuildable page index and a separate audit trail. In-page links use `[Title](piece://wiki/PAGE_UUID)`, so changing a title or filename does not change identity. After editing externally, run `piece wiki rebuild-index` explicitly to refresh the index; it neither rewrites the Markdown nor calls a model.
-
-Knowledge-page evidence must quote the source verbatim. An agent can use `piece chunk extract` to cut an exact substring from card text by line number or match (available in the CLI and as `extract-quote` on `piece-kb`); adding `--out` writes it straight to a submittable evidence file. When a match is not unique, narrow it with `--lines` first rather than guessing the first hit.
-
-A single command writes a knowledge page, reading back by default and writing no temporary file:
-
-```bash
-piece wiki page add --kind concept --title "Incremental maintenance" \
-  --summary "Only change what clearly changed" \
-  --evidence CHUNK_ID:2-3
-```
-
-`--evidence CHUNK_ID:LOCATOR` can repeat; LOCATOR is a line number `N` / `N-M`, `grep=substring`, or `re=regex`, and the service cuts the exact quote and returns its hash. A single `--stance` applies to all evidence, while multiple ones map in order. Update a page with `wiki page update UUID --expected-revision N --expected-content-hash HASH`, use `graph object add/update` for entities and `graph relation add/update` for relations.
-
-Every write generates a request key and returns it as `data.request_key`. To keep a local copy, add `--save-request` (stored under `requests/` in the data directory) or `--request-file PATH`; an existing file may only be reused if both target and content match. `--dry-run` only pre-checks — drop it and rerun the same command to submit. Content your AI client fetched itself — web pages, articles, subtitles — can be imported whole: `import_markdown` on the index MCP service, or `piece file import-markdown` for skills.
-
-### Working with Zotero
-
-You can query your local personal Zotero library directly, reading bibliographic data, notes, PDF annotations, and available full text without importing into Piece first. Choose attachments to import only when you need to verify something closely; identical content reuses existing files and keeps multiple sources.
-
-```bash
-piece zotero status --json
-piece zotero search "keyword" --collection-key COLLECTION_KEY --limit 20 --json
-piece zotero children ITEM_KEY --item-type attachment --json
-piece zotero preview --attachment-key ATTACHMENT_KEY --collection-mode none --server-id SERVER_ID --json
-piece zotero import --attachment-key ATTACHMENT_KEY --collection-mode none --server-id SERVER_ID --wait --json
-```
-
-A separate MCP service, `piece-zotero`, provides lookup, `zotero_import`, authorization, and change preview/execution; the other services register no Zotero tools. This requires Zotero 7+ running with "Settings → Advanced → Allow other applications on this computer to communicate with Zotero" enabled. The front-end entry is **Tools → Zotero Library**, and importing is a one-time copy that leaves the original library untouched. Modifying Zotero requires the `zotero_write_enabled` config (default `false`), authorization in a Zotero popup, and then previewing the diff and executing by `plan_id`. See the [Zotero guide](skills/piece-zotero/SKILL.md) for details.
-
-### Tips
-
-- **Poor results**: check the card text first, then make the title specific — "API auth: token refresh flow" is easier to spot than "Chapter 3".
-- **Too many documents**: use hierarchical collections to scope things like "Papers → Retrieval-Augmented Generation". A parent collection includes files in its children by default, and one file can belong to several collections.
-- **Taking content with you**: exporting Markdown preserves card edits, and an export with resources bundles the images too.
-- **Reparsing**: you can reindex, but reindexing from the original overwrites manual edits — export or back up first.
-
-</details>
-
-## 💬 Community
-
-This project recognizes and links to the [LINUX DO](https://linux.do) community. For problems or suggestions, open an [issue](https://github.com/ultraplan-bit/Piece/issues) with reproduction steps and redacted screenshots — please don't upload keys or private documents.
-
-## 📄 License
-
-Released under the [MIT License](LICENSE).
+This project recognizes and links to the [LINUX DO](https://linux.do) community and is released under the [MIT License](LICENSE).

@@ -3,13 +3,12 @@
 import json
 import re
 import xml.etree.ElementTree as ET
-from uuid import UUID
+from uuid import UUID, NAMESPACE_URL, uuid5
 
 
 FORMAT = "piece-knowledge-graph"
 FORMAT_VERSION = 1
 GRAPHML_NS = "http://graphml.graphdrawing.org/xmlns"
-MAX_BYTES = 2 * 1024 * 1024
 MAX_NODES = 10_000
 MAX_EDGES = 20_000
 
@@ -43,8 +42,6 @@ def _input_text(text):
         raw = text.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ValueError("输入不是有效 UTF-8") from exc
-    if len(raw) > MAX_BYTES:
-        raise ValueError("payload 超过 2 MiB")
     return raw
 
 
@@ -154,7 +151,7 @@ def _snapshot(graph, entities, relations, evidence):
         item["source_id"] = str(UUID(item["source_id"]))
         item["target_id"] = str(UUID(item["target_id"]))
     for item in canonical_evidence:
-        for field in ("object_id", "relation_id"):
+        for field in ("object_id", "relation_id", "source_library_id"):
             if item[field] is not None:
                 item[field] = str(UUID(item[field]))
     return {
@@ -176,8 +173,10 @@ def encode_json(snapshot):
     if not isinstance(snapshot, dict) or set(snapshot) != {"graph", "entities", "relations", "evidence"}:
         raise ValueError("snapshot 必须包含 graph/entities/relations/evidence")
     checked = _snapshot(graph, snapshot["entities"], snapshot["relations"], snapshot["evidence"])
-    return json.dumps({"format": FORMAT, "format_version": FORMAT_VERSION, **_ordered(checked)},
-                      ensure_ascii=False, separators=(",", ":"))
+    content = json.dumps({"format": FORMAT, "format_version": FORMAT_VERSION, **_ordered(checked)},
+                         ensure_ascii=False, separators=(",", ":"))
+    _input_text(content)
+    return content
 
 
 def decode_json(text):
@@ -194,18 +193,20 @@ def _tag(name):
     return f"{{{GRAPHML_NS}}}{name}"
 
 
-def _key_id(scope, name):
-    return f"{scope}.{name}"
-
-
-def _graphml_keys():
-    return [("graph", "name")] + [("node", field) for field in ENTITY_FIELDS + ("piece.evidence_json",)] + [
-        ("edge", field) for field in RELATION_FIELDS + ("piece.evidence_json",)]
+SYMMETRIC = frozenset({"related_to", "contradicts"})
+GRAPHML_FIELDS = {
+    "graph": {"name": "string"},
+    "node": dict.fromkeys(("label", "kind", "summary", "status"), "string"),
+    "edge": {**dict.fromkeys(("label", "description", "qualifier", "basis", "status"), "string"),
+             "symmetric": "boolean"},
+}
 
 
 def _xml_data(parent, key, value):
-    data = ET.SubElement(parent, _tag("data"), {"key": key})
-    data.text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    text = ("true" if value else "false") if type(value) is bool else value
+    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", text) or any(ord(char) in {0xFFFE, 0xFFFF} for char in text):
+        raise ValueError("GraphML 属性包含 XML 1.0 不允许的字符")
+    ET.SubElement(parent, _tag("data"), {"key": key}).text = text
 
 
 def encode_graphml(snapshot):
@@ -213,28 +214,35 @@ def encode_graphml(snapshot):
         raise ValueError("snapshot 必须包含 graph/entities/relations/evidence")
     checked = _ordered(_snapshot(snapshot["graph"], snapshot["entities"], snapshot["relations"], snapshot["evidence"]))
     root = ET.Element(_tag("graphml"))
-    for scope, name in _graphml_keys():
-        ET.SubElement(root, _tag("key"), {"id": _key_id(scope, name), "for": scope,
-                                           "attr.name": name, "attr.type": "string"})
+    for scope, fields in GRAPHML_FIELDS.items():
+        for name, value_type in fields.items():
+            ET.SubElement(root, _tag("key"), {"id": f"{scope}.{name}", "for": scope,
+                                            "attr.name": name, "attr.type": value_type})
     graph = ET.SubElement(root, _tag("graph"), {"id": checked["graph"]["id"], "edgedefault": "directed"})
-    _xml_data(graph, _key_id("graph", "name"), checked["graph"]["name"])
-    entity_evidence = {record["id"]: [] for record in checked["entities"]}
-    relation_evidence = {record["id"]: [] for record in checked["relations"]}
-    for item in checked["evidence"]:
-        owner = item["object_id"] if item["object_id"] is not None else item["relation_id"]
-        (entity_evidence if item["object_id"] is not None else relation_evidence)[owner].append(item)
+    _xml_data(graph, "graph.name", checked["graph"]["name"])
     for entity in checked["entities"]:
         node = ET.SubElement(graph, _tag("node"), {"id": entity["id"]})
-        for field in ENTITY_FIELDS:
-            _xml_data(node, _key_id("node", field), entity[field])
-        _xml_data(node, _key_id("node", "piece.evidence_json"), entity_evidence[entity["id"]])
+        for name in GRAPHML_FIELDS["node"]:
+            _xml_data(node, f"node.{name}", entity["title" if name == "label" else name])
     for relation in checked["relations"]:
-        edge = ET.SubElement(graph, _tag("edge"), {"id": relation["id"], "source": relation["source_id"], "target": relation["target_id"]})
-        for field in RELATION_FIELDS:
-            _xml_data(edge, _key_id("edge", field), relation[field])
-        _xml_data(edge, _key_id("edge", "piece.evidence_json"), relation_evidence[relation["id"]])
+        edge = ET.SubElement(graph, _tag("edge"), {"id": relation["id"], "source": relation["source_id"],
+                                                 "target": relation["target_id"]})
+        values = {**relation, "label": relation["predicate"], "symmetric": relation["predicate"] in SYMMETRIC}
+        for name in GRAPHML_FIELDS["edge"]:
+            _xml_data(edge, f"edge.{name}", values[name])
     ET.register_namespace("", GRAPHML_NS)
-    return ET.tostring(root, encoding="unicode", xml_declaration=True)
+    content = ET.tostring(root, encoding="unicode", xml_declaration=True)
+    _input_text(content)
+    return content
+
+
+def _graphml_id(value, namespace, scope):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"GraphML {scope} 缺少有效 ID")
+    try:
+        return str(UUID(value))
+    except ValueError:
+        return str(uuid5(namespace, f"{scope}:{value}"))
 
 
 def decode_graphml(text):
@@ -245,90 +253,123 @@ def decode_graphml(text):
         root = ET.fromstring(raw)
     except ET.ParseError as exc:
         raise ValueError("无效 GraphML XML") from exc
-    if root.tag != _tag("graphml") or root.attrib or root.text and root.text.strip():
+    if root.tag != _tag("graphml"):
         raise ValueError("GraphML 根结构无效")
-    keys, declarations = {}, set()
-    graph_elements = []
+    keys, declarations, graph_elements = {}, set(), []
     for child in root:
+        if child.tag == _tag("desc"):
+            continue
         if child.tag == _tag("graph"):
             graph_elements.append(child)
             continue
-        if child.tag != _tag("key") or set(child.attrib) != {"id", "for", "attr.name", "attr.type"} or list(child):
-            raise ValueError("GraphML 仅允许已知 key 声明")
-        scope, name = child.get("for"), child.get("attr.name")
-        if scope not in {"graph", "node", "edge"} or child.get("attr.type") != "string" or child.text and child.text.strip():
-            raise ValueError("GraphML key 声明无效")
-        expected = {"graph": {"name"}, "node": set(ENTITY_FIELDS) | {"piece.evidence_json"},
-                    "edge": set(RELATION_FIELDS) | {"piece.evidence_json"}}
-        if name not in expected[scope] or child.get("id") in keys or (scope, name) in declarations:
-            raise ValueError("GraphML 包含未知或重复 key")
-        keys[child.get("id")] = (scope, name)
+        if child.tag != _tag("key"):
+            raise ValueError("GraphML 根中包含不支持的结构")
+        key_id, scope, name = child.get("id"), child.get("for", "all"), child.get("attr.name")
+        value_type = child.get("attr.type", "string")
+        if not key_id or key_id in keys or scope not in {"all", "graph", "node", "edge"}:
+            raise ValueError("GraphML key ID 重复或声明无效")
+        if (scope, name) in declarations or value_type not in {"string", "boolean", "int", "long", "float", "double"}:
+            raise ValueError("GraphML key 名称重复或类型无效")
+        if name == "piece.evidence_json":
+            raise ValueError("不支持旧版 Piece GraphML，请使用 JSON 或重新导出通用 GraphML")
+        for target_scope in GRAPHML_FIELDS if scope == "all" else (scope,):
+            expected_type = GRAPHML_FIELDS[target_scope].get(name)
+            if expected_type is not None and value_type != expected_type:
+                raise ValueError(f"GraphML {target_scope}.{name} 类型必须为 {expected_type}")
+        defaults = child.findall(_tag("default"))
+        if len(defaults) > 1 or any(item.tag not in {_tag("default"), _tag("desc")} for item in child):
+            raise ValueError("GraphML key 默认值结构无效")
+        if defaults and list(defaults[0]):
+            raise ValueError("GraphML key 仅支持标量默认值")
+        keys[key_id] = (scope, name, value_type, defaults[0].text or "" if defaults else None)
         declarations.add((scope, name))
-    if declarations != set(_graphml_keys()):
-        raise ValueError("GraphML key 声明不完整")
-    if len(graph_elements) != 1 or len(root) != len(keys) + 1:
+    if len(graph_elements) != 1:
         raise ValueError("GraphML 必须且只能有一个 graph")
     graph_element = graph_elements[0]
-    if graph_element.tag != _tag("graph") or set(graph_element.attrib) != {"id", "edgedefault"} or graph_element.get("edgedefault") != "directed":
-        raise ValueError("GraphML graph 结构无效")
+    if graph_element.get("edgedefault") != "directed":
+        raise ValueError("GraphML 仅支持单层有向图")
 
-    def read_data(parent, scope, expected_names):
+    def scalar(value, value_type):
+        if value_type == "boolean":
+            value = value.strip().lower()
+            if value not in {"true", "false", "1", "0"}:
+                raise ValueError("GraphML boolean 值无效")
+            return value in {"true", "1"}
+        return value
+
+    def read_data(parent, scope):
         values = {}
+        for declared_scope, name, value_type, default in keys.values():
+            if declared_scope in {scope, "all"} and name in GRAPHML_FIELDS[scope] and default is not None:
+                if name in values:
+                    raise ValueError(f"GraphML {scope}.{name} 默认值重复")
+                values[name] = scalar(default, value_type)
+        seen = set()
         for child in parent:
-            if scope == "graph" and child.tag in {_tag("node"), _tag("edge")}:
+            if child.tag == _tag("desc") or scope == "graph" and child.tag in {_tag("node"), _tag("edge")}:
                 continue
-            if child.tag != _tag("data") or set(child.attrib) != {"key"} or list(child):
-                raise ValueError(f"GraphML {scope} 中包含未知结构")
+            if child.tag != _tag("data"):
+                raise ValueError(f"GraphML {scope} 中包含不支持的结构")
             key = keys.get(child.get("key"))
-            if key is None or key[0] != scope or key[1] not in expected_names or key[1] in values:
-                raise ValueError(f"GraphML {scope} 中包含未知或重复字段")
-            values[key[1]] = _json_loads(child.text or "")
-        if set(values) != set(expected_names):
-            raise ValueError(f"GraphML {scope} 字段不完整")
+            if key is None or key[0] not in {scope, "all"}:
+                raise ValueError("GraphML data 引用了未声明或作用域不匹配的 key")
+            _, name, value_type, _ = key
+            if name not in GRAPHML_FIELDS[scope]:
+                continue
+            if name in seen or list(child):
+                raise ValueError(f"GraphML {scope}.{name} 重复或不是标量")
+            seen.add(name)
+            values[name] = scalar(child.text or "", value_type)
         return values
 
-    graph_data = read_data(graph_element, "graph", {"name"})
-    _string(graph_data["name"], "graph.name")
-    graph = {"id": graph_element.get("id"), "name": graph_data["name"]}
-    entities, relations, evidence = [], [], []
-    children = list(graph_element)
-    if not children or children[0].tag != _tag("data"):
-        raise ValueError("GraphML graph 缺少 name 数据")
-    seen_edge = False
-    for child in children:
-        if child.tag == _tag("edge"):
-            seen_edge = True
-        elif child.tag == _tag("node") and seen_edge:
-            raise ValueError("GraphML 节点必须位于边之前")
-        elif child.tag != _tag("node") and child.tag != _tag("edge") and child.tag != _tag("data"):
-            raise ValueError("GraphML graph 中包含未知节点")
-    for child in graph_element:
-        if child.tag == _tag("data"):
-            continue
-        if child.tag == _tag("node"):
-            if set(child.attrib) != {"id"} or len(entities) >= MAX_NODES:
-                raise ValueError("GraphML node 属性无效或节点数量超限")
-            values = read_data(child, "node", set(ENTITY_FIELDS) | {"piece.evidence_json"})
-            node_id = child.get("id")
-            if values["id"] != node_id:
-                raise ValueError("GraphML node id 与实体 id 不一致")
-            entities.append({field: values[field] for field in ENTITY_FIELDS})
-            evidence_json = values["piece.evidence_json"]
-            if not isinstance(evidence_json, list):
-                raise ValueError("piece.evidence_json 必须是数组")
-            evidence.extend(evidence_json)
-        elif child.tag == _tag("edge"):
-            if set(child.attrib) != {"id", "source", "target"} or len(relations) >= MAX_EDGES:
-                raise ValueError("GraphML edge 属性无效或边数量超限")
-            values = read_data(child, "edge", set(RELATION_FIELDS) | {"piece.evidence_json"})
-            edge_id = child.get("id")
-            if values["id"] != edge_id or values["source_id"] != child.get("source") or values["target_id"] != child.get("target"):
-                raise ValueError("GraphML edge id/端点与关系字段不一致")
-            relations.append({field: values[field] for field in RELATION_FIELDS})
-            evidence_json = values["piece.evidence_json"]
-            if not isinstance(evidence_json, list):
-                raise ValueError("piece.evidence_json 必须是数组")
-            evidence.extend(evidence_json)
+    graph_id = _graphml_id(graph_element.get("id", "graph"), NAMESPACE_URL, "graph")
+    graph = {"id": graph_id, "name": read_data(graph_element, "graph").get("name", "导入图谱")}
+    namespace = UUID(graph_id)
+    entities, relations, node_ids = [], [], {}
+    metadata = {"revision": 1, "created_at": "", "updated_at": ""}
+    for node in graph_element.findall(_tag("node")):
+        if len(entities) >= MAX_NODES:
+            raise ValueError("GraphML 节点数量超限")
+        raw_id = node.get("id")
+        node_id = _graphml_id(raw_id, namespace, "node")
+        if raw_id in node_ids:
+            raise ValueError("GraphML node ID 重复")
+        values = read_data(node, "node")
+        title = values.get("label", "")
+        if not title.strip():
+            raise ValueError("GraphML node 缺少非空 label 标题")
+        node_ids[raw_id] = node_id
+        entities.append({"id": node_id, "kind": values.get("kind", "concept"), "title": title,
+                         "summary": values.get("summary", ""), "aliases": [],
+                         "status": values.get("status", "active"), **metadata})
+    edge_elements = graph_element.findall(_tag("edge"))
+    if len(edge_elements) > MAX_EDGES:
+        raise ValueError("GraphML 边数量超限")
+    used_ids = set(node_ids.values())
+    used_ids.update(_graphml_id(edge.get("id"), namespace, "edge")
+                    for edge in edge_elements if edge.get("id") is not None)
+    anonymous_index = 0
+    for edge in edge_elements:
+        if edge.get("directed", "true") not in {"true", "1"}:
+            raise ValueError("GraphML 不支持混合方向图")
+        source, target = edge.get("source"), edge.get("target")
+        if source not in node_ids or target not in node_ids:
+            raise ValueError("GraphML 关系端点不存在")
+        values = read_data(edge, "edge")
+        predicate = values.get("label", "")
+        if "symmetric" in values and values["symmetric"] != (predicate in SYMMETRIC):
+            raise ValueError("GraphML symmetric 与关系类型不一致")
+        if edge.get("id") is not None:
+            relation_id = _graphml_id(edge.get("id"), namespace, "edge")
         else:
-            raise ValueError("GraphML graph 中包含未知节点")
-    return _snapshot(graph, entities, relations, evidence)
+            while True:
+                relation_id = str(uuid5(namespace, f"anonymous-edge:{anonymous_index}"))
+                anonymous_index += 1
+                if relation_id not in used_ids:
+                    break
+        used_ids.add(relation_id)
+        relations.append({"id": relation_id,
+                          "source_id": node_ids[source], "target_id": node_ids[target], "predicate": predicate,
+                          "description": values.get("description", predicate), "qualifier": values.get("qualifier", ""),
+                          "basis": values.get("basis", "inference"), "status": values.get("status", "active"), **metadata})
+    return _snapshot(graph, entities, relations, [])

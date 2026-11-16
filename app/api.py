@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 API_VERSION = 1
 APP_VERSION = get_version()
 MAX_JSON_BYTES = 2 * 1024 * 1024
-MAX_IMPORT_REQUEST_BYTES = MAX_JSON_BYTES * 6 + 4096
 
 
 class CliRequestTimingMiddleware:
@@ -229,11 +228,11 @@ def _require_role(request, role):
         raise BusinessError("FORBIDDEN", "当前凭据没有此操作的权限")
 
 
-async def _json_body(request, max_bytes=MAX_JSON_BYTES):
+async def _json_body(request, max_bytes: int | None = MAX_JSON_BYTES):
     body = bytearray()
     async for part in request.stream():
         body.extend(part)
-        if len(body) > max_bytes:
+        if max_bytes is not None and len(body) > max_bytes:
             raise BusinessError("INPUT_TOO_LARGE", f"JSON 输入不能超过 {max_bytes} 字节")
     try:
         return json.loads(body or b"{}")
@@ -319,7 +318,7 @@ def create_api(runtime):
     # Wiki 单页 8 MiB 只是文件存储上限，不改变批次 JSON 大小限制。
     apply_limits = {"knowledge/apply": knowledge_common.MAX_REQUEST_BYTES,
                     "wiki/apply": knowledge_common.MAX_REQUEST_BYTES,
-                    "knowledge/import": MAX_IMPORT_REQUEST_BYTES}
+                    "knowledge/import": None}
 
     def register(operation, role, schema, function, *, exclude_unset=False):
         async def endpoint(request: Request):
@@ -509,7 +508,7 @@ def create_api(runtime):
     register("knowledge/delete", "write", km.DeleteInput,
              lambda **payload: knowledge.delete(payload, actor="api:write"))
     # 只重建图谱 FTS 查询索引，不改实体/关系/证据/历史；仍需写权限。
-    register("knowledge/rebuild-index", "write", empty, knowledge.rebuild_index)
+    register("knowledge/rebuild-index", "write", km.ScopedInput, knowledge.rebuild_index)
     # Wiki 页面以 Markdown 为正源，独立于知识图谱；读写角色与图谱一致。
     register("wiki/list", "read", wm.ListInput, wiki.list_pages)
     register("wiki/search", "read", wm.SearchInput, wiki.search_pages)

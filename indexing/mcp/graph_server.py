@@ -26,12 +26,13 @@ mcp = FastMCP(
 
 读：knowledge-list/search 找候选，knowledge-get 读一条实体/关系/证据（实体没有正文），knowledge-graph 取有界邻域，
 knowledge-references 按来源文件反查引用，knowledge-lint 做只读结构检查，knowledge-history/request 读修订与已提交结果。
-knowledge-export 导出全图；knowledge-import 默认 dry_run=true 预览，写入须显式 dry_run=false、confirmed=true。无冲突时按 ID merge；可传 target_graph_id 并入已有图谱，否则新建图谱（可用 graph_name 覆盖导入名称）。GraphML 仅支持 Piece 扩展的严格子集，不保证兼容任意 GraphML 工具。
+knowledge-export 导出全图；knowledge-import 默认 dry_run=true 预览，写入须显式 dry_run=false、confirmed=true。无冲突时按 ID merge；可传 target_graph_id 并入已有图谱，否则新建图谱（可用 graph_name 覆盖导入名称）。
+JSON 用于 Piece 数据交换；GraphML 为标准通用图谱投影（不含证据与别名），导入仅支持单层有向图及约定属性，不支持旧版 Piece GraphML，不承诺任意第三方业务语义映射或无损往返。无损交换选 JSON。
 
 调用形状速查（MCP arguments）：
 - `params` 包装：knowledge-list/search/relation-search/get/graph/references/lint/history/request/apply/delete/export/import，例 `{"params":{"query":"关键词"}}`；批次写入例 `{"params":{"reason":"补关系证据","evidence":[{"relation":{"id":"关系UUID"},"source_kind":"user","quote":"用户明确陈述的原文"}]}}`。
 - 顶层平铺：knowledge-object-add/update、knowledge-relation-add/update，例 `{"title":"实体"}`；不要再套 `params`。
-- 无参数：knowledge-rebuild-index。
+- knowledge-rebuild-index 接受可选顶层 graph_id；省略时重建默认空间。
 
 ID 是 UUID（不是整数 file/chunk ID）。同名对象是不同记录，不要按名字合并。证据的 location_status 为 current/changed/missing/unresolved/unverified，即使 current 也不代表断言已被证实。
 
@@ -144,8 +145,10 @@ async def knowledge_graph_delete(
 async def knowledge_export(params: km.ExportInput) -> dict:
     """导出整个知识图谱，默认导出默认空间；可传 params.graph_id 选择空间，format=json/graphml。
 
-    返回 data.content（完整导出文档）与 graph_id、format、实体/关系/证据数量。GraphML 仅支持 Piece 扩展的严格子集，
-    包含 Piece 私有数据编码，不保证与任意 GraphML 文件或通用 GraphML 工具互通；大导出优先使用文件导出接口。
+    返回 data.content（完整导出文档）与 graph_id、format、实体/关系/证据数量。
+    JSON 用于 Piece 数据交换；GraphML 为标准通用图谱投影，不含证据、别名、修订号和时间戳，普通属性不使用 Piece 私有 JSON 编码。
+    GraphML 只支持基础图结构与约定属性，不承诺任意第三方业务语义映射或无损往返；无损交换选 JSON。
+    大导出优先使用文件导出接口。
     """
     try:
         result = await run_sync(knowledge.export_graph, **params.model_dump())
@@ -159,11 +162,15 @@ async def knowledge_export(params: km.ExportInput) -> dict:
     "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False,
 })
 async def knowledge_import(params: km.ImportInput) -> dict:
-    """导入 JSON 或 Piece 扩展 GraphML 图谱。默认 dry_run=true，只校验冲突并预览，不写入。
+    """导入 Piece 数据交换 JSON 或标准 GraphML 图谱。默认 dry_run=true，只校验冲突并预览，不写入。
 
     正式写入必须显式设置 dry_run=false 且 confirmed=true。传 target_graph_id 并入指定已有图谱；
     不传则以导入图谱名称新建图谱，可用 graph_name 覆盖名称。只有无冲突时才 merge 新记录，不覆盖或自动合并既有记录；
-    冲突须读取 conflicts 并人工处理。GraphML 仅支持 Piece 扩展的严格子集，不保证任意 GraphML 兼容。
+    冲突须读取 conflicts 并人工处理。GraphML 不含证据与别名，无损交换选 JSON；不支持旧版 Piece GraphML 导入。
+    GraphML 只支持基础图结构与约定属性：单层有向图，节点 label 为标题，边 label 为 Piece 支持的关系名
+    （is_a/part_of/depends_on/applies_to/supports/contradicts/related_to），未知业务关系会拒绝。
+    对称关系用标准 boolean 属性 symmetric 标记；非 UUID 的节点/边 ID 映射为内部 UUID。
+    容忍 schema 声明、常见附加属性、节点/边顺序变化与无关标量属性，不承诺任意第三方业务语义映射或无损往返。
     返回 data 含 committed、graph_id、conflicts 与各类数量。
     """
     try:
@@ -322,13 +329,13 @@ async def knowledge_delete(params: km.DeleteInput) -> dict:
 
 
 @mcp.tool(name="knowledge-rebuild-index", annotations=shared.WRITE_ADD)
-async def knowledge_rebuild_index() -> dict:
+async def knowledge_rebuild_index(graph_id: km.Uuid | None = None) -> dict:
     """重建图谱实体的派生全文索引（FTS）；不修改实体、关系、证据或历史，不调用模型。
 
-    用于索引缺失或查询结果异常后的恢复。无参数。返回 data 含 index_status 与 indexed_objects；
-    失败不会清空或改写已有实体/关系/证据，重试同一命令即可。
+    用于索引缺失或查询结果异常后的恢复。顶层 graph_id 可选，省略时重建默认空间。
+    返回 data 含 graph_id、index_status 与 indexed_objects；失败不会改写已有实体/关系/证据。
     """
-    return await shared.rebuild_index(knowledge.rebuild_index)
+    return await shared.rebuild_index(knowledge.rebuild_index, graph_id=graph_id)
 
 
 # ==================== 意图式写入（扁平参数，自动 request_key） ====================

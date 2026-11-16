@@ -458,6 +458,27 @@ def test_truncated_download_keeps_existing_output(endpoint, tmp_path):
     assert not list(tmp_path.glob(".piece-download-*"))
 
 
+@pytest.mark.parametrize("status", [200, 400])
+def test_json_attachments_download_without_hiding_http_errors(endpoint, tmp_path, status):
+    body = json.dumps({"entities": []} if status == 200 else failure("NOT_FOUND")).encode("utf-8")
+    destination = tmp_path / "graph.json"
+    if status == 400:
+        destination.write_bytes(b"keep")
+
+    def download(handler, payload):
+        handler.send_response(status)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Disposition", 'attachment; filename="graph.json"')
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    endpoint.routes["/download"] = download
+    result = endpoint.client().download("/download", destination, overwrite=status == 400)
+    assert result["success"] == (status == 200)
+    assert destination.read_bytes() == (body if status == 200 else b"keep")
+
+
 def test_download_http_failure_is_not_success(endpoint, capsys, tmp_path):
     endpoint.routes["/api/v1/file/9/content?format=markdown"] = lambda *a: failure("NOT_FOUND")
     code, result, _ = invoke(endpoint, capsys, "file", "export", "9", "--output", str(tmp_path / "missing.md"))

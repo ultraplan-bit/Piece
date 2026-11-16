@@ -472,3 +472,144 @@ def test_graph_compare_source_renders_chunk_body(knowledge_base, monkeypatch):
     bodies = [e._props.get("innerHTML", "") for e in elements if isinstance(e, ui.markdown)]
     assert any("之后的当前正文" in body for body in bodies), bodies
     container.delete()
+
+
+def test_graph_checks_and_rebuild_use_selected_space(knowledge_base, monkeypatch):
+    from nicegui import ui
+    from app.ui.views.graph_view import GraphWorkbench
+    from indexing.database import get_db_cursor
+    from indexing.services import knowledge_service as service
+
+    monkeypatch.setattr(ui, "notify", lambda *args, **kwargs: None)
+    default_id = service.list_graphs()["graphs"][0]["id"]
+    graph_id = service.create_graph("独立空间")["id"]
+    for selected in (default_id, graph_id):
+        service.apply({"graph_id": selected, "request_key": str(uuid4()), "reason": "test",
+                       "objects": [{"ref": "node", "kind": "concept", "title": "待恢复的索引"}]})
+    workbench = GraphWorkbench()
+    workbench.graph_id = graph_id
+
+    async def scenario():
+        await workbench.run_checks()
+        assert workbench.checks["checked_objects"] == 1
+        with get_db_cursor(write=True) as cursor:
+            cursor.execute("DELETE FROM knowledge_fts")
+        await workbench.rebuild_index()
+        assert service.search_objects(graph_id=graph_id, query="恢复")["total"] == 1
+        with get_db_cursor() as cursor:
+            assert cursor.execute("SELECT COUNT(*) FROM knowledge_fts WHERE graph_id=?", (default_id,)).fetchone()[0] == 0
+            assert cursor.execute("SELECT COUNT(*) FROM knowledge_fts WHERE graph_id=?", (graph_id,)).fetchone()[0] == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("operation", ["references", "checks", "relations"])
+def test_old_graph_responses_do_not_replace_new_space_state(knowledge_base, monkeypatch, operation):
+    from app.ui.views.graph_view import GraphWorkbench
+    from indexing.services import knowledge_service as service
+
+    created = service.apply({"request_key": str(uuid4()), "reason": "test",
+                             "objects": [{"ref": "node", "kind": "concept", "title": "原空间实体"}]})
+    graph_id = service.create_graph("新空间")["id"]
+    workbench = GraphWorkbench()
+    workbench.graph_id = created["graph_id"]
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+        delayed = {"references": service.references, "checks": service.lint, "relations": service.graph}[operation]
+
+        async def call(function, *args, **kwargs):
+            result = function(*args, **kwargs)
+            if function is delayed:
+                entered.set()
+                await release.wait()
+            return result
+
+        monkeypatch.setattr(workbench, "call", call)
+        if operation == "references":
+            task = asyncio.create_task(workbench.file_references(1))
+        elif operation == "checks":
+            task = asyncio.create_task(workbench.run_checks())
+        else:
+            task = asyncio.create_task(workbench.select("object", created["refs"]["node"]["id"]))
+        await asyncio.wait_for(entered.wait(), 5)
+        await workbench.select_graph(graph_id)
+        release.set()
+        await task
+        assert workbench.graph_id == graph_id
+        assert workbench.references_data is None and workbench.reference_file is None
+        assert workbench.checks is None and workbench.local_relations is None
+
+    asyncio.run(scenario())
+
+
+def test_graph_import_upload_has_no_file_size_limit():
+    from nicegui import ui
+    from app.ui.views.graph_view import GraphWorkbench
+
+    workbench = GraphWorkbench()
+    workbench.graph_id = str(uuid4())
+    with ui.column() as container:
+        workbench.import_graph_dialog()
+        upload = workbench.import_upload
+        assert upload is not None
+        assert "max-file-size" not in upload._props and "max-total-size" not in upload._props
+    container.delete()
+
+
+@pytest.mark.parametrize("invalid", ["utf8", "suffix"])
+def test_rejected_replacement_clears_import_confirmation(invalid):
+    from nicegui import ui
+    from app.ui.views.graph_view import GraphWorkbench
+
+    workbench = GraphWorkbench()
+    workbench.graph_id = str(uuid4())
+    with ui.column() as container:
+        state = {"busy": False, "document": "old-document", "format": "json", "preview_data": {"conflicts": []},
+                 "confirm": ui.button(), "preview": ui.column(), "message": ui.label()}
+
+    async def text():
+        if invalid == "utf8":
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+        return "{}"
+
+    event = SimpleNamespace(file=SimpleNamespace(name="bad.json" if invalid == "utf8" else "bad.txt", text=text))
+    asyncio.run(workbench.preview_graph_import(event, state, workbench.graph_id))
+    assert state["document"] is None and state["preview_data"] is None
+    assert state["confirm"]._props["disable"] is True
+    assert state["message"].text
+    container.delete()
+
+
+def test_removed_upload_does_not_restore_pending_preview(monkeypatch):
+    from nicegui import ui
+    from app.ui.views.graph_view import GraphWorkbench
+
+    workbench = GraphWorkbench()
+    workbench.graph_id = str(uuid4())
+    with ui.column() as container:
+        state = {"busy": False, "confirm": ui.button(), "preview": ui.column(), "message": ui.label()}
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def text():
+            return "{}"
+
+        async def call(function, *args, **kwargs):
+            entered.set()
+            await release.wait()
+            return {"conflicts": [], "counts": {}, "graph_name": "空间"}
+
+        monkeypatch.setattr(workbench, "call", call)
+        event = SimpleNamespace(file=SimpleNamespace(name="graph.json", text=text))
+        task = asyncio.create_task(workbench.preview_graph_import(event, state, workbench.graph_id))
+        await asyncio.wait_for(entered.wait(), 5)
+        workbench.clear_graph_import_preview(state)
+        release.set()
+        await task
+        assert state["document"] is None and state["preview_data"] is None
+        assert state["confirm"]._props["disable"] is True
+
+    asyncio.run(scenario())
+    container.delete()

@@ -334,8 +334,12 @@ class GraphWorkbench(WorkbenchBase):
             ui.label(self.text("import_graph")).classes("text-lg font-semibold theme-text")
             ui.label(self.text("import_graph_hint")).classes("text-sm theme-text-muted")
             upload = ui.upload(on_upload=lambda event: self.preview_graph_import(event, state, graph_id),
-                               auto_upload=True, max_files=1, max_file_size=10_000_000)\
+                               on_begin_upload=lambda: self.clear_graph_import_preview(state),
+                               on_rejected=lambda: self.clear_graph_import_preview(state),
+                               auto_upload=True, max_files=1)\
                 .props("accept=.json,.graphml,application/json,application/graphml+xml").classes("max-w-full")
+            for event in ("added", "removed"):
+                upload.on(event, lambda: self.clear_graph_import_preview(state), args=[])
             self.import_upload = upload
             preview = ui.column().classes("w-full gap-2")
             message = ui.label().classes("text-sm whitespace-pre-wrap theme-text-muted")
@@ -347,46 +351,53 @@ class GraphWorkbench(WorkbenchBase):
             state.update(dialog=dialog, preview=preview, confirm=confirm, message=message)
         dialog.open()
 
+    def clear_graph_import_preview(self, state):
+        if state["busy"]:
+            return
+        state.update(document=None, format=None, preview_data=None, generation=state.get("generation", 0) + 1)
+        state["confirm"].disable()
+        state["preview"].clear()
+        state["message"].set_text("")
+
     async def preview_graph_import(self, event, state, graph_id):
         if graph_id != self.graph_id or state["busy"]:
             return
+        self.clear_graph_import_preview(state)
+        generation = state["generation"]
         try:
             document = await event.file.text()
         except (UnicodeDecodeError, ValueError):
-            state["message"].set_text(self.text("import_invalid"))
+            if generation == state["generation"]:
+                state["message"].set_text(self.text("import_invalid"))
+            return
+        if graph_id != self.graph_id or generation != state["generation"]:
             return
         suffix = event.file.name.rsplit(".", 1)[-1].lower()
         format = "graphml" if suffix == "graphml" else "json"
         if suffix not in ("json", "graphml"):
             state["message"].set_text(self.text("import_format_invalid"))
             return
-        state.update(document=document, format=format, preview_data=None)
-        state["busy"] = True
-        state["confirm"].disable()
-        try:
-            data = await self.call(service.import_graph, {
-                "format": format, "document": document, "target_graph_id": graph_id,
-                "dry_run": True, "confirmed": False,
-            })
-            if graph_id != self.graph_id:
-                return
-            state["preview"].clear()
-            if not data:
-                return
-            state["preview_data"] = data
-            with state["preview"]:
-                if data.get("conflicts"):
-                    ui.label(self.text("import_conflicts", count=len(data["conflicts"]))).classes("theme-text")
-                    ui.label(json.dumps(data["conflicts"], ensure_ascii=False, indent=2)).classes(
-                        "text-xs whitespace-pre-wrap break-words theme-text-muted")
-                else:
-                    counts = data.get("counts", {})
-                    ui.label(self.text("import_preview_counts", entities=counts.get("entities", 0),
-                                       relations=counts.get("relations", 0), evidence=counts.get("evidence", 0)))
-                    ui.label(self.text("import_target", name=data.get("graph_name", ""))).classes("text-sm theme-text-muted")
-            state["confirm"].set_enabled(not data.get("conflicts"))
-        finally:
-            state["busy"] = False
+        state.update(document=document, format=format)
+        data = await self.call(service.import_graph, {
+            "format": format, "document": document, "target_graph_id": graph_id,
+            "dry_run": True, "confirmed": False,
+        })
+        if graph_id != self.graph_id or generation != state["generation"]:
+            return
+        if not data:
+            return
+        state["preview_data"] = data
+        with state["preview"]:
+            if data.get("conflicts"):
+                ui.label(self.text("import_conflicts", count=len(data["conflicts"]))).classes("theme-text")
+                ui.label(json.dumps(data["conflicts"], ensure_ascii=False, indent=2)).classes(
+                    "text-xs whitespace-pre-wrap break-words theme-text-muted")
+            else:
+                counts = data.get("counts", {})
+                ui.label(self.text("import_preview_counts", entities=counts.get("entities", 0),
+                                   relations=counts.get("relations", 0), evidence=counts.get("evidence", 0)))
+                ui.label(self.text("import_target", name=data.get("graph_name", ""))).classes("text-sm theme-text-muted")
+        state["confirm"].set_enabled(not data.get("conflicts"))
 
     async def confirm_graph_import(self, state, graph_id, dialog, message):
         preview = state.get("preview_data")
@@ -457,29 +468,29 @@ class GraphWorkbench(WorkbenchBase):
 
     async def poll(self):
         """只读当前列表和当前详情；无变化不重绘，不触碰对话框草稿。"""
-        if self._polling or self._searching or self.graph_id is None:
+        if self._polling or self._searching:
             return
-        timer, generation = self._poll_timer, self._search_generation
+        timer, generation, graph_id = self._poll_timer, self._search_generation, self.graph_id
 
         def current():
             return (timer is self._poll_timer and (timer is None or not timer.is_deleted)
-                    and generation == self._search_generation)
+                    and generation == self._search_generation and graph_id == self.graph_id)
 
         if not current():
             return
         self._polling = True
-        selection, detail, graph_id = self._selection, self.detail, self.graph_id
+        selection, detail = self._selection, self.detail
         try:
             params = dict(self._search_params or self.search_params())
             function = self._list_function(params)
             results = await run.io_bound(function, **params)
-            if not current() or results.get("graph_id") != self.graph_id:
+            if not current():
                 return
             last_offset = max(0, (results["total"] - 1) // params["limit"]) * params["limit"]
             if params["offset"] > last_offset:
                 params["offset"] = last_offset
                 results = await run.io_bound(function, **params)
-                if not current() or results.get("graph_id") != self.graph_id:
+                if not current():
                     return
             self._search_params, self.offset = params, params["offset"]
             if results != self.results:
@@ -491,7 +502,6 @@ class GraphWorkbench(WorkbenchBase):
             kind, ident = detail["kind"], detail["record"]["id"]
             evidence = detail.get("evidence", {})
             try:
-                graph_id = self.graph_id
                 incoming = await run.io_bound(service.get_record, kind=kind, id=ident, graph_id=graph_id,
                                              limit=evidence.get("limit", 25), offset=evidence.get("offset", 0))
                 local = await run.io_bound(service.graph, root_id=ident, depth=1, edge_types=["relation"],
@@ -500,8 +510,7 @@ class GraphWorkbench(WorkbenchBase):
                 if exc.code != "NOT_FOUND":
                     raise
                 incoming, local = None, None
-            if (not current() or selection != self._selection or self.detail is not detail
-                    or incoming and incoming.get("graph_id") != self.graph_id):
+            if not current() or selection != self._selection or self.detail is not detail:
                 return
             if incoming != detail or local != self.local_relations:
                 self.detail, self.local_relations = incoming, local
@@ -538,10 +547,11 @@ class GraphWorkbench(WorkbenchBase):
         self.highlight_selection()
         if kind == "object":
             self.selected_object = ident
-            self.local_relations = await self._scoped_call(service.graph, root_id=ident, depth=1,
-                                                           edge_types=["relation"], graph_id=graph_id)
+            local_relations = await self._scoped_call(service.graph, root_id=ident, depth=1,
+                                                      edge_types=["relation"], graph_id=graph_id)
             if generation != self._selection or graph_id != self.graph_id:
                 return
+            self.local_relations = local_relations
         if self.mode == "graph":
             if kind == "object" and (not reveal or self.overview):
                 # 从目录或全局概览选中实体：切回局部探索并以它为根刷新图谱。
@@ -1103,17 +1113,16 @@ class GraphWorkbench(WorkbenchBase):
     async def run_checks(self, reset=True):
         if reset:
             self.lint_offset = 0
-        params = {"limit": 25, "offset": self.lint_offset}
+        params: dict[str, object] = {"limit": 25, "offset": self.lint_offset}
         if self.lint_scope == "selected":
             params["object_ids"] = [self.selected_object] if self.selected_object else []
         elif self.lint_scope == "filtered":
             params["object_ids"] = [item["id"] for item in (self.results or {}).get("objects", [])]
 
         graph_id, generation = self.graph_id, self.graph_generation
-        if graph_id:
-            params["graph_id"] = graph_id
-        self.checks = await self._scoped_call(service.lint, **params, graph_id=graph_id)
+        checks = await self._scoped_call(service.lint, **params, graph_id=graph_id)
         if graph_id == self.graph_id and generation == self.graph_generation:
+            self.checks = checks
             self.refresh_workspace()
 
     async def check_page(self, delta):
@@ -1122,23 +1131,24 @@ class GraphWorkbench(WorkbenchBase):
 
     async def rebuild_index(self):
         """只重建查询索引；不改实体、关系、证据或历史，不调用模型。"""
-        result = await self._scoped_call(service.rebuild_index, graph_id=self.graph_id)
-        if result is None:
+        graph_id, generation = self.graph_id, self.graph_generation
+        result = await self._scoped_call(service.rebuild_index, graph_id=graph_id)
+        if result is None or graph_id != self.graph_id or generation != self.graph_generation:
             return
         self.notify(self.text("rebuild_done"), type="positive")
         await self.search(False)
 
     async def file_references(self, file_id, offset=0):
-        graph_id = self.graph_id
+        graph_id, generation = self.graph_id, self.graph_generation
         info = await self._scoped_call(service.list_objects, limit=1, graph_id=graph_id)
-        if not info or graph_id != self.graph_id:
+        if not info or graph_id != self.graph_id or generation != self.graph_generation:
             return
-        self.reference_file = file_id
-        self.references_data = await self._scoped_call(service.references, source_library_id=info["library_id"],
-                                                       source_file_id=file_id, limit=25, offset=offset,
-                                                       graph_id=graph_id)
-        if graph_id != self.graph_id:
+        references = await self._scoped_call(service.references, source_library_id=info["library_id"],
+                                              source_file_id=file_id, limit=25, offset=offset,
+                                              graph_id=graph_id)
+        if graph_id != self.graph_id or generation != self.graph_generation:
             return
+        self.reference_file, self.references_data = file_id, references
         if self.show_view:
             await self.show_view()
         self.refresh_workspace()

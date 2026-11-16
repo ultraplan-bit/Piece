@@ -261,7 +261,9 @@ class PieceClient:
         temporary = None
         try:
             with self._response("GET", path, headers=headers) as (response, deadline):
-                if response.status >= 400 or "json" in response.getheader("Content-Type", "").lower():
+                disposition = response.getheader("Content-Disposition", "").split(";", 1)[0].strip().lower()
+                if response.status >= 400 or ("json" in response.getheader("Content-Type", "").lower()
+                                              and disposition != "attachment"):
                     result = self._read_json(response, deadline)
                     if not result["success"]:
                         return result

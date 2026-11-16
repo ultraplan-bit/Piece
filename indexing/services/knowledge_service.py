@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from ..database import get_db_cursor
 from .. import knowledge_models as models
+from ..knowledge_exchange import SYMMETRIC
 from .errors import BusinessError
 from .task_service import serialized_mutation
 
@@ -16,7 +17,6 @@ from .knowledge_common import (
 )
 TABLES = {"object": "knowledge_objects", "relation": "knowledge_relations",
           "evidence": "knowledge_evidence"}
-SYMMETRIC = {"related_to", "contradicts"}
 OBJECT_FIELDS = ("kind", "title", "summary", "aliases", "status")
 RELATION_FIELDS = ("source_id", "predicate", "target_id", "description", "qualifier", "basis", "status")
 SUMMARY_COLUMNS = "id,kind,title,summary,status,revision,created_at,updated_at"
@@ -134,13 +134,17 @@ def export_graph(**kwargs):
             item.pop("graph_id")
             relations.append(item)
         evidence = []
-        for row in cursor.execute("SELECT * FROM knowledge_evidence WHERE graph_id=? ORDER BY id", (graph_id,)):
-            item = dict(row)
-            item.pop("graph_id")
-            item.pop("dedup_key")
-            evidence.append(item)
+        if query.format == "json":
+            for row in cursor.execute("SELECT * FROM knowledge_evidence WHERE graph_id=? ORDER BY id", (graph_id,)):
+                item = dict(row)
+                item.pop("graph_id")
+                item.pop("dedup_key")
+                evidence.append(item)
         snapshot = {"graph": graph, "entities": entities, "relations": relations, "evidence": evidence}
-    content = exchange.encode_json(snapshot) if query.format == "json" else exchange.encode_graphml(snapshot)
+    try:
+        content = exchange.encode_json(snapshot) if query.format == "json" else exchange.encode_graphml(snapshot)
+    except ValueError as exc:
+        raise BusinessError("INVALID_INPUT", f"图谱导出失败：{exc}") from exc
     return {"graph_id": graph_id, "format": query.format, "content": content,
             "entities": len(entities), "relations": len(relations), "evidence": len(evidence)}
 
@@ -159,8 +163,11 @@ def _import_conflicts(cursor, graph_id, snapshot):
         (graph_id,))}
     relations = {row["id"]: row for row in cursor.execute(
         "SELECT * FROM knowledge_relations WHERE graph_id=?", (graph_id,))}
-    evidence_ids = {row[0] for row in cursor.execute(
-        "SELECT id FROM knowledge_evidence WHERE graph_id=?", (graph_id,))}
+    relation_fields = ("source_id", "predicate", "target_id", "qualifier")
+    relation_keys = {tuple(row[key] for key in relation_fields) for row in relations.values()}
+    evidence = cursor.execute("SELECT id,dedup_key FROM knowledge_evidence WHERE graph_id=?", (graph_id,)).fetchall()
+    evidence_ids = {row["id"] for row in evidence}
+    evidence_keys = {row["dedup_key"] for row in evidence}
     conflicts = []
     for item in snapshot["entities"]:
         existing = entities.get(item["id"])
@@ -171,20 +178,22 @@ def _import_conflicts(cursor, graph_id, snapshot):
                               "reason": "identical" if all(current[key] == item[key] for key in item) else "different"})
     for item in snapshot["relations"]:
         existing = relations.get(item["id"])
+        unique_key = tuple(item[key] for key in relation_fields)
         if existing is not None:
             conflicts.append({"kind": "relation", "id": item["id"],
                               "reason": "identical" if all(existing[key] == item[key] for key in item) else "different"})
-        elif cursor.execute("SELECT 1 FROM knowledge_relations WHERE graph_id=? AND source_id=? AND predicate=? AND target_id=? AND qualifier=?",
-                            (graph_id, item["source_id"], item["predicate"], item["target_id"], item["qualifier"])).fetchone():
+        elif unique_key in relation_keys:
             conflicts.append({"kind": "relation", "id": item["id"], "reason": "unique_key"})
+        relation_keys.add(unique_key)
     for item in snapshot["evidence"]:
         if item["id"] in evidence_ids:
             conflicts.append({"kind": "evidence", "id": item["id"], "reason": "id"})
         dedup = _digest({key: item.get(key) for key in (
             "object_id", "relation_id", "source_kind", "stance", "source_library_id", "source_file_id",
             "source_chunk_id", "source_url", "quote")})
-        if cursor.execute("SELECT 1 FROM knowledge_evidence WHERE graph_id=? AND dedup_key=?", (graph_id, dedup)).fetchone():
+        if dedup in evidence_keys:
             conflicts.append({"kind": "evidence", "id": item["id"], "reason": "duplicate"})
+        evidence_keys.add(dedup)
     return conflicts
 
 
@@ -194,71 +203,47 @@ def import_graph(data, *, actor="internal"):
     snapshot = _decode_import(request)
     if request.graph_name is not None:
         snapshot["graph"]["name"] = request.graph_name
+    for item in snapshot["relations"]:
+        if item["predicate"] in SYMMETRIC:
+            item["source_id"], item["target_id"] = sorted((item["source_id"], item["target_id"]))
     with get_db_cursor(write=True) as cursor:
         cursor.execute("BEGIN IMMEDIATE")
         target_id = _graph_id(cursor, request.target_graph_id) if request.target_graph_id is not None else str(uuid4())
-        target = cursor.execute("SELECT id,name FROM knowledge_graphs WHERE id=?", (target_id,)).fetchone()
-        if request.target_graph_id is None and not request.dry_run:
-            name = snapshot["graph"]["name"]
-            if cursor.execute("SELECT 1 FROM knowledge_graphs WHERE name=?", (name,)).fetchone():
+        if request.target_graph_id is None:
+            target_name = _validate(models.GraphCreateInput, {"name": snapshot["graph"]["name"]}).name
+            if cursor.execute("SELECT 1 FROM knowledge_graphs WHERE name=?", (target_name,)).fetchone():
                 raise BusinessError("KNOWLEDGE_CONFLICT", "同名知识图谱已存在；请指定目标图谱或修改图名")
-            cursor.execute("INSERT INTO knowledge_graphs(id,name) VALUES (?,?)", (target_id, name))
-            target_name = name
-        elif target is not None:
-            target_name = target["name"]
-        elif request.target_graph_id is not None:
-            raise BusinessError("NOT_FOUND", f"知识图谱不存在：{request.target_graph_id}")
+            cursor.execute("INSERT INTO knowledge_graphs(id,name) VALUES (?,?)", (target_id, target_name))
         else:
-            target_name = snapshot["graph"]["name"]
+            target_name = cursor.execute("SELECT name FROM knowledge_graphs WHERE id=?", (target_id,)).fetchone()[0]
         snapshot["graph"]["name"] = target_name
-        conflicts = _import_conflicts(cursor, target_id, snapshot) if target is not None else []
+        conflicts = _import_conflicts(cursor, target_id, snapshot)
         if conflicts:
             cursor.connection.rollback()
             return {"dry_run": request.dry_run, "committed": False, "graph_id": target_id,
-                    "conflicts": conflicts, "counts": {key: len(snapshot[key]) for key in ("entities", "relations", "evidence")}}
-        if request.dry_run:
-            cursor.connection.rollback()
-            return {"dry_run": True, "committed": False, "graph_id": target_id,
-                    "graph_name": snapshot["graph"]["name"], "conflicts": [],
+                    "graph_name": target_name, "conflicts": conflicts,
                     "counts": {key: len(snapshot[key]) for key in ("entities", "relations", "evidence")}}
         for item in snapshot["entities"]:
             values = {key: item[key] for key in ("kind", "title", "summary", "aliases", "status", "revision", "created_at", "updated_at")}
-            values["graph_id"] = target_id
+            if request.format == "graphml":
+                for field in ("created_at", "updated_at"):
+                    values.pop(field)
             _save_record(cursor, "object", item["id"], values, target_id)
         for item in snapshot["relations"]:
             values = {key: item[key] for key in ("source_id", "predicate", "target_id", "description", "qualifier", "basis", "status", "revision", "created_at", "updated_at")}
-            values["graph_id"] = target_id
-            if item["predicate"] in SYMMETRIC:
-                values["source_id"], values["target_id"] = sorted((values["source_id"], values["target_id"]))
+            if request.format == "graphml":
+                for field in ("created_at", "updated_at"):
+                    values.pop(field)
             _save_record(cursor, "relation", item["id"], values, target_id)
         batch_id = str(uuid4())
-        from .knowledge_common import normalize_newlines
         for item in snapshot["evidence"]:
-            if item.get("source_url") is not None:
-                from .knowledge_common import _safe_url
-                item["source_url"] = _safe_url(item["source_url"])
-            if item["source_kind"] == "piece" and item["source_library_id"] == _library_id(cursor):
-                row = cursor.execute("SELECT chunk_text FROM chunks WHERE id=? AND file_id=?",
-                                     (item["source_chunk_id"], item["source_file_id"])).fetchone()
-                if row is None or item["quote"] not in normalize_newlines(row["chunk_text"]):
-                    raise BusinessError("INVALID_SOURCE", "导入引文与本库来源卡片不匹配")
+            source = _validate(models.SourceInput, {key: item[key] for key in models.SourceInput.model_fields if key in item})
+            # 验证原始引文，不让输入模型的去首尾空白掩盖不匹配；保留全部快照字段。
+            source.quote = item["quote"]
+            source_values(cursor, source)
             values = {key: item[key] for key in (
                 "object_id", "relation_id", "source_kind", "stance", "source_library_id", "source_file_id",
                 "source_chunk_id", "source_title", "source_url", "heading_path", "page_number", "quote", "content_hash", "created_at")}
-            if values["source_kind"] == "piece" and values["source_library_id"] == _library_id(cursor):
-                from .knowledge_common import content_hash, normalize_newlines
-                chunk = cursor.execute("SELECT chunk_text FROM chunks WHERE id=? AND file_id=?",
-                                       (values["source_chunk_id"], values["source_file_id"])).fetchone()
-                if chunk is None or values["quote"] not in normalize_newlines(chunk["chunk_text"]):
-                    raise BusinessError("INVALID_SOURCE", "导入引文与本库来源卡片不匹配")
-                values["content_hash"] = content_hash(chunk["chunk_text"])
-            elif values["source_kind"] == "piece":
-                if not values["source_title"]:
-                    raise BusinessError("INVALID_SOURCE", "跨库 Piece 证据需要 source_title")
-                values["content_hash"] = None
-                values["heading_path"] = None
-                values["page_number"] = None
-                values["quote"] = normalize_newlines(values["quote"])
             values["graph_id"] = target_id
             values["dedup_key"] = _digest({key: values.get(key) for key in (
                 "object_id", "relation_id", "source_kind", "stance", "source_library_id", "source_file_id",
@@ -268,9 +253,12 @@ def import_graph(data, *, actor="internal"):
             for item in records:
                 record = _record(cursor, kind, item["id"], target_id)
                 _revision(cursor, kind, None, record, f"导入 {request.format}", batch_id, actor)
-        return {"dry_run": False, "committed": True, "graph_id": target_id,
-                "graph_name": snapshot["graph"]["name"], "conflicts": [],
-                "counts": {key: len(snapshot[key]) for key in ("entities", "relations", "evidence")}}
+        result = {"dry_run": request.dry_run, "committed": not request.dry_run, "graph_id": target_id,
+                  "graph_name": target_name, "conflicts": [],
+                  "counts": {key: len(snapshot[key]) for key in ("entities", "relations", "evidence")}}
+        if request.dry_run:
+            cursor.connection.rollback()
+        return result
 
 
 def _locator(section, index, item):
@@ -739,14 +727,14 @@ def _impact(cursor, kind, record_id, graph_id):
             ("evidence", "SELECT id FROM knowledge_evidence WHERE graph_id=? AND relation_id=?", [graph_id, record_id]),
             ("history", "SELECT id FROM knowledge_revisions WHERE graph_id=? AND relation_id=?", [graph_id, record_id]),
         ])
-    counts, digest = {}, hashlib.sha256()
+    counts, digest = {}, hashlib.sha256(graph_id.encode("utf-8"))
     for name, sql, args in queries:
         counts[name] = 0
         for row in cursor.execute(sql + " ORDER BY id", args):
             digest.update(_json([name, *row]).encode("utf-8"))
             digest.update(b"\n")
             counts[name] += 1
-    return {"kind": kind, "id": record_id, "revision": record.get("revision"),
+    return {"graph_id": graph_id, "kind": kind, "id": record_id, "revision": record.get("revision"),
             "counts": counts, "impact_token": digest.hexdigest(), "deletes_files": False,
             "clears_online_history": kind in ("object", "relation"), "backups_affected": False}
 
@@ -968,15 +956,16 @@ def lint(**kwargs):
 
 
 @serialized_mutation
-def rebuild_index():
-    """仅重建图谱实体的派生全文索引，不改实体、关系、证据或历史。"""
+def rebuild_index(graph_id=None):
+    """仅重建指定图谱的派生全文索引，不改实体、关系、证据或历史。"""
+    query = _validate(models.ScopedInput, {"graph_id": graph_id})
     from retrieval.nodes.preprocess_node import tokenize_query
 
     def tokens(text):
         return " ".join(tokenize_query(text or ""))
 
     with get_db_cursor(write=True) as cursor:
-        graph_id = _graph_id(cursor)
+        graph_id = _graph_id(cursor, query.graph_id)
         cursor.execute("DELETE FROM knowledge_fts WHERE graph_id=?", (graph_id,))
         cursor.execute("DELETE FROM knowledge_relation_fts WHERE graph_id=?", (graph_id,))
         rows = cursor.execute("SELECT id,title,aliases_json,summary FROM knowledge_objects WHERE graph_id=? ORDER BY id", (graph_id,)).fetchall()

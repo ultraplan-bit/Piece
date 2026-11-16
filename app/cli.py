@@ -37,7 +37,6 @@ from app.skills import get_version
 
 VERSION = get_version()
 _DEFAULT_TIMEOUT = 300
-MAX_GRAPH_IMPORT_BYTES = 2 * 1024 * 1024
 _JSON_REQUESTED = False
 
 
@@ -858,20 +857,11 @@ def _read_graph_document(path_value: str) -> str:
     try:
         if path_value == "-":
             stream = getattr(sys.stdin, "buffer", None)
-            if stream is not None:
-                raw = stream.read(MAX_GRAPH_IMPORT_BYTES + 1)
-            else:
-                text = sys.stdin.read(MAX_GRAPH_IMPORT_BYTES + 1)
-                raw = text.encode("utf-8")
+            raw = stream.read() if stream is not None else sys.stdin.read().encode("utf-8")
         else:
-            with Path(path_value).open("rb") as source:
-                raw = source.read(MAX_GRAPH_IMPORT_BYTES + 1)
-        if len(raw) > MAX_GRAPH_IMPORT_BYTES:
-            raise ClientError("图谱导入文件不能超过 2 MiB", code="INPUT_TOO_LARGE")
+            raw = Path(path_value).read_bytes()
         return raw.decode("utf-8")
-    except ClientError:
-        raise
-    except (OSError, UnicodeDecodeError) as exc:
+    except (OSError, UnicodeError) as exc:
         raise ClientError(f"读取 UTF-8 导入文件失败：{exc}", code="FILE_ERROR") from exc
 
 
@@ -935,8 +925,8 @@ def _add_knowledge_commands(commands, namespace):
         descriptions["graph"] = "读取有界局部语义图；按实体候选检索时先 search，再展开一跳"
         descriptions["relation-search"] = "按关系描述与适用条件检索关系；端点名称需先 search 实体再展开图"
         descriptions["spaces"] = "列出、创建、重命名或删除知识图谱空间"
-        descriptions["export"] = "导出一个全局图为 JSON 或 GraphML"
-        descriptions["import"] = "预览或导入 JSON/GraphML 图谱"
+        descriptions["export"] = "导出全图：JSON 用于 Piece 数据交换；GraphML 为通用图谱投影（不含证据与别名）"
+        descriptions["import"] = "预览或导入图谱：无损交换选 JSON；GraphML 只支持基础图结构与约定属性，不支持旧版 Piece GraphML"
     for name, help_text in descriptions.items():
         sub = operations.add_parser(name, help=help_text, description=help_text)
         _add_runtime_options(sub)
@@ -979,17 +969,19 @@ def _add_knowledge_commands(commands, namespace):
             confirmation.add_argument("--yes", action="store_true", help="确认删除知识空间")
         if name == "export":
             sub.add_argument("--graph-id", help="知识图谱 UUID；省略时使用默认图谱")
-            sub.add_argument("--format", choices=("json", "graphml"), default="json")
+            sub.add_argument("--format", choices=("json", "graphml"), default="json",
+                             help="JSON：Piece 数据交换；GraphML：标准通用图谱（不含证据与别名）")
             sub.add_argument("--output", type=Path, required=True)
         if name == "import":
-            sub.add_argument("--input", required=True, help="UTF-8 JSON/GraphML 文件（最大 2 MiB），或 - 读 stdin")
-            sub.add_argument("--format", choices=("json", "graphml"), required=True)
+            sub.add_argument("--input", required=True, help="UTF-8 JSON/GraphML 文件，或 - 读 stdin")
+            sub.add_argument("--format", choices=("json", "graphml"), required=True,
+                             help="无损交换选 JSON；GraphML 不含证据与别名，仅支持单层有向图及约定属性，不承诺任意第三方业务语义映射或无损往返")
             sub.add_argument("--target-graph-id", help="并入已有图谱；省略时创建新图谱")
             sub.add_argument("--graph-name", help="新建图谱时覆盖导入文件中的名称")
             confirmation = sub.add_mutually_exclusive_group()
-            confirmation.add_argument("--dry-run", action="store_true", default=True, help="只预览，不写入（默认）")
+            confirmation.add_argument("--dry-run", action="store_true", help="只预览，不写入（默认）")
             confirmation.add_argument("--yes", action="store_true", help="确认正式导入")
-        if name in {"list", "search", "relation-search", "get", "references", "lint", "history", "request", "apply", "delete"} and not is_wiki:
+        if name in {"list", "search", "relation-search", "get", "references", "lint", "history", "request", "apply", "delete", "rebuild-index"} and not is_wiki:
             sub.add_argument("--graph-id", help="知识图谱 UUID；省略时使用默认图谱")
         if name == "graph":
             sub.add_argument("root_id", help="根图实体 UUID")
@@ -1539,7 +1531,7 @@ def _wiki_recovery(args: argparse.Namespace, result: dict[str, Any], payload=Non
         hint = "先查询原请求；结果未知时不要换键重提，只能在核对后原样重试同一请求文件"
     if words is not None:
         graph_id = getattr(args, "graph_id", None) or payload.get("graph_id")
-        if args.command == "graph" and graph_id and "--graph-id" not in words:
+        if words[0] == "graph" and graph_id and "--graph-id" not in words:
             words.extend(("--graph-id", graph_id))
         data.update(_wiki_next(args, words, hint))
     result["data"] = data
@@ -1939,8 +1931,7 @@ def _api_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             if args.graph_id is not None:
                 query_values["graph_id"] = args.graph_id
             query = urlencode(query_values)
-            result = client.download("/api/v1/knowledge/export?" + query, args.output, overwrite=False)
-            return _simple(make_envelope(True, "知识图谱已导出", result))
+            return _simple(client.download("/api/v1/knowledge/export?" + query, args.output, overwrite=False))
         if command == "graph" and operation == "import":
             document = _read_graph_document(args.input)
             if not args.yes or args.dry_run:

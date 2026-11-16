@@ -118,10 +118,10 @@ async def intent_write(service, *args, actor: str, **kwargs):
     return write_envelope(result, "部分提交：committed 只表示至少一条已写入；请按 data.errors 核对，不要重发")
 
 
-async def rebuild_index(function) -> dict:
-    """无参数重建派生索引；图谱与 Wiki 的成功/部分失败回执一致。"""
+async def rebuild_index(function, **kwargs) -> dict:
+    """重建派生索引；图谱与 Wiki 的成功/部分失败回执一致。"""
     try:
-        result = await run_sync(function)
+        result = await run_sync(function, **kwargs)
     except BusinessError as exc:
         return {"success": False, "message": str(exc), "data": exc.data,
                 "error": {"code": exc.code, "message": str(exc)}}

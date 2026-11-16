@@ -246,8 +246,24 @@ def test_mcp_protocol_schema_validation_and_partial_updates(api, mcp_servers):
             assert graph_tools["knowledge-import"].inputSchema["properties"]["params"]["$ref"].endswith("ImportInput")
             import_schema = graph_tools["knowledge-import"].inputSchema["$defs"]["ImportInput"]
             assert import_schema["properties"]["dry_run"]["default"] is True
-            assert "GraphML 仅支持 Piece 扩展的严格子集" in graph_tools["knowledge-import"].description
-            assert "无冲突时才 merge" in graph_tools["knowledge-import"].description
+            export_description = graph_tools["knowledge-export"].description
+            assert export_description is not None
+            assert "GraphML 为标准通用图谱投影，不含证据、别名、修订号和时间戳" in export_description
+            assert "普通属性不使用 Piece 私有 JSON 编码" in export_description
+            import_description = graph_tools["knowledge-import"].description
+            assert import_description is not None
+            for phrase in ("GraphML 不含证据与别名", "不支持旧版 Piece GraphML 导入", "单层有向图",
+                           "节点 label 为标题", "边 label 为 Piece 支持的关系名", "未知业务关系会拒绝",
+                           "boolean 属性 symmetric", "非 UUID 的节点/边 ID 映射为内部 UUID"):
+                assert phrase in import_description
+            for description in (export_description, import_description):
+                assert "基础图结构与约定属性" in description
+                assert "不承诺任意第三方业务语义映射或无损往返" in description
+                assert "无损交换选 JSON" in description
+                assert "Piece 扩展的严格子集" not in description
+            assert "dry_run=false 且 confirmed=true" in import_description
+            assert "无冲突时才 merge" in import_description
+            assert "冲突须读取 conflicts 并人工处理" in import_description
             assert "params" not in graph_tools["knowledge-rebuild-index"].inputSchema["properties"]
             intents = {"knowledge-object-add", "knowledge-object-update", "knowledge-relation-add", "knowledge-relation-update"}
             for name in intents:
@@ -356,10 +372,11 @@ def test_mcp_protocol_schema_validation_and_partial_updates(api, mcp_servers):
                         evidence[owner] = id_map[evidence[owner]]
             document = json.dumps(exchange_document, ensure_ascii=False)
             preview_import = (await graph_client.call_tool("knowledge-import", {
-                "params": {"format": "json", "document": document}})).data
+                "params": {"format": "json", "document": document, "target_graph_id": new_graph_id}})).data
             assert preview_import["success"] and preview_import["data"]["dry_run"]
             assert not preview_import["data"]["committed"]
             assert preview_import["data"]["conflicts"] == []
+            assert "graph_id" in graph_tools["knowledge-rebuild-index"].inputSchema["properties"]
             assert (await graph_client.call_tool("knowledge-list", {"params": {"graph_id": new_graph_id}})).data["total"] == 0
             unconfirmed = await graph_client.call_tool("knowledge-import", {"params": {
                 "format": "json", "document": document, "dry_run": False}}, raise_on_error=False)
@@ -369,6 +386,12 @@ def test_mcp_protocol_schema_validation_and_partial_updates(api, mcp_servers):
                 "dry_run": False, "confirmed": True}})).data
             assert committed_import["success"] and committed_import["data"]["committed"]
             assert committed_import["data"]["graph_id"] == new_graph_id
+            from indexing.database import get_db_cursor
+            with get_db_cursor(write=True) as cursor:
+                cursor.execute("DELETE FROM knowledge_fts WHERE graph_id=?", (new_graph_id,))
+            rebuilt = (await graph_client.call_tool("knowledge-rebuild-index", {"graph_id": new_graph_id})).data
+            assert rebuilt["success"] and rebuilt["data"]["graph_id"] == new_graph_id
+            assert rebuilt["data"]["indexed_objects"] == 1
             assert (await graph_client.call_tool("knowledge-list", {
                 "params": {"graph_id": new_graph_id}})).data["total"] == 1
             assert (await graph_client.call_tool("knowledge-list", {"params": {}})).data["total"] == 1
@@ -932,6 +955,34 @@ def test_mcp_intent_tools_flat_params_auto_key_and_shared_builder(api, knowledge
 
     oid = asyncio.run(scenario())
     assert _post(api, "knowledge/get", kind="object", id=oid)["record"]["title"] == "稳定身份（修订）"
+
+
+@pytest.mark.parametrize("format", ["json", "graphml"])
+def test_cli_large_graph_document_import_confirmation_and_scoped_rebuild(http_cli, knowledge_base, format):
+    from indexing.database import get_db_cursor
+
+    knowledge.apply(_batch(objects=[{"ref": "node", "kind": "concept", "title": "CLI 导入实体"}]))
+    graph_id = knowledge.create_graph("CLI 导入目标")["id"]
+    path = knowledge_base.path / f"export.{format}"
+    code, exported = http_cli("graph", "export", "--format", format, "--output", path)
+    assert code == 0 and exported["success"] and path.is_file(), exported
+    with path.open("ab") as stream:
+        stream.write(b" " * (14 * 1024 * 1024))
+    arguments = ("graph", "import", "--format", format, "--input", path, "--target-graph-id", graph_id)
+    code, preview = http_cli(*arguments)
+    assert code == 0 and preview["data"]["dry_run"] and not preview["data"]["committed"]
+    assert knowledge.list_objects(graph_id=graph_id)["total"] == 0
+    code, committed = http_cli(*arguments, "--yes")
+    assert code == 0 and committed["data"]["committed"] and not committed["data"]["dry_run"]
+    assert knowledge.list_objects(graph_id=graph_id)["total"] == 1
+    with get_db_cursor(write=True) as cursor:
+        cursor.execute("DELETE FROM knowledge_fts WHERE graph_id=?", (graph_id,))
+    code, rebuilt = http_cli("graph", "rebuild-index", "--graph-id", graph_id)
+    assert code == 0 and rebuilt["data"]["graph_id"] == graph_id
+    assert rebuilt["data"]["indexed_objects"] == 1
+    with get_db_cursor() as cursor:
+        assert cursor.execute("SELECT COUNT(*) FROM knowledge_fts WHERE graph_id=?", (graph_id,)).fetchone()[0] == 1
+    assert knowledge.list_objects()["total"] == 1
 
 
 def test_index_mcp_lists_file_chunks_outline_and_text(api, knowledge_base, mcp_servers):

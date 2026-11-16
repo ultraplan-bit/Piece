@@ -638,10 +638,14 @@ def test_quote_mismatch_offers_readonly_chunk_get(endpoint, capsys, tmp_path):
     # 真实服务的定位错误带 section/index，CLI 据此给出 chunk get 恢复命令。
     endpoint.routes["/api/v1/knowledge/apply"] = lambda *a: failure(
         "QUOTE_MISMATCH", {"section": "evidence", "index": 0})
-    code, result, _ = invoke(endpoint, capsys, *_add(tmp_path, tmp_path / "request.json"))
+    code, result, _ = invoke(endpoint, capsys, *_add(tmp_path, tmp_path / "request.json"),
+                             "--graph-id", OBJECT_UUID)
     assert code == 1 and not result["success"]
     argv = result["data"]["next_argv"]
     command = result["data"]["next_command"]
+    assert "--graph-id" not in argv
+    from app.cli import _build_parser
+    assert _build_parser().parse_args(argv[argv.index("chunk"):]).command == "chunk"
     assert argv and all(isinstance(part, str) for part in argv)
     assert _option_value(argv, "--port") == str(endpoint.port)
     assert Path(_option_value(argv, "--data-dir")).resolve() == endpoint.config.resolve()

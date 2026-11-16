@@ -332,7 +332,8 @@ def test_service_auth_rejects_cross_service_and_missing_keys(mcp_settings, monke
     mcp_settings.mcp = settings.McpSettings(api_key="read", index_api_key="write")
     middleware = []
     auth.apply_bearer_auth(SimpleNamespace(add_middleware=middleware.append), service)
-    handler = getattr(middleware[0], method)
+    bearer = next(item for item in middleware if isinstance(item, auth.BearerAuthMiddleware))
+    handler = getattr(bearer, method)
     call_next = AsyncMock(return_value="allowed")
     for header in ("", f"Bearer {wrong}", "Basic abc", f"Bearer {correct}extra"):
         monkeypatch.setattr(auth, "get_http_headers", lambda h=header: {"authorization": h})
@@ -350,7 +351,8 @@ def test_auth_switch_disables_both_services(mcp_settings, service):
     mcp_settings.mcp = settings.McpSettings(api_key="read", index_api_key="write", auth_enabled=False)
     middleware = []
     auth.apply_bearer_auth(SimpleNamespace(add_middleware=middleware.append), service)
-    assert not middleware and not settings.is_mcp_auth_enabled(service)
+    assert len(middleware) == 1 and isinstance(middleware[0], auth.CallTimingMiddleware)
+    assert not settings.is_mcp_auth_enabled(service)
 
 
 _SERVICE_NAMES = ("piece-kb", "piece-index", "piece-graph", "piece-wiki", "piece-zotero")

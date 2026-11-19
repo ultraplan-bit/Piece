@@ -164,16 +164,53 @@ def chunk_images(chunk_id):
 
 
 def source_page(file_id, page_number):
-    from .page_render import resolve_source_pdf, render_pdf_page
+    from .office_convert import list_converters
+    from .page_render import PAGE_VIEWABLE_FORMATS, resolve_source_pdf, render_pdf_page
+    from .parser_helper import run_preview_page_count
+
+    def unavailable(reason, hint, *, retryable=False, **details):
+        return BusinessError("PAGE_UNAVAILABLE", "无法取得原页", data={
+            "reason": reason, "retryable": retryable, "hint": hint, **details,
+        })
+
     file = file_info(file_id)
+    missing_hint = "原件副本不存在；请用 get-docs 查询已索引正文，恢复原件后再查看原页。"
     if not file.get("original_file_path"):
-        raise BusinessError("NOT_FOUND", "没有原件可供查看")
+        raise BusinessError("NOT_FOUND", "没有原件可供查看", data={
+            "reason": "original_missing", "retryable": False, "hint": missing_hint,
+        })
     original = file_service.managed_path(file["original_file_path"])
-    pdf = resolve_source_pdf(str(original), file["original_file_type"])
-    path = render_pdf_page(pdf, page_number) if pdf else None
-    if not path:
-        raise BusinessError("PAGE_UNAVAILABLE", "无法取得原页，请检查页码和转换器")
-    return path
+    if not original.is_file():
+        raise unavailable("original_missing", missing_hint)
+    file_type = file.get("original_file_type")
+    suffix = f".{file_type}".lower() if file_type else original.suffix.lower()
+    if suffix not in PAGE_VIEWABLE_FORMATS:
+        raise unavailable("unsupported_format", "此格式不支持按页查看；请用 get-docs 查询已索引正文。")
+
+    try:
+        pdf = resolve_source_pdf(str(original), file_type)
+    except Exception as exc:
+        raise unavailable("conversion_failed", "原件转换失败；可重试或检查 Office 转换器，也可用 get-docs 查询正文。",
+                          retryable=True) from exc
+    if not pdf:
+        if not list_converters():
+            raise unavailable("converter_unavailable", "请在设置中启用并配置 Microsoft Office 或 LibreOffice 转换器；也可用 get-docs 查询正文。")
+        raise unavailable("conversion_failed", "原件转换失败；可重试或检查 Office 转换器，也可用 get-docs 查询正文。",
+                          retryable=True)
+
+    render_hint = "原页渲染失败；可重试，持续失败时请检查原件是否损坏或用 get-docs 查询正文。"
+    try:
+        path = render_pdf_page(pdf, page_number)
+        if path:
+            return path
+        # 成功请求不额外读页数；失败时复用隔离预览进程区分越界与渲染故障。
+        total = run_preview_page_count(pdf)
+    except Exception as exc:
+        raise unavailable("render_failed", render_hint, retryable=True) from exc
+    if not 1 <= page_number <= total:
+        raise unavailable("page_out_of_range", f"页码从 1 开始，原件共 {total} 页；请修改 page_number 后重试，或用 get-docs 查询正文。",
+                          total_pages=total)
+    raise unavailable("render_failed", render_hint, retryable=True)
 
 
 def sync_status():

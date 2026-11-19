@@ -9,15 +9,17 @@
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from embedding_stub import embedding_stub
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -26,43 +28,6 @@ def _free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
-
-
-class _EmbeddingStub(BaseHTTPRequestHandler):
-    calls = 0
-    fail = False
-
-    def log_message(self, format, *args):
-        pass
-
-    def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-        type(self).calls += 1
-        if type(self).fail:
-            self.send_response(500)
-            self.end_headers()
-            return
-        inputs = body["input"] if isinstance(body["input"], list) else [body["input"]]
-        data = [{"object": "embedding", "index": i, "embedding": [1.0, 0.0]} for i, _ in enumerate(inputs)]
-        raw = json.dumps({"object": "list", "data": data, "model": body.get("model", "stub"),
-                          "usage": {"prompt_tokens": 1, "total_tokens": 1}}).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
-
-
-@pytest.fixture(scope="module")
-def embedding_stub():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _EmbeddingStub)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield SimpleNamespace(url=f"http://127.0.0.1:{server.server_port}/v1", handler=_EmbeddingStub)
-    finally:
-        server.shutdown()
-        server.server_close()
 
 
 def _cli(data_dir, port, *args, stdin=None, timeout=60):
@@ -199,22 +164,57 @@ def test_wrong_credentials_target_and_second_instance(service, tmp_path):
     assert offline.code == 1 and offline.data["error"]["code"] == "INSTANCE_BUSY"
 
 
-def test_shutdown_waits_for_inflight_index_task(service, tmp_path):
-    source = tmp_path / "大文档.md"
-    source.write_text("\n\n".join(f"# 段落 {i}\n\n内容 {i}" for i in range(40)), encoding="utf-8")
-    imported = service.cli("file", "import", str(source))
-    assert imported.code == 0
-    task_id = imported.data["data"]["task_ids"][0]
-    stop = service.cli("stop")
-    assert stop.code == 0
-    service.process.wait(timeout=60)
-    assert service.process.returncode == 0
-    import sqlite3
-    connection = sqlite3.connect(service.data_dir / "kb.db")
+def test_shutdown_cancels_inflight_embedding_and_cleans_index_task(service, embedding_stub, tmp_path, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original_post = embedding_stub.handler.do_POST
+
+    def blocked_post(handler):
+        # HTTP 请求已到达，响应只由测试释放；正常关闭必须取消这个异步请求。
+        entered.set()
+        try:
+            release.wait()
+            try:
+                original_post(handler)
+            except ConnectionError:
+                # 服务已退出，向取消请求的连接写响应可能失败。
+                pass
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(embedding_stub.handler, "do_POST", blocked_post)
+    source = tmp_path / "在途文档.md"
+    source.write_text("# 关闭测试\n\n嵌入请求阻塞期间停止服务。", encoding="utf-8")
+    staging = service.data_dir / "files" / ".staging"
     try:
-        status = connection.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0]
-        assert status in {"completed", "failed", "pending"}
-        assert connection.execute("SELECT COUNT(*) FROM tasks WHERE status = 'processing'").fetchone()[0] == 0
+        imported = service.cli("file", "import", str(source))
+        assert imported.code == 0, imported.stdout
+        task_id = imported.data["data"]["task_ids"][0]
+        assert entered.wait(30), service.log.read_text(encoding="utf-8", errors="replace")
+        connection = sqlite3.connect(service.data_dir / "kb.db")
+        try:
+            status, file_id = connection.execute("SELECT status, file_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            assert status == "processing"
+            assert staging.is_dir() and any(staging.iterdir())
+            assert not finished.is_set()
+            stop = service.cli("stop")
+            assert stop.code == 0, stop.stdout
+            # 保持 HTTP 响应阻塞，实际等待生产环境的关闭宽限期及取消收尾。
+            service.process.wait(timeout=60)
+            assert service.process.returncode == 0, service.log.read_text(encoding="utf-8", errors="replace")
+            assert not release.is_set() and not finished.is_set()
+            status, error = connection.execute("SELECT status, error_message FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            assert status == "failed"
+            assert error == "应用关闭，索引任务已中断"
+            assert connection.execute("SELECT COUNT(*) FROM tasks WHERE status = 'processing'").fetchone()[0] == 0
+            assert connection.execute("SELECT COUNT(*) FROM staged_chunks WHERE task_id = ?", (task_id,)).fetchone()[0] == 0
+            assert connection.execute("SELECT COUNT(*) FROM chunks WHERE file_id = ?", (file_id,)).fetchone()[0] == 0
+            assert connection.execute("SELECT status FROM files WHERE id = ?", (file_id,)).fetchone()[0] == "error"
+        finally:
+            connection.close()
+        assert not staging.exists() or not any(staging.iterdir())
     finally:
-        connection.close()
-    assert not (service.data_dir / "files" / ".staging").exists() or not list((service.data_dir / "files" / ".staging").iterdir())
+        release.set()
+        if entered.is_set():
+            assert finished.wait(5), "嵌入替身未在释放后结束请求"

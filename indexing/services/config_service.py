@@ -2,20 +2,78 @@
 
 import hashlib
 import json
-import sqlite3
 from contextlib import ExitStack
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import ValidationError
 from app.platform import database_lock
 from .. import settings as settings_module
-from ..settings import (AppSettings, MCP_SERVICES, get_settings, load_settings,
+from ..settings import (AppSettings, McpSettings, MCP_LISTENER_FIELDS, get_settings, load_settings,
                         save_settings, _get_config_file_path)
+from .embedding_config import check_embedding_change, prepare_embedding_change
 from .errors import BusinessError
 from .task_service import serialized_mutation
 
-_RESTART_GROUPS = {"api", "mcp", "performance", "data_path"}
-_MODEL_FIELDS = {"model", "vector_dim", "base_url"}
+_RESTART_GROUPS = ("api", "performance", "data_path")
+_mcp_reconfigure: Callable[[McpSettings], bool] | None = None
+_mcp_status: Callable[[], dict] | None = None
+_mcp_apply_error: str | None = None
+
+
+def bind_mcp_reconfigure(callback, status=None):
+    """运行中的 MCP 管理器注册应用入口；配置层不启动服务器或等待事件循环。"""
+    global _mcp_reconfigure, _mcp_status, _mcp_apply_error
+    _mcp_reconfigure = callback
+    _mcp_status = status
+    _mcp_apply_error = None
+
+
+def unbind_mcp_reconfigure(callback):
+    global _mcp_reconfigure, _mcp_status, _mcp_apply_error
+    if _mcp_reconfigure == callback:
+        _mcp_reconfigure = None
+        _mcp_status = None
+        _mcp_apply_error = None
+
+
+def mcp_service_status(service):
+    return _mcp_status().get(service) if _mcp_status is not None else None
+
+
+@serialized_mutation
+def mark_mcp_applied(config, *, error=None):
+    """只有资源拥有者确认监听就绪后，才发布对应字段的有效值。"""
+    global _mcp_apply_error
+    _mcp_apply_error = error
+    if error is None:
+        effective = get_settings().model_copy(deep=True)
+        for key in MCP_LISTENER_FIELDS:
+            setattr(effective.mcp, key, getattr(config, key))
+        settings_module._settings = effective
+
+
+def config_effects(saved, effective=None):
+    """GUI 和 API 共用生效判断；同组的即时字段不受待重启字段牵连。"""
+    effective = effective or get_settings()
+    restart = [key for key in _RESTART_GROUPS if getattr(saved, key) != getattr(effective, key)]
+    listeners_pending = any(getattr(saved.mcp, key) != getattr(effective.mcp, key) for key in MCP_LISTENER_FIELDS)
+    failed = _mcp_status is not None and any(status["status"] == "failed" for status in _mcp_status().values())
+    pending_apply = []
+    if listeners_pending or failed:
+        (pending_apply if _mcp_reconfigure is not None else restart).append("mcp")
+    error = _mcp_apply_error or ("MCP 监听未能就绪" if failed else None)
+    return {"pending_restart": restart, "pending_apply": pending_apply,
+            "apply_error": error if listeners_pending or failed else None}
+
+
+def _reindex_groups(saved, updated):
+    credentials = {"embedding": {"api_key"}, "ocr": {"api_key", "vlm_api_key", "mineru_token"}, "office": set()}
+    groups = [group for group, excluded in credentials.items()
+              if getattr(saved, group).model_dump(exclude=excluded) != getattr(updated, group).model_dump(exclude=excluded)]
+    if "ocr" not in groups and settings_module.get_pdf_parser(saved.ocr) != settings_module.get_pdf_parser(updated.ocr):
+        groups.append("ocr")
+    return groups
 
 
 def redact(value):
@@ -82,8 +140,7 @@ def show_config(offline=False):
     saved = _read_config()
     result = {"config": redact(saved.model_dump()), "config_path": str(_get_config_file_path())}
     if not offline:
-        effective = get_settings()
-        result["pending_restart"] = [key for key in _RESTART_GROUPS if getattr(saved, key) != getattr(effective, key)]
+        result.update(config_effects(saved))
     return result
 
 
@@ -117,32 +174,13 @@ def initialize_config(patch=None, *, expected_revision=None):
                 settings = _validate(_merge(target.model_dump(), patch))
                 if settings.get_db_path().resolve() != target.get_db_path().resolve():
                     locks.enter_context(database_lock(settings.get_db_path()))
-                _check_model_change(target, settings)
+                check_embedding_change(target, settings)
                 if not exists:
                     settings.mcp.api_key = settings_module.generate_api_key()
                     settings.mcp.index_api_key = settings_module.generate_api_key()
                 if not save_settings(settings):
                     raise BusinessError("CONFIG_SAVE_FAILED", "配置保存失败，原配置未修改")
             return {"config": redact(settings.model_dump()), "config_path": str(_get_config_file_path())}
-
-
-def _has_indexed_data(path):
-    if not path.exists():
-        return False
-    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
-    try:
-        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        return "chunks" in tables and connection.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is not None
-    finally:
-        connection.close()
-
-
-def _check_model_change(current, updated):
-    changed = any(getattr(current.embedding, key) != getattr(updated.embedding, key) for key in _MODEL_FIELDS)
-    if changed and _has_indexed_data(current.get_db_path()):
-        raise BusinessError("REINDEX_REQUIRED", "已有向量不能直接切换模型/地址/维度。请保留当前配置，或明确选择空知识库后配置新模型；不会自动适配旧向量。",
-                            data={"requires_reindex": ["embedding"]})
-    return changed
 
 
 @serialized_mutation
@@ -153,52 +191,47 @@ def update_config(patch, offline=False):
         saved = _read_config()
         current = saved if offline else get_settings()
         updated = _validate(_merge(saved.model_dump(), patch))
+        effective = updated.model_copy(deep=True)
+        if not offline:
+            for key in _RESTART_GROUPS:
+                setattr(effective, key, getattr(current, key))
+            for key in MCP_LISTENER_FIELDS:
+                setattr(effective.mcp, key, getattr(current.mcp, key))
+            try:
+                effective = AppSettings.model_validate(effective.model_dump())
+            except ValidationError:
+                raise BusinessError("INVALID_CONFIG", "新 MCP 凭据与当前管理凭据冲突，请先重启以应用管理密钥；配置未保存") from None
         if offline:
             locks.enter_context(database_lock(saved.get_db_path()))
             if updated.get_db_path().resolve() != saved.get_db_path().resolve():
                 locks.enter_context(database_lock(updated.get_db_path()))
-        restart = [key for key in _RESTART_GROUPS if getattr(current, key) != getattr(updated, key)]
-        if "mcp" in restart and (current.mcp.port == updated.mcp.port
-                and current.mcp.auth_enabled == updated.mcp.auth_enabled
-                and all(current.mcp.get_api_key(service) == updated.mcp.get_api_key(service)
-                        for service in MCP_SERVICES)
-                and all(getattr(current.mcp, key) == getattr(updated.mcp, key)
-                        for key in ("zotero_enabled", "zotero_port", "zotero_auth_enabled"))):
-            restart.remove("mcp")
-        model_changed = _check_model_change(current, updated)
-        if not offline and model_changed:
-            from .task_service import get_active_tasks
-            if get_active_tasks():
-                raise BusinessError("FILE_BUSY", "存在在途任务，不能切换嵌入模型")
         try:
-            if not offline and current.embedding.vector_dim != updated.embedding.vector_dim:
-                from ..database import get_db_cursor
-                with get_db_cursor(write=True) as cursor:
-                    cursor.execute("DROP TABLE vec_chunks")
-                    cursor.execute(f"CREATE VIRTUAL TABLE vec_chunks USING vec0(chunk_id INTEGER PRIMARY KEY, embedding float[{updated.embedding.vector_dim}])")
-                    if not save_settings(updated, update_cache=False):
-                        raise BusinessError("CONFIG_SAVE_FAILED", "配置写入失败，未应用变更")
-            elif not save_settings(updated, update_cache=False):
-                raise BusinessError("CONFIG_SAVE_FAILED", "配置写入失败，未应用变更")
-        except sqlite3.Error:
-            save_settings(saved, update_cache=False)
-            raise BusinessError("CONFIG_SAVE_FAILED", "向量维度校验失败，已保留原配置") from None
-        # 保存层可能因同步目标变化清空历史，返回值也要包含这一变更。
+            with prepare_embedding_change(current, updated, offline=offline):
+                if not save_settings(updated, update_cache=False):
+                    raise BusinessError("CONFIG_SAVE_FAILED", "配置写入失败，未应用变更")
+        except BusinessError as exc:
+            if exc.code == "VECTOR_CONFIG_FAILED":
+                save_settings(saved, update_cache=False)
+                raise BusinessError("CONFIG_SAVE_FAILED", "向量维度校验失败，已保留原配置") from None
+            raise
         changed = [key for key in updated.model_dump() if getattr(saved, key) != getattr(updated, key)]
-        reindex = [key for key in changed if key in {"embedding", "ocr", "office"}]
-        if offline:
-            settings_module._settings = updated
-        else:
-            effective = updated.model_copy(deep=True)
-            for key in restart:
-                setattr(effective, key, getattr(current, key))
-            settings_module._settings = effective
-            if current.embedding != effective.embedding:
-                from .embedding_client import refresh_embeddings_instance
-                refresh_embeddings_instance()
+        # 保存层可能因同步目标变化清空历史，运行时发布同一结果。
+        effective.webdav.last_sync_time = updated.webdav.last_sync_time
+        settings_module._settings = effective
+        effects = config_effects(updated, effective)
+        callback = _mcp_reconfigure
+        listener_changes = any(getattr(saved.mcp, key) != getattr(updated.mcp, key) for key in MCP_LISTENER_FIELDS)
+        if not offline and callback is not None and "mcp" in patch and (listener_changes or effects["pending_apply"]):
+            global _mcp_apply_error
+            _mcp_apply_error = None
+            if not callback(updated.mcp):
+                effects["pending_apply"] = []
+                effects["pending_restart"].append("mcp")
+        waiting = set(effects["pending_restart"] + effects["pending_apply"])
         return {"config": redact(updated.model_dump()), "changed": changed,
-                "effective_immediately": [key for key in changed if key not in restart],
-                "requires_restart": restart, "requires_reindex": reindex}
+                "effective_immediately": [key for key in changed if key not in waiting],
+                "requires_restart": effects["pending_restart"], "pending_apply": effects["pending_apply"],
+                "requires_reindex": _reindex_groups(saved, updated)}
 
 
 @serialized_mutation

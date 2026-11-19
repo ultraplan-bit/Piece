@@ -80,7 +80,7 @@ def test_pending_restart_survives_reopening_settings(editor):
     assert not handler.dirty
 
 
-def test_new_mcp_key_is_a_draft_until_save_and_restart(editor):
+def test_new_mcp_key_is_a_draft_until_save(editor):
     from unittest.mock import Mock
     handler, form = editor
     old = settings.get_settings().mcp.get_api_key("index")
@@ -90,7 +90,8 @@ def test_new_mcp_key_is_a_draft_until_save_and_restart(editor):
     assert config_service.get_saved_settings().mcp.get_api_key("index") == old
     assert handler.save_settings_form("mcp")
     assert config_service.get_saved_settings().mcp.get_api_key("index") == new
-    assert settings.get_settings().mcp.get_api_key("index") == old
+    assert settings.get_settings().mcp.get_api_key("index") == new
+    assert not handler.pending_restart
 
 
 def test_ocr_edit_preserves_unexposed_options_and_complete_extra_payload(editor):

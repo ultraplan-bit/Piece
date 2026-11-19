@@ -10,7 +10,7 @@ SQLite检索MCP服务 - 主入口文件
 import json
 from fastmcp import FastMCP, Context
 from fastmcp.exceptions import ToolError
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import ToolAnnotations
 from typing import List, Annotated, Union, Optional
@@ -315,7 +315,7 @@ async def get_source_page_tool(
         path = await run_sync(source_page, file_id, page_number)
     except BusinessError as exc:
         await ctx.warning(f"[Tool 4] {exc.code}: {exc}")
-        raise ToolError(f"{exc.code}: {exc}") from exc
+        raise ToolError(json.dumps({"code": exc.code, "message": str(exc), "data": exc.data}, ensure_ascii=False)) from exc
 
     result = {"file_id": file_id, "page_number": page_number}
     return ToolResult(

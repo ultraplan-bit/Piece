@@ -13,7 +13,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
-from indexing.settings import McpService, get_mcp_api_key, is_mcp_auth_enabled
+from indexing.settings import McpService, get_settings, is_mcp_auth_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -52,19 +52,23 @@ class CallTimingMiddleware(Middleware):
 class BearerAuthMiddleware(Middleware):
     """Bearer Token 认证中间件"""
 
-    def __init__(self, valid_token: str):
-        self.valid_token = valid_token
+    def __init__(self, service: McpService):
+        self.service: McpService = service
 
     def _verify_token(self) -> bool:
-        """验证 Bearer Token"""
-        headers = get_http_headers() or {}
+        """每次受保护操作使用同一份有效配置；密钥轮换不重启传输会话。"""
+        config = get_settings().mcp
+        if not is_mcp_auth_enabled(self.service, config=config):
+            return True
+        valid_token = config.get_api_key(self.service)
+        headers = get_http_headers(include={"authorization"})
         auth_header = headers.get("authorization", "")
 
         if not auth_header.startswith("Bearer "):
             return False
 
         token = auth_header[7:]  # 去掉 "Bearer " 前缀
-        return secrets.compare_digest(token.encode("utf-8"), self.valid_token.encode("utf-8"))
+        return secrets.compare_digest(token.encode("utf-8"), valid_token.encode("utf-8"))
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         if not self._verify_token():
@@ -78,8 +82,6 @@ class BearerAuthMiddleware(Middleware):
 
 
 def apply_bearer_auth(mcp, service: McpService) -> None:
-    """按服务选择密钥，认证配置在重启应用后生效；调用计时始终启用。"""
-    # FastMCP 逆序构建中间件链；先注册计时层，使它包住认证拒绝路径。
+    """认证层始终存在，按有效配置动态验证；调用计时包住认证拒绝路径。"""
     mcp.add_middleware(CallTimingMiddleware(str(service)))
-    if is_mcp_auth_enabled(service):
-        mcp.add_middleware(BearerAuthMiddleware(valid_token=get_mcp_api_key(service)))
+    mcp.add_middleware(BearerAuthMiddleware(service))

@@ -62,9 +62,9 @@ jobs:
       - name: 安装依赖
         run: uv sync --frozen --extra desktop
 
-      # test_install 在临时 venv 里重新下载安装整套依赖，验证的是 pip 安装路径而非打包产物，发布流程中跳过
+      # 默认入口只运行离线回归；浏览器、规模和联网安装由 Tests 工作流分别验收。
       - name: 运行测试
-        run: uv run --no-sync pytest -q --ignore=tests/automated/test_install.py
+        run: uv run --no-sync pytest -q
 
       - name: 运行打包脚本
         run: uv run --no-sync python build.py

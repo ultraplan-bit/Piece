@@ -2,6 +2,7 @@
 
 所有被安装入口都在仓库目录之外运行，且子进程环境不含 PYTHONPATH、仓库相关环境变量，
 确保精简安装不是从源码目录偷加载缺失模块。需要 `uv` 命令和依赖下载（有 uv 缓存时较快）；
+依赖按 uv.lock 导出的约束安装，验证已支持版本组合的分发合同，不评估最新依赖兼容性。
 不接触默认知识库，全部使用临时数据目录和动态端口。
 """
 
@@ -10,6 +11,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -67,20 +69,40 @@ def wheel(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def slim_venv(tmp_path_factory, wheel):
+def install_constraints(tmp_path_factory):
+    output = tmp_path_factory.mktemp("install-constraints") / "constraints.txt"
+    subprocess.run(["uv", "export", "--frozen", "--no-dev", "--all-extras",
+                    "--no-emit-project", "--no-hashes", "--no-annotate", "--no-header",
+                    "--output-file", str(output)], cwd=ROOT, check=True, capture_output=True, timeout=60)
+    return output
+
+
+def _install(venv, requirement, constraints):
+    log_path = venv.parent / f"{venv.name}-install.log"
+    command = ["uv", "pip", "install", "--python", str(_venv_python(venv)),
+               "--constraint", str(constraints), requirement]
+    with log_path.open("wb") as log:
+        try:
+            subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT, timeout=300)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            log.flush()
+            pytest.fail(f"安装失败（{exc}），日志：{log_path}\n"
+                        + log_path.read_text(encoding="utf-8", errors="replace"), pytrace=False)
+
+
+@pytest.fixture(scope="module")
+def slim_venv(tmp_path_factory, wheel, install_constraints):
     venv = tmp_path_factory.mktemp("install") / "venv-slim"
-    subprocess.run(["uv", "venv", str(venv)], check=True, capture_output=True)
-    subprocess.run(["uv", "pip", "install", "--python", str(_venv_python(venv)), str(wheel)],
-                   check=True, capture_output=True, timeout=900)
+    subprocess.run(["uv", "venv", "--python", sys.executable, str(venv)], check=True, capture_output=True)
+    _install(venv, str(wheel), install_constraints)
     return venv
 
 
 @pytest.fixture(scope="module")
-def full_venv(tmp_path_factory, wheel):
+def full_venv(tmp_path_factory, wheel, install_constraints):
     venv = tmp_path_factory.mktemp("install") / "venv-full"
-    subprocess.run(["uv", "venv", str(venv)], check=True, capture_output=True)
-    subprocess.run(["uv", "pip", "install", "--python", str(_venv_python(venv)), f"{wheel}[desktop]"],
-                   check=True, capture_output=True, timeout=900)
+    subprocess.run(["uv", "venv", "--python", sys.executable, str(venv)], check=True, capture_output=True)
+    _install(venv, f"{wheel}[desktop]", install_constraints)
     return venv
 
 

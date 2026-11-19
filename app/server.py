@@ -56,39 +56,8 @@ def check_optional_dependencies(*, with_gui: bool, with_mcp: bool) -> None:
 
 
 async def start_mcp_servers(runtime: Runtime, manager: Any) -> None:
-    """启动独立端口的 MCP 服务，逐个记录就绪或失败；Zotero 始终限于本机。"""
-    from indexing.mcp.config import get_service_ports
-    from indexing.mcp.server import mcp as index_mcp
-    from indexing.mcp.graph_server import mcp as graph_mcp
-    from indexing.mcp.wiki_server import mcp as wiki_mcp
-    from retrieval.server import mcp as retrieval_mcp
-
-    ports = get_service_ports()
-    services = [("retrieval", retrieval_mcp, ports["piece-kb"], MCP_HOST),
-                ("index", index_mcp, ports["piece-index"], MCP_HOST),
-                ("graph", graph_mcp, ports["piece-graph"], MCP_HOST),
-                ("wiki", wiki_mcp, ports["piece-wiki"], MCP_HOST)]
-    if runtime.settings.mcp.zotero_enabled:
-        from indexing.mcp.zotero_server import mcp as zotero_mcp
-        services.append(("zotero", zotero_mcp, runtime.settings.mcp.zotero_port, "127.0.0.1"))
-    await manager.start([(mcp, port) for _, mcp, port, _ in services],
-                        host={mcp.name: host for _, mcp, _, host in services}, runtime=runtime)
-
-    def refresh_status(_task=None):
-        if manager.stopping:
-            return
-        statuses, failures = {}, []
-        for (name, _mcp, port, host), server, task in zip(services, manager.servers, manager.tasks):
-            ready = bool(server.started and not server.should_exit and not task.done())
-            statuses[name] = {"status": "ready" if ready else "failed", "host": host, "port": port,
-                              "url": f"http://{host}:{port}/mcp"}
-            if not ready:
-                failures.append(name)
-        runtime.mark_mcp_services(statuses, failures)
-
-    refresh_status()
-    for task in manager.tasks:
-        task.add_done_callback(refresh_status)
+    """只装配 MCP 管理器；监听、配置应用和状态归管理器所有。"""
+    await manager.configure(runtime.settings.mcp, host=MCP_HOST, runtime=runtime)
 
 
 def build_application(runtime: Runtime, *, manager: Any | None = None, on_ready: Any | None = None):
@@ -168,8 +137,11 @@ def run_application(application: Any, runtime: Runtime) -> None:
             await run_sync(close_window)
             await super().shutdown(sockets=sockets)
 
+    # CPython gh-160429：Windows Proactor 在连接被重置时可能跳过 transport 清理，导致停机挂起。
+    # 主服务只监听本机，使用 Windows Selector（最多 512 个 socket）。
     server = CoreServer(uvicorn.Config(
         application, host="127.0.0.1", port=runtime.port, lifespan="on",
+        loop="asyncio:SelectorEventLoop" if sys.platform == "win32" else "auto",
         log_config=None, timeout_graceful_shutdown=5,
     ))
     if runtime.with_gui:

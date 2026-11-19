@@ -20,18 +20,18 @@ from tree_browser_helpers import browse_mode, collection_row, document_row, expa
 
 
 @pytest.fixture
-def gui_service(knowledge_base, tmp_path, request):
+def gui_service(knowledge_base, tmp_path, request, embedding_stub):
     import fitz
     from indexing import database, settings
     from indexing.services import collection_service, file_service
 
     if sys.platform != "win32" or not Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe").is_file():
-        pytest.skip("浏览器验收使用已安装的 Windows Edge")
+        pytest.fail("显式浏览器验收需要已安装的 Windows Edge；请勿将环境缺失算作跳过通过")
     data_dir = knowledge_base.path
     config = knowledge_base.settings
     config.appearance.theme = "light"
-    # 没有后台索引任务；即使发生意外请求，也只会连接本机不存在的服务。
-    config.embedding.base_url = "http://127.0.0.1:1/v1"
+    # 新上传也走真实 Worker；模型边界只连接本机确定性 HTTP 替身。
+    config.embedding.base_url = embedding_stub.url
     settings.save_settings(config)
     root = collection_service.create_collection("人工智能")["collection_id"]
     rag = collection_service.create_collection("检索增强", parent_id=root)["collection_id"]
@@ -89,13 +89,30 @@ def gui_service(knowledge_base, tmp_path, request):
                    "cli": lambda *args: _cli(data_dir, port, *args), "path": tmp_path, "original": original}
         finally:
             if process.poll() is None:
-                _cli(data_dir, port, "stop")
+                try:
+                    stop = _cli(data_dir, port, "stop", timeout=15)
+                except subprocess.TimeoutExpired as exc:
+                    stop = None
+                    stop_result = str(exc)
+                else:
+                    stop_result = f"exit={stop.code}, stdout={stop.stdout}, stderr={stop.stderr}"
                 try:
                     process.wait(timeout=60)
                 except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-                    pytest.fail(f"GUI 服务未正常退出：PID {process.pid}")
+                    cleanup = "进程已退出"
+                    if process.poll() is None:
+                        # 仅清理本 fixture 启动的树，Windows venv launcher 下面还有实际服务进程。
+                        try:
+                            result = subprocess.run(["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                                                    capture_output=True, text=True, errors="replace", timeout=10)
+                            cleanup = f"exit={result.returncode}, stdout={result.stdout}, stderr={result.stderr}"
+                            process.wait(timeout=10)
+                        except (OSError, subprocess.TimeoutExpired) as exc:
+                            cleanup = f"{cleanup}\n清理失败：{exc}"
+                    pytest.fail(f"GUI 服务未在 60 秒内正常退出\nPID {process.pid}: {process.args!r}\n"
+                                f"stop: {stop_result}\ncleanup: {cleanup}\n{log_path}\n"
+                                + log_path.read_text(encoding="utf-8", errors="replace"))
+                assert stop is not None and stop.code == 0, stop_result
     service_log = log_path.read_text(encoding="utf-8", errors="replace")
     assert process.returncode == 0, service_log
     assert "[ERROR]" not in service_log, service_log

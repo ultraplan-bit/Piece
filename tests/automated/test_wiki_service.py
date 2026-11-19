@@ -695,6 +695,8 @@ def test_zero_write_batch_is_not_partial_failure_at_entrypoints(knowledge_base):
     envelope = shared.write_envelope(result, "部分")
     assert not envelope["success"] and envelope["error"]["code"] == "VERSION_CONFLICT"
     assert envelope["data"] is result and envelope["message"] == result["errors"][0]["message"]
+    assert envelope["data"]["next_tool"]["name"] == "wiki-get"
+    assert envelope["data"]["errors"][0]["next_tool"]["arguments"] == {"params": {"id": page_id}}
     # 至少写入一页的批次仍然是 PARTIAL_FAILURE。
     mixed = {"committed": True, "partial": True, "index_status": "stale",
              "errors": [{"code": "CONTENT_CONFLICT", "message": "x"}]}

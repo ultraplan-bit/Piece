@@ -47,10 +47,15 @@ def write_envelope(result, partial_message):
     partial = bool(result.get("partial")) or result.get("index_status") not in (None, "current")
     if not partial:
         return {"success": True, "message": "已提交" if result.get("committed") else "预检通过，未写入", "data": result}
-    errors = result.get("errors") or []
+    errors = [recovery_data(item.get("code"), item) if isinstance(item, dict) else item
+              for item in result.get("errors") or []]
+    if errors:
+        result["errors"] = errors
     if not result.get("committed") and errors and isinstance(errors[0], dict) and errors[0].get("code"):
         first = errors[0]
         message = first.get("message") or "未写入任何记录，请按 data.errors 处理后重试"
+        if "next_tool" in first:
+            result["next_tool"] = first["next_tool"]
         return {"success": False, "message": message, "data": result,
                 "error": {"code": first["code"], "message": message}}
     return {"success": False, "message": partial_message, "data": result,
@@ -61,8 +66,7 @@ async def write(function, params, actor: str) -> dict:
     try:
         result = await run_sync(function, params, actor=actor)
     except BusinessError as exc:
-        return {"success": False, "message": str(exc), "data": exc.data,
-                "error": {"code": exc.code, "message": str(exc)}}
+        return write_error(exc)
     # 部分提交不能返回 success=true 冒充全成功；committed 只表示至少一条已写入，不预设失败原因。
     return write_envelope(result, "部分提交：committed 只表示至少一条已写入；请按 data.errors 与逐页回执核对，不要整批复发")
 
@@ -78,24 +82,39 @@ def intent_coerce(value):
     return value
 
 
-def intent_error(exc: BusinessError) -> dict:
-    """把业务错误转成回执，并为常见冲突补上下一步工具指引。"""
-    data = dict(exc.data or {})
-    if exc.code == "EVIDENCE_SELECTION_REQUIRED" and data.get("chunk_id"):
-        data["next_tool"] = {"name": "query_chunk_info", "arguments": {"chunk_id": data["chunk_id"]},
-                             "hint": "读回正文后改用 CHUNK_ID:N-M 行号定位唯一引文，不自动取首条"}
-    elif exc.code == "KNOWLEDGE_CONFLICT" and data.get("section") == "relations" and isinstance(data.get("existing"), dict):
+def recovery_data(code, data):
+    """批次和扁平工具共用恢复指引；只给下一步读取/修订入口，不替调用方改证据或并发条件。"""
+    data = dict(data or {})
+    chunk_id = data.get("source_chunk_id") or data.get("chunk_id")
+    if code in {"EVIDENCE_SELECTION_REQUIRED", "QUOTE_MISMATCH", "SOURCE_CHANGED"} and chunk_id:
+        hints = {
+            "EVIDENCE_SELECTION_REQUIRED": "读回正文后改用 CHUNK_ID:N-M 行号定位唯一引文，不自动取首条",
+            "QUOTE_MISMATCH": "读回正文后用 piece-kb 的 extract-quote 按行提取精确引文，不手改引文或使用模糊匹配",
+            "SOURCE_CHANGED": "重新读取来源并提取引文，确认新正文仍支持原断言；不要只替换 expected_content_hash",
+        }
+        data["next_tool"] = {"name": "query_chunk_info", "arguments": {"chunk_id": chunk_id}, "hint": hints[code]}
+    elif code in {"VERSION_CONFLICT", "CONTENT_CONFLICT"} and (data.get("id") or data.get("page_id")):
+        wiki = code == "CONTENT_CONFLICT" or data.get("section") == "pages" or bool(data.get("page_id"))
+        data["next_tool"] = {"name": "wiki-get" if wiki else "knowledge-get",
+                             "arguments": {"params": {"id": data.get("id") or data["page_id"]}},
+                             "hint": "读取当前内容和并发条件，比较后再决定是否修订；不要只换版本/哈希盲目覆盖"}
+    elif code == "KNOWLEDGE_CONFLICT" and data.get("section") == "relations" and isinstance(data.get("existing"), dict):
         existing = data["existing"]
         data["next_tool"] = {"name": "knowledge-relation-update",
                              "arguments": {"id": existing["id"], "expected_revision": existing["revision"]},
                              "hint": "data.existing 是已有关系的当前内容；要改它就带上这两个参数和待改字段，"
                                      "要保留它就不必再写，不要换 qualifier 重复新建"}
-    return {"success": False, "message": str(exc), "data": data, "error": {"code": exc.code, "message": str(exc)}}
+    return data
 
 
-def intent_submit(service, kind, action, values, evidence, stances, *, reason, dry_run,
+def write_error(exc: BusinessError) -> dict:
+    return {"success": False, "message": str(exc), "data": recovery_data(exc.code, exc.data),
+            "error": {"code": exc.code, "message": str(exc)}}
+
+
+def intent_submit(service, kind, action, values, evidence, stances, *, reason, dry_run, request_key=None,
                   record_id=None, expected_revision=None, expected_content_hash=None, actor: str):
-    """同步线程内完成：解析证据 → 组装批次 → 自动补 request_key → 提交。"""
+    """同步线程内完成：解析证据 → 组装批次 → 复用或自动补 request_key → 提交。"""
     resolved = intent.resolve_evidence(intent_coerce(evidence) or [])
     payload = intent.build_intent(kind, action, values, resolved, intent_coerce(stances),
                                   reason=reason, record_id=record_id, expected_revision=expected_revision,
@@ -103,7 +122,7 @@ def intent_submit(service, kind, action, values, evidence, stances, *, reason, d
     if dry_run:
         payload["dry_run"] = True
     else:
-        payload["request_key"] = str(uuid4())
+        payload["request_key"] = request_key if request_key is not None else str(uuid4())
     result = service.apply(payload, actor=actor)
     if "request_key" in payload:
         result = {"request_key": payload["request_key"], **result}
@@ -114,7 +133,7 @@ async def intent_write(service, *args, actor: str, **kwargs):
     try:
         result = await run_sync(intent_submit, service, *args, actor=actor, **kwargs)
     except BusinessError as exc:
-        return intent_error(exc)
+        return write_error(exc)
     return write_envelope(result, "部分提交：committed 只表示至少一条已写入；请按 data.errors 核对，不要重发")
 
 

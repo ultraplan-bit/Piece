@@ -165,6 +165,35 @@ def test_shutdown_drains_active_and_waiting_calls(monkeypatch, pdf):
         run_parser("page_count", pdf)
 
 
+def test_shutdown_gate_rejects_calls_before_final_session_reaping(monkeypatch, pdf):
+    processes, directories = _record_processes(monkeypatch)
+    with parser_helper.ParserSession() as document:
+        assert document.run("page_count", pdf) == 5
+        assert parser_helper.run_preview_page_count(pdf) == 5
+        preview = parser_helper._preview_session
+        parser_helper.begin_parser_shutdown()
+        parser_helper.begin_parser_shutdown()
+        # 第一阶段只发信号，空闲文档/预览会话留给 Runtime 排空 Worker 后回收。
+        assert parser_helper._preview_session is preview
+        assert {document, preview} <= parser_helper._sessions
+        assert all(process.poll() is None for process in processes)
+        assert all(directory.exists() for directory in directories)
+        with pytest.raises(ParserStopped):
+            run_parser("page_count", pdf)
+        with pytest.raises(ParserStopped):
+            document.run("page_count", pdf)
+        with pytest.raises(ParserStopped):
+            parser_helper.run_preview_page_count(pdf)
+        with pytest.raises(ParserStopped):
+            parser_helper.ParserSession()
+
+        parser_helper.stop_parser_helpers()
+        assert all(process.poll() is not None for process in processes)
+        assert all(not directory.exists() for directory in directories)
+        assert not parser_helper._sessions and not parser_helper._active
+        assert parser_helper._preview_session is None and parser_helper._calls == 0
+
+
 def test_exe_dispatch_happens_before_app_imports(monkeypatch, pdf):
     script = """
 import runpy, sys

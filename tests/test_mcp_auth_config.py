@@ -51,6 +51,7 @@ def test_new_install_generates_independent_keys(tmp_path):
     assert isinstance(config.mcp.index_api_key, str)
     assert len(config.mcp.index_api_key) == 32
     assert config.mcp.api_key != config.mcp.index_api_key
+    assert config.api.admin_key not in {config.mcp.api_key, config.mcp.index_api_key}
     stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     assert stored["mcp"]["api_key"] == config.mcp.api_key
     assert stored["mcp"]["index_api_key"] == config.mcp.index_api_key
@@ -77,19 +78,19 @@ def test_service_auth_rejects_cross_service_and_missing_keys(monkeypatch, servic
     call_next = AsyncMock(return_value="allowed")
 
     for header in ("", f"Bearer {wrong}", "Basic abc", f"Bearer {correct}extra"):
-        monkeypatch.setattr(auth, "get_http_headers", lambda h=header: {"authorization": h})
+        monkeypatch.setattr(auth, "get_http_headers", lambda h=header, **kwargs: {"authorization": h})
         with pytest.raises(auth.ToolError, match="Unauthorized"):
             asyncio.run(handler(None, call_next))
     call_next.assert_not_awaited()
 
-    monkeypatch.setattr(auth, "get_http_headers", lambda: {"authorization": f"Bearer {correct}"})
+    monkeypatch.setattr(auth, "get_http_headers", lambda **kwargs: {"authorization": f"Bearer {correct}"})
     assert asyncio.run(handler(None, call_next)) == "allowed"
     call_next.assert_awaited_once()
 
 
 def test_call_timing_logs_status_without_arguments_or_exception_text(caplog):
     caplog.set_level("INFO", logger=auth.__name__)
-    from fastmcp.tools.tool import ToolResult
+    from fastmcp.tools import ToolResult
     from fastmcp.server.middleware import MiddlewareContext
     from mcp.types import CallToolRequestParams
 
@@ -118,7 +119,7 @@ def test_call_timing_logs_status_without_arguments_or_exception_text(caplog):
 
 def test_legacy_key_is_accepted_by_both_services(monkeypatch):
     settings.get_settings().mcp = settings.McpSettings(api_key="legacy")
-    monkeypatch.setattr(auth, "get_http_headers", lambda: {"authorization": "Bearer legacy"})
+    monkeypatch.setattr(auth, "get_http_headers", lambda **kwargs: {"authorization": "Bearer legacy"})
     for service in ("retrieval", "index"):
         middleware = []
         auth.apply_bearer_auth(SimpleNamespace(add_middleware=middleware.append), service)
@@ -133,7 +134,8 @@ def test_auth_switch_disables_both_services(service):
     )
     middleware = []
     auth.apply_bearer_auth(SimpleNamespace(add_middleware=middleware.append), service)
-    assert len(middleware) == 1 and isinstance(middleware[0], auth.CallTimingMiddleware)
+    assert len(middleware) == 2 and isinstance(middleware[0], auth.CallTimingMiddleware)
+    assert next(item for item in middleware if isinstance(item, auth.BearerAuthMiddleware))._verify_token()
     assert not settings.is_mcp_auth_enabled(service)
 
 
@@ -225,3 +227,22 @@ def test_export_and_settings_port_preview_follow_environment_override(monkeypatc
     monkeypatch.setenv("PIECE_INDEX_MCP_PORT", "invalid")
     assert get_mcp_port() == 9121
     assert get_mcp_port(9220) == 9221
+
+
+def test_all_services_can_be_selected_together(monkeypatch):
+    """派生服务复用索引模板，端口与密钥独立。"""
+    monkeypatch.delenv("PIECE_INDEX_MCP_PORT", raising=False)
+    settings.get_settings().mcp = settings.McpSettings(
+        port=9230, api_key="read-key", index_api_key="write-key",
+        graph_api_key="graph-key", wiki_api_key="wiki-key", auth_enabled=True,
+    )
+    for client_id in ("cursor", "claude_code", "openai_codex"):
+        client = next(c for c in mcp_config_view.MCP_CLIENTS if c["id"] == client_id)
+        servers = _parse_config(client, mcp_config_view._get_config_json(client, {
+            "piece-kb", "piece-index", "piece-graph", "piece-wiki"}))
+        assert set(servers) == {"piece-kb", "piece-index", "piece-graph", "piece-wiki"}
+        for name, port, key in (("piece-kb", 9230, "read-key"), ("piece-index", 9231, "write-key"),
+                                ("piece-graph", 9234, "graph-key"), ("piece-wiki", 9235, "wiki-key")):
+            server = servers[name]
+            assert (server.get("url") or server.get("serverUrl") or server.get("httpUrl")) == f"http://localhost:{port}/mcp"
+            assert server.get("headers", {}).get("Authorization") == f"Bearer {key}"

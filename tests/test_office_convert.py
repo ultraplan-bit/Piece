@@ -36,6 +36,9 @@ from indexing.services.processor import (
 )
 
 
+pytestmark = pytest.mark.usefixtures("parser_helpers")
+
+
 def _office_config(monkeypatch, converter: str, soffice: str | None = None):
     """把 office.converter 和 LibreOffice 探测结果固定成给定值。"""
     monkeypatch.setattr(

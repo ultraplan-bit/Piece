@@ -25,6 +25,8 @@ class WikiWorkbench(WorkbenchBase):
     result_readback = (("evidence", "evidence"), ("pages", "page"))
     revision_kinds = ("page",)
     hash_kinds = ("page", "evidence")
+    check_total_key = "total_pages"
+    check_scroll_section = "checks"
 
     @property
     def service(self):
@@ -114,29 +116,30 @@ class WikiWorkbench(WorkbenchBase):
                 self.results = results
                 await self._refresh_preserving_scroll(self.refresh_list, "list")
 
-            if not detail or not current() or selection != self._selection or self.detail is not detail:
-                return
-            kind, ident = detail["kind"], detail["record"]["id"]
-            evidence = detail.get("evidence", {})
-            read_error = None
-            try:
-                incoming = await run.io_bound(self.service.get_record, kind=kind, id=ident,
-                                             limit=evidence.get("limit", 25), offset=evidence.get("offset", 0))
-            except BusinessError as exc:
-                if exc.code not in {"NOT_FOUND", "FILE_MISSING", "FILE_INVALID", "UNSAFE_PATH",
-                                    "DUPLICATE_PAGE_ID", "DUPLICATE_EVIDENCE_ID"}:
-                    raise
-                incoming = None
-                read_error = self.text("error", code=exc.code)
-            if not current() or selection != self._selection or self.detail is not detail:
-                return
-            links = incoming.get("links") if incoming and incoming.get("kind") == "page" else None
-            backlinks = incoming.get("backlinks") if incoming and incoming.get("kind") == "page" else None
-            if incoming != detail or links != self.links or backlinks != self.backlinks:
-                self.detail, self.links, self.backlinks = incoming, links, backlinks
-                if incoming is None:
-                    self.error = read_error
-                await self._refresh_preserving_scroll(self.refresh_detail, "detail")
+            if detail and current() and selection == self._selection and self.detail is detail:
+                kind, ident = detail["kind"], detail["record"]["id"]
+                evidence = detail.get("evidence", {})
+                read_error = None
+                try:
+                    incoming = await run.io_bound(self.service.get_record, kind=kind, id=ident,
+                                                 limit=evidence.get("limit", 25), offset=evidence.get("offset", 0))
+                except BusinessError as exc:
+                    if exc.code not in {"NOT_FOUND", "FILE_MISSING", "FILE_INVALID", "UNSAFE_PATH",
+                                        "DUPLICATE_PAGE_ID", "DUPLICATE_EVIDENCE_ID"}:
+                        raise
+                    incoming = None
+                    read_error = self.text("error", code=exc.code)
+                if not current():
+                    return
+                if selection == self._selection and self.detail is detail:
+                    links = incoming.get("links") if incoming and incoming.get("kind") == "page" else None
+                    backlinks = incoming.get("backlinks") if incoming and incoming.get("kind") == "page" else None
+                    if incoming != detail or links != self.links or backlinks != self.backlinks:
+                        self.detail, self.links, self.backlinks = incoming, links, backlinks
+                        if incoming is None:
+                            self.error = read_error
+                        await self._refresh_preserving_scroll(self.refresh_detail, "detail")
+            await self.poll_auxiliary(current, checks_visible=self.mode == "review" and self.editor is None)
         except Exception as exc:
             logger.debug("Wiki 自动更新暂未完成 (%s)", type(exc).__name__)
         finally:
@@ -218,8 +221,10 @@ class WikiWorkbench(WorkbenchBase):
             if self.editor:
                 self.editor.render()
             elif self.mode == "review":
-                with ui.scroll_area().classes("w-full flex-1"):
+                with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(checks=e.vertical_position)).classes("w-full flex-1") as area:
+                    self._scroll_areas["checks"] = area
                     self.render_review()
+                area.scroll_to(pixels=self._scroll_positions.get("checks", 0))
             else:
                 self.render_detail()
 
@@ -409,6 +414,13 @@ class WikiWorkbench(WorkbenchBase):
             ui.button(self.text("run_checks"), on_click=self.run_checks).props("outline no-caps")
             ui.button(self.text("disputed"), on_click=partial(self.show_status, "disputed")).props("flat no-caps")
             ui.button(self.text("outdated"), on_click=partial(self.show_status, "outdated")).props("flat no-caps")
+        @ui.refreshable
+        def checks():
+            self.render_check_results()
+        self.refresh_checks = checks.refresh
+        checks()
+
+    def render_check_results(self):
         if self.checks:
             data = self.checks
             ui.label(self.text("checked_count", count=data.get("checked_pages", data.get("checked_objects", 0)))).classes("text-xs theme-text-muted")
@@ -434,17 +446,25 @@ class WikiWorkbench(WorkbenchBase):
         await self.search()
         await self.set_mode("pages")
 
-    async def run_checks(self, reset=True):
-        if reset:
-            self.lint_offset = 0
-        params = {"limit": 25, "offset": self.lint_offset}
+    def check_params(self):
+        params: dict[str, object] = {"limit": 25, "offset": self.lint_offset}
         if self.lint_scope == "selected":
             current = (self.detail or {}).get("record", {}).get("id") if (self.detail or {}).get("kind") == "page" else None
             params["page_ids"] = [current] if current else []
         elif self.lint_scope == "filtered":
             params["page_ids"] = [item["id"] for item in (self.results or {}).get("pages", [])]
-        self.checks = await self.call(self.service.lint, **params)
-        self.refresh_workspace()
+        return params
+
+    async def run_checks(self, reset=True):
+        self._checks_generation += 1
+        generation = self._checks_generation
+        if reset:
+            self.lint_offset = 0
+        params = self.check_params()
+        checks = await self.call(self.service.lint, **params)
+        if generation == self._checks_generation and params == self.check_params():
+            self.checks = checks
+            self.refresh_checks()
 
     async def check_page(self, delta):
         self.lint_offset = max(0, self.lint_offset + delta * 25)
@@ -458,29 +478,42 @@ class WikiWorkbench(WorkbenchBase):
         await self.search(False)
 
     async def file_references(self, file_id, offset=0):
+        self._references_params = token = {}
         info = await self.call(self.service.list_pages, limit=1)
-        if not info:
+        if not info or self._references_params is not token:
             return
         self.reference_file = file_id
-        self.references_data = await self.call(self.service.references, source_library_id=info["library_id"], source_file_id=file_id, limit=25, offset=offset)
+        self._references_params = params = {"source_library_id": info["library_id"], "source_file_id": file_id,
+                                           "limit": 25, "offset": offset}
+        references = await self.call(self.service.references, **params)
+        if self._references_params is not params or references is None:
+            return
+        self.references_data = references
         if self.show_view:
             await self.show_view()
         self.refresh_workspace()
 
     def render_references(self):
-        data = self.references_data
         with ui.expansion(self.text("references"), icon="format_quote", value=True).classes("w-full"):
-            if not data["evidence"]:
-                ui.label(self.text("empty"))
-            for item in data["evidence"]:
-                owner = item["owner"]
-                ui.button(owner.get("title") or owner["id"],
-                          on_click=partial(self.select, "page", owner["id"])).props("flat no-caps").classes("w-full break-words")
-            async def page(delta):
-                await self.file_references(self.reference_file, max(0, data["offset"] + delta * 25))
-            self.pager(data["offset"], 25, data["total"], page)
+            @ui.refreshable
+            def references():
+                data = self.references_data
+                if data is None:
+                    return
+                if not data["evidence"]:
+                    ui.label(self.text("empty"))
+                for item in data["evidence"]:
+                    owner = item["owner"]
+                    ui.button(owner.get("title") or owner["id"],
+                              on_click=partial(self.select, "page", owner["id"])).props("flat no-caps").classes("w-full break-words")
+                async def page(delta):
+                    await self.file_references(self.reference_file, max(0, data["offset"] + delta * 25))
+                self.pager(data["offset"], 25, data["total"], page)
+            self.refresh_references = references.refresh
+            references()
             ui.button(self.text("close"), on_click=self.close_references).props("flat")
 
     def close_references(self):
+        self._references_params = None
         self.references_data = None
         self.refresh_workspace()

@@ -141,7 +141,7 @@ def test_late_poll_cannot_overwrite_a_new_search_or_overlap(knowledge_base, monk
         old = asyncio.create_task(view.poll())
         await entered.wait()
         await view.poll()
-        assert len(calls) == 1
+        assert calls == [service.list_graphs, service.list_objects]
         view.query = "新查询"
         await view.search()
         expected = deepcopy(view.results)

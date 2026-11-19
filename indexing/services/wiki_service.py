@@ -573,7 +573,12 @@ def apply(data, *, actor="internal"):
                                 values = source_values(cursor, evidence)
                                 stored = next(ev for ev in after["evidence"] if _evidence_key(ev) == _evidence_key(values))
                                 if values["content_hash"] != stored["content_hash"]:
-                                    raise BusinessError("SOURCE_CHANGED", "未完成请求的来源已改变，不会提交旧快照")
+                                    raise BusinessError("SOURCE_CHANGED", "未完成请求的来源已改变，不会提交旧快照",
+                                                        data={"source_library_id": evidence.source_library_id,
+                                                              "source_file_id": evidence.source_file_id,
+                                                              "source_chunk_id": evidence.source_chunk_id,
+                                                              "expected_content_hash": stored["content_hash"],
+                                                              "current_content_hash": values["content_hash"]})
                 _atomic_write(_path(operation["path"]), _encode(after), operation["before_hash"])
                 entry["committed"] = True
                 pages, scan_errors = _scan()

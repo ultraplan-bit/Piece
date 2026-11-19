@@ -409,8 +409,12 @@ def test_graph_space_delete_control_is_hidden_for_default_only(knowledge_base):
     workbench.graph_id = secondary["id"]
     with ui.column() as container:
         workbench.delete_graph_dialog()
-        labels = [getattr(element, "text", "") for element in container.descendants()]
+        dialog = next(element for element in reversed(list(container.client.elements.values()))
+                      if isinstance(element, ui.dialog))
+        assert dialog.parent_slot.parent is container.client.content
+        labels = [getattr(element, "text", "") for element in dialog.descendants()]
         assert workbench.text("confirm_delete_graph") in labels
+        dialog.delete()
     container.delete()
 
 

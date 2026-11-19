@@ -14,20 +14,27 @@ from app.runtime import Runtime
 def resources(tmp_path, monkeypatch):
     monkeypatch.setenv("PIECE_DATA_DIR", str(tmp_path))
     from indexing import database
-    from indexing.services import sync_service
+    from indexing.services import parser_helper, sync_service
     from indexing import worker_manager
 
     events = []
     sync = SimpleNamespace(start=lambda: events.append("sync-start"), stop=lambda: events.append("sync-stop"))
     worker = SimpleNamespace(start=AsyncMock(side_effect=lambda: events.append("worker-start")),
-                             stop=AsyncMock(side_effect=lambda: events.append("worker-stop")))
+                             stop=AsyncMock(side_effect=lambda: events.append("worker-stop")),
+                             request_stop=lambda: None)
+    parser = SimpleNamespace(start=lambda count: events.append("parser-start"),
+                             stop=lambda: events.append("parser-stop"))
+    monkeypatch.setattr(parser_helper, "start_parser_helpers", parser.start)
+    monkeypatch.setattr(parser_helper, "begin_parser_shutdown", lambda: None)
+    monkeypatch.setattr(parser_helper, "stop_parser_helpers", lambda: parser.stop())
     monkeypatch.setattr(database, "init_database", lambda path: events.append("database-init"))
     monkeypatch.setattr(database, "init_connection_pool", lambda path: events.append("pool-init"))
     monkeypatch.setattr(database, "close_connection_pool", lambda: events.append("pool-close"))
     monkeypatch.setattr(sync_service, "get_sync_service", lambda: sync)
     monkeypatch.setattr(worker_manager, "worker_manager", worker)
-    runtime = Runtime(SimpleNamespace(get_db_path=lambda: tmp_path / "kb.db"), with_gui=False, with_mcp=False)
-    return SimpleNamespace(runtime=runtime, events=events, sync=sync, worker=worker)
+    runtime = Runtime(SimpleNamespace(get_db_path=lambda: tmp_path / "kb.db",
+                                      performance=SimpleNamespace(worker_concurrency=2)), with_gui=False, with_mcp=False)
+    return SimpleNamespace(runtime=runtime, events=events, sync=sync, worker=worker, parser=parser)
 
 
 def test_readiness_and_shutdown_order(resources):
@@ -42,18 +49,20 @@ def test_readiness_and_shutdown_order(resources):
         assert runtime.status()["components"]["core"]["status"] == "stopped"
         await runtime.stop()
     asyncio.run(scenario())
-    assert resources.events == ["database-init", "pool-init", "sync-start", "worker-start",
-                                 "sync-stop", "worker-stop", "pool-close"]
+    assert resources.events == ["database-init", "pool-init", "sync-start", "parser-start", "worker-start",
+                                 "sync-stop", "worker-stop", "parser-stop", "pool-close"]
 
 
-@pytest.mark.parametrize("failed", ["sync", "worker"])
+@pytest.mark.parametrize("failed", ["sync", "worker", "parser"])
 def test_stop_failure_never_closes_pool_or_claims_success(resources, failed):
     def fail():
         raise RuntimeError("injected stop failure")
     if failed == "sync":
         resources.sync.stop = fail
-    else:
+    elif failed == "worker":
         resources.worker.stop = AsyncMock(side_effect=fail)
+    else:
+        resources.parser.stop = fail
 
     async def scenario():
         runtime = resources.runtime
@@ -160,6 +169,22 @@ def test_repeated_signals_do_not_skip_lifespan(resources, monkeypatch):
         AppStatus.should_exit = False
 
 
+@pytest.mark.parametrize("platform, loop", [("win32", "asyncio:SelectorEventLoop"), ("linux", "auto")])
+def test_service_event_loop_configuration(resources, monkeypatch, platform, loop):
+    import uvicorn
+    from app import server
+
+    def run(instance):
+        assert instance.config.loop == loop
+        if platform == "win32":
+            assert instance.config.get_loop_factory() is asyncio.SelectorEventLoop
+        instance.started = True
+
+    monkeypatch.setattr(server, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(uvicorn.Server, "run", run)
+    server.run_application(None, resources.runtime)
+
+
 def test_shutdown_closes_window_before_draining(resources, monkeypatch):
     import uvicorn
     from app import window
@@ -176,11 +201,50 @@ def test_shutdown_closes_window_before_draining(resources, monkeypatch):
     assert events == ["window-closed", "lifespan-stop"]
 
 
+def test_runtime_closes_shared_parser_sessions(knowledge_base, monkeypatch):
+    import pymupdf
+    from indexing import worker_manager
+    from indexing.services import parser_helper
+    from indexing.utils import run_sync
+
+    worker = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(), request_stop=lambda: None)
+    monkeypatch.setattr(worker_manager, "worker_manager", worker)
+    pdf = knowledge_base.path / "runtime-preview.pdf"
+    document = pymupdf.open()
+    document.new_page()
+    document.save(pdf)
+    document.close()
+    runtime = Runtime(knowledge_base.settings, with_gui=False, with_mcp=False)
+
+    async def scenario():
+        await runtime.start()
+        session = parser_helper.ParserSession()
+        try:
+            assert await run_sync(session.run, "page_count", pdf) == 1
+            assert await run_sync(parser_helper.run_preview_page_count, pdf) == 1
+            preview = parser_helper._preview_session
+            assert preview is not None
+            sessions = (session, preview)
+            processes = [item.process for item in sessions]
+            from pathlib import Path
+            directories = [Path(item.directory.name) for item in sessions if item.directory is not None]
+            assert len(directories) == 2
+            runtime.mark_ready()
+        finally:
+            await runtime.stop()
+            session.close()
+        assert runtime.safe_to_unlock
+        assert all(process is not None and process.poll() is not None for process in processes)
+        assert all(directory is not None and not directory.exists() for directory in directories)
+        assert not parser_helper._sessions
+
+    asyncio.run(scenario())
+
+
 def test_mcp_manager_reports_shutdown_failure(monkeypatch):
     from app.mcp_servers import MCPServerManager
     manager = MCPServerManager()
     async def scenario():
-        manager._tasks = [asyncio.create_task(asyncio.sleep(0))]
         manager._stop_errors = [RuntimeError("lifespan failure")]
         with pytest.raises(ExceptionGroup, match="MCP"):
             await manager.stop()

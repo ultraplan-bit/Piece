@@ -27,7 +27,7 @@ def test_theme_changes_clear_previous_palette_after_navigation(gui_service, init
 
         def choose_theme(theme):
             page.locator("[data-open-settings]").click()
-            page.locator(".settings-nav-item").filter(has_text=t("settings.appearance")).click()
+            # 外观是默认分组，重复点击分组会异步重建主题按钮。
             page.get_by_role("button", name=t(f"settings_appearance.theme_{theme}"), exact=True).click()
             expect(page.locator("body")).to_have_css("--q-primary", PINK_PRIMARY if theme == "pink" else "#5898d4")
             page.wait_for_function("dark => document.body.classList.contains('body--dark') === dark", arg=theme == "dark")
@@ -65,6 +65,9 @@ def test_theme_changes_clear_previous_palette_after_navigation(gui_service, init
                     "background-color", selected_colors[theme])
             assert not errors, errors
         finally:
-            page.screenshot(path=str(service["path"] / "theme-last.png"))
-            print("Theme screenshots:", service["path"])
-            browser.close()
+            try:
+                page.screenshot(path=str(service["path"] / "theme-last.png"))
+                print("Theme screenshots:", service["path"])
+            finally:
+                context.close()
+                browser.close()

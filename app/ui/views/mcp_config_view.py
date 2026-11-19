@@ -901,6 +901,8 @@ def _render_client_config(client: dict, selected_client: dict) -> None:
             )
             authentication = {SERVICE_NAMES[service]: is_mcp_auth_enabled(service)
                               for service in SERVICE_NAMES if SERVICE_NAMES[service] in ports}
+            from indexing.services.config_service import mcp_service_status
+            service_ids = {name: key for key, name in SERVICE_NAMES.items()}
             for service in MCP_SERVICES:
                 name = service["name"]
                 purpose = t(f"mcp_config.{service['key']}_purpose")
@@ -911,12 +913,14 @@ def _render_client_config(client: dict, selected_client: dict) -> None:
                         on_change=lambda e, n=name: toggle(n, e.value),
                     ).props("dense").classes("text-sm theme-text shrink-0")
                     auth_state = t("mcp_config.auth_on" if authentication[name] else "mcp_config.auth_off")
-                    ui.label(f"{purpose} · {auth_state} · http://localhost:{ports[name]}/mcp").classes(
+                    actual = mcp_service_status(service_ids[name])
+                    state = t(f"mcp_config.listener_{actual['status'] if actual else 'unavailable'}")
+                    ui.label(f"{purpose} · {auth_state} · {state} · http://127.0.0.1:{ports[name]}/mcp").classes(
                         "text-xs theme-text-muted pt-1 min-w-0"
                     )
             if not settings.mcp.zotero_enabled:
                 ui.label(t("zotero.mcp_off")).classes("text-xs theme-text-muted")
-            # 配置基于当前运行进程的有效设置；改端口/密钥需重启服务再生效
+            # 端口重配期间继续导出有效设置，不把尚未就绪的目标端口当作可用入口。
             ui.label(t("mcp_config.settings_restart_hint")).classes("text-xs theme-text-muted")
 
         # 配置入口：有官方文档就给链接，没有就只给通用模板说明，不猜客户端路径

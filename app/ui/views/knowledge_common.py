@@ -70,6 +70,11 @@ class WorkbenchBase:
     revision_kinds = ("object", "relation")
     # 正式删除需要 expected_content_hash 的记录类型（Wiki 页面与证据）。
     hash_kinds = ()
+    check_total_key = "total_objects"
+    check_scroll_section = "detail"
+
+    def check_params(self):
+        raise NotImplementedError
 
     def __init__(self, *, open_source=None, show_view=None, dark=None):
         self.open_source = open_source
@@ -97,6 +102,51 @@ class WorkbenchBase:
         self.refresh_detail = lambda: None
         self.refresh_workspace = lambda: None
         self.refresh_edge_table = lambda: None
+        self.refresh_checks = lambda: None
+        self.refresh_references = lambda: None
+        self._checks_generation = 0
+        self._references_params = None
+
+    async def read_page(self, function, params, total_key="total"):
+        """删除末页内容后回到最后一个有效页；不修改调用方的查询快照。"""
+        params = dict(params)
+        data = await run.io_bound(function, **params)
+        last_offset = max(0, (data[total_key] - 1) // params["limit"]) * params["limit"]
+        if params["offset"] > last_offset:
+            params["offset"] = last_offset
+            data = await run.io_bound(function, **params)
+        return data, params
+
+    async def poll_auxiliary(self, current, *, checks_visible):
+        """只更新已查询的检查/引用面板；后台请求不能覆盖新查询或已关闭面板。"""
+        if not current():
+            return
+        if checks_visible and self.checks is not None:
+            checks, generation, params = self.checks, self._checks_generation, self.check_params()
+            try:
+                incoming, adjusted = await self.read_page(self.service.lint, params, self.check_total_key)
+                if (current() and checks is self.checks and generation == self._checks_generation
+                        and params == self.check_params()):
+                    self.lint_offset = adjusted["offset"]
+                    if incoming != checks:
+                        self.checks = incoming
+                        await self._refresh_preserving_scroll(self.refresh_checks, self.check_scroll_section)
+            except Exception as exc:
+                logger.debug("检查结果自动更新暂未完成 (%s)", type(exc).__name__)
+        if not current():
+            return
+        references, params = self.references_data, self._references_params
+        if references is not None and params and "source_library_id" in params:
+            try:
+                incoming, adjusted = await self.read_page(self.service.references, params)
+                if current() and references is self.references_data and params is self._references_params:
+                    if adjusted != params:
+                        self._references_params = adjusted
+                    if incoming != references:
+                        self.references_data = incoming
+                        await self._refresh_preserving_scroll(self.refresh_references, "detail")
+            except Exception as exc:
+                logger.debug("来源引用自动更新暂未完成 (%s)", type(exc).__name__)
 
     # ---- i18n：功能命名空间优先，缺失时回退共享 knowledge 命名空间 ----
     def text(self, key, **kwargs):
@@ -278,6 +328,8 @@ class WorkbenchBase:
         return None
 
     def write_dialog(self, title, fields, payload, kind, record):
+        graph_id = getattr(self, "graph_id", None)
+        scope = {"graph_id": graph_id} if graph_id is not None else {}
         pending = {"value": None}
         reason = {"reason": ""}
         with ui.dialog().props("persistent") as dialog, ui.card().classes("w-[900px] max-w-full max-h-[90vh] theme-card editor-dialog"):
@@ -298,7 +350,7 @@ class WorkbenchBase:
                 # 版本/内容冲突：保留草稿，展示最新内容，由用户显式采用后再保存。
                 message.set_text(self.text("error", code=code))
                 if code in CONFLICT_CODES and record is not None:
-                    latest = await self.call(self.service.get_record, kind=kind, id=record["id"])
+                    latest = await self.call(self.service.get_record, kind=kind, id=record["id"], **scope)
                     if latest:
                         comparison.clear()
                         with comparison:
@@ -321,7 +373,7 @@ class WorkbenchBase:
                     element.disable()
                 try:
                     if pending["value"] is None:
-                        pending["value"] = PendingWrite({**payload(), "reason": reason["reason"]})
+                        pending["value"] = PendingWrite({**payload(), **scope, "reason": reason["reason"]})
                     result = await self.submit(pending["value"])
                     code = self.result_error(result)
                     if code is not None:
@@ -388,6 +440,9 @@ class WorkbenchBase:
 
     async def preview_delete(self, kind, record):
         payload = {"kind": kind, "id": record["id"]}
+        graph_id = getattr(self, "graph_id", None)
+        if graph_id is not None:
+            payload["graph_id"] = graph_id
         if kind in self.revision_kinds:
             payload["expected_revision"] = record["revision"]
         if kind in self.hash_kinds:
@@ -454,20 +509,66 @@ class WorkbenchBase:
 
     # ---- 历史 ----
     async def show_history(self, kind, ident, offset=0):
-        data = await self.call(self.service.history, kind=kind, id=ident, limit=10, offset=offset)
+        params = {"kind": kind, "id": ident, "limit": 10, "offset": offset}
+        # 弹窗始终读取打开时的空间，不能随工作台切换到另一个图谱。
+        graph_id = getattr(self, "graph_id", None)
+        if graph_id is not None:
+            params["graph_id"] = graph_id
+        data = await self.call(self.service.history, **params)
         if not data:
             return
-        with ui.dialog() as dialog, ui.card().classes("w-[900px] max-w-full max-h-[90vh] overflow-auto theme-card"):
+        generation, polling, error = 0, False, None
+        expanded, scroll = {}, {"value": 0.0}
+        with ui.dialog() as dialog, ui.card().classes("w-[900px] max-w-full h-[75vh] theme-card"):
             ui.label(self.text("history")).classes("text-xl font-semibold")
             ui.label(self.text("history_readonly")).classes("text-xs theme-text-muted")
-            for item in data["history"]:
-                with ui.expansion(str(item["after_revision"]) + " · " + item["reason"]).classes("w-full"):
-                    ui.label(json.dumps({"before": item["before"], "after": item["after"]}, ensure_ascii=False, indent=2)).classes("text-xs whitespace-pre-wrap break-words")
-            async def page(delta):
-                dialog.close()
-                await self.show_history(kind, ident, max(0, offset + delta * 10))
-            self.pager(offset, 10, data["total"], page)
+            with ui.scroll_area(on_scroll=lambda e: scroll.update(value=e.vertical_position)).classes("w-full flex-1") as area:
+                @ui.refreshable
+                def listing():
+                    if error:
+                        ui.label(error).classes("text-sm theme-text-muted")
+                    for item in data["history"]:
+                        revision = item["after_revision"]
+                        with ui.expansion(str(revision) + " · " + item["reason"], value=expanded.get(revision, False),
+                                          on_value_change=lambda e, key=revision: expanded.update({key: e.value})).classes("w-full"):
+                            ui.label(json.dumps({"before": item["before"], "after": item["after"]}, ensure_ascii=False, indent=2)).classes("text-xs whitespace-pre-wrap break-words")
+                    self.pager(params["offset"], 10, data["total"], lambda delta: reload(delta))
+                listing()
+
+            async def reload(delta=None):
+                nonlocal data, params, generation, polling, error
+                if dialog.is_deleted or not dialog.value or (delta is None and polling):
+                    return
+                if delta is not None:
+                    generation += 1
+                token = generation
+                query = {**params, "offset": max(0, params["offset"] + (delta or 0) * 10)}
+                polling = True
+                try:
+                    incoming, adjusted = await self.read_page(self.service.history, query)
+                    if dialog.is_deleted or not dialog.value or token != generation:
+                        return
+                    changed = incoming != data or error is not None
+                    data, params, error = incoming, adjusted, None
+                    if changed:
+                        await listing.refresh()
+                        area.scroll_to(pixels=scroll["value"] if delta is None else 0)
+                except BusinessError as exc:
+                    if exc.code == "NOT_FOUND" and not dialog.is_deleted and dialog.value and token == generation:
+                        data = {"history": [], "total": 0}
+                        latest_error = self.text("error", code=exc.code)
+                        if error != latest_error:
+                            error = latest_error
+                            await listing.refresh()
+                except Exception as exc:
+                    logger.debug("修订历史自动更新暂未完成 (%s)", type(exc).__name__)
+                finally:
+                    if token == generation:
+                        polling = False
+
+            ui.timer(2.0, reload)
             ui.button(self.text("close"), on_click=dialog.close).props("flat")
+        dialog.on("hide", dialog.delete)
         _open_dialog(dialog)
 
     # ---- 证据卡片与来源比对 ----

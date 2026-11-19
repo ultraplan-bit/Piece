@@ -449,11 +449,11 @@ def test_knowledge_mcp_offloads_database_io(mcp_servers, monkeypatch, tool_name,
     monkeypatch.setattr(owner, backend, service)
     target = getattr(server, tool_name)
     if model is None:
-        asyncio.run(target.fn())
+        asyncio.run(target())
     elif model == "kwargs":
-        asyncio.run(target.fn(**payload))
+        asyncio.run(target(**payload))
     else:
-        asyncio.run(target.fn(model.model_validate(payload)))
+        asyncio.run(target(model.model_validate(payload)))
     assert len(calls) == 1 and calls[0][0] != main_thread
     if backend in {"apply", "delete"}:
         assert calls[0][1]["actor"] == ("mcp:wiki" if is_wiki else "mcp:graph")
@@ -663,9 +663,12 @@ def test_knowledge_mcp_real_http_keys_are_separate(mcp_servers, monkeypatch):
     from app.mcp_servers import MCPServerManager
     from indexing.mcp.auth import BearerAuthMiddleware
     index, retrieval, graph, wiki_server = mcp_servers
-    monkeypatch.setattr(index.mcp, "middleware", [BearerAuthMiddleware("write-test-key")])
-    monkeypatch.setattr(graph.mcp, "middleware", [BearerAuthMiddleware("graph-test-key")])
-    monkeypatch.setattr(retrieval.mcp, "middleware", [BearerAuthMiddleware("read-test-key")])
+    from indexing.settings import get_settings
+    get_settings().mcp.auth_enabled = True
+    get_settings().mcp.graph_api_key = "graph-test-key"
+    monkeypatch.setattr(index.mcp, "middleware", [BearerAuthMiddleware("index")])
+    monkeypatch.setattr(graph.mcp, "middleware", [BearerAuthMiddleware("graph")])
+    monkeypatch.setattr(retrieval.mcp, "middleware", [BearerAuthMiddleware("retrieval")])
 
     async def scenario():
         manager = MCPServerManager()
@@ -955,6 +958,127 @@ def test_mcp_intent_tools_flat_params_auto_key_and_shared_builder(api, knowledge
 
     oid = asyncio.run(scenario())
     assert _post(api, "knowledge/get", kind="object", id=oid)["record"]["title"] == "稳定身份（修订）"
+
+
+@pytest.mark.parametrize("kind", ["object", "relation", "page"])
+def test_mcp_intent_request_key_preview_replay_and_conflict(api, knowledge_base, mcp_servers, kind):
+    from fastmcp import Client
+
+    _, _, graph, wiki_server = mcp_servers
+    prefix = "wiki" if kind == "page" else "knowledge"
+    module = wiki_server if kind == "page" else graph
+    creating: dict = {"title": "可靠重试"}
+    if kind == "relation":
+        creating = {"source": _object(api, title="起点"), "target": _object(api, title="终点"),
+                    "predicate": "depends_on", "description": "起点依赖终点", "basis": "user_statement"}
+    imported = _post(api, "file/import-markdown", filename="重试来源", content="# 来源\n\n起点依赖终点。")
+    knowledge_base.drain()
+    chunk = _post(api, "chunk/list", file_id=imported["file_id"])["chunks"][0]
+    creating["evidence"] = [f"{chunk['id']}:grep=起点依赖终点"]
+
+    async def scenario():
+        async with Client(module.mcp) as client:
+            create_tool, update_tool = f"{prefix}-{kind}-add", f"{prefix}-{kind}-update"
+            tools = {tool.name: tool for tool in await client.list_tools()}
+            for name in (create_tool, update_tool):
+                schema = tools[name].inputSchema
+                assert "request_key" in schema["properties"] and "request_key" not in schema.get("required", [])
+                annotations = tools[name].annotations
+                assert annotations is not None and annotations.idempotentHint is False, "省略键时仍是新请求"
+            key = f"create-{kind}"
+            arguments = {**creating, "request_key": key}
+            preview = (await client.call_tool(create_tool, {**arguments, "dry_run": True})).data
+            assert preview["success"] and not preview["data"]["committed"]
+            assert "request_key" not in preview["data"]
+            absent = await client.call_tool(f"{prefix}-request", {"params": {"request_key": key}}, raise_on_error=False)
+            error_content = absent.content[0]
+            assert absent.is_error and error_content.type == "text" and "NOT_FOUND" in error_content.text
+
+            added = (await client.call_tool(create_tool, arguments)).data
+            assert added["success"] and added["data"]["request_key"] == key
+            record_id = added["data"]["refs"]["item"]["id"]
+            recovered = (await client.call_tool(f"{prefix}-request", {"params": {"request_key": key}})).data
+            assert recovered["refs"]["item"]["id"] == record_id
+            replay = (await client.call_tool(create_tool, arguments)).data
+            assert replay == added
+            changed_field = "description" if kind == "relation" else "title"
+            conflict = (await client.call_tool(create_tool, {**arguments, changed_field: "不同内容"})).data
+            assert not conflict["success"] and conflict["error"]["code"] == "REQUEST_CONFLICT"
+
+            record = (await client.call_tool(f"{prefix}-get", {"params": {"id": record_id}})).data["record"]
+            updating = {"id": record_id, "expected_revision": record["revision"],
+                        "request_key": f"update-{kind}", "summary" if kind != "relation" else "description": "显式修订"}
+            if kind == "page":
+                updating["expected_content_hash"] = record["content_hash"]
+            preview = (await client.call_tool(update_tool, {**updating, "dry_run": True})).data
+            assert preview["success"] and not preview["data"]["committed"]
+            updated = (await client.call_tool(update_tool, updating)).data
+            assert updated["success"] and updated["data"]["request_key"] == updating["request_key"]
+            assert (await client.call_tool(update_tool, updating)).data == updated, "旧版本原键重试返回原回执"
+            current = (await client.call_tool(f"{prefix}-get", {"params": {"id": record_id}})).data["record"]
+            assert current["revision"] == 2
+            stale = (await client.call_tool(update_tool, {**updating, "request_key": f"stale-{kind}"})).data
+            assert not stale["success"] and stale["error"]["code"] == "VERSION_CONFLICT"
+            assert stale["data"]["next_tool"]["name"] == f"{prefix}-get"
+            assert stale["data"]["next_tool"]["arguments"] == {"params": {"id": record_id}}
+            if kind == "page":
+                wrong_hash = (await client.call_tool(update_tool, {
+                    **updating, "expected_revision": 2, "expected_content_hash": "0" * 64,
+                    "request_key": "wrong-hash"})).data
+                assert wrong_hash["error"]["code"] == "CONTENT_CONFLICT"
+                assert wrong_hash["data"]["next_tool"]["name"] == "wiki-get"
+            for invalid_key in (" " * 3, "x" * 181):
+                invalid = await client.call_tool(create_tool, {**creating, "request_key": invalid_key}, raise_on_error=False)
+                assert invalid.is_error, "请求键仍须通过已有 Key 约束"
+            # 证据定位会按当前正文重新解析；来源变化时先查已知键，不重新新建。
+            _post(api, "chunk/update", chunk_id=chunk["id"], chunk_text=chunk["chunk_text"] + "\n来源已更新",
+                  request_key=f"source-change-{kind}")
+            await asyncio.to_thread(knowledge_base.drain)
+            changed_source = (await client.call_tool(create_tool, arguments)).data
+            assert not changed_source["success"] and changed_source["error"]["code"] == "REQUEST_CONFLICT"
+            recovered = (await client.call_tool(f"{prefix}-request", {"params": {"request_key": key}})).data
+            assert recovered["refs"]["item"]["id"] == record_id
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("wiki_write", [False, True])
+@pytest.mark.parametrize("code", ["QUOTE_MISMATCH", "SOURCE_CHANGED"])
+def test_mcp_evidence_errors_offer_read_then_extract_without_writing(api, knowledge_base, mcp_servers, wiki_write, code):
+    from fastmcp import Client
+
+    _, _, graph, wiki_server = mcp_servers
+    imported = _post(api, "file/import-markdown", filename="校验恢复来源", content="# 来源\n\n精确引文支持原断言。")
+    knowledge_base.drain()
+    chunk = _post(api, "chunk/list", file_id=imported["file_id"])["chunks"][0]
+    library_id = _post(api, "knowledge/list")["library_id"]
+    owner = "page" if wiki_write else "object"
+    evidence = {owner: {"ref": "new"}, "source_kind": "piece", "source_library_id": library_id,
+                "source_file_id": imported["file_id"], "source_chunk_id": chunk["id"],
+                "quote": "精确引文" if code == "SOURCE_CHANGED" else "不存在的引文"}
+    if code == "SOURCE_CHANGED":
+        evidence["expected_content_hash"] = "0" * 64
+    payload = _batch(**{"pages" if wiki_write else "objects": [{"ref": "new", "kind": "concept", "title": "不得写入"}],
+                       "evidence": [evidence]})
+
+    async def scenario():
+        module = wiki_server if wiki_write else graph
+        prefix = "wiki" if wiki_write else "knowledge"
+        async with Client(module.mcp) as client:
+            failed = (await client.call_tool(f"{prefix}-apply", {"params": payload})).data
+            assert not failed["success"] and failed["error"]["code"] == code
+            details = failed["data"]["errors"][0] if wiki_write else failed["data"]
+            assert details["section"] == "evidence" and details["index"] == 0
+            assert details["source_chunk_id"] == chunk["id"] and details["source_file_id"] == imported["file_id"]
+            assert details["current_content_hash"] == knowledge_common.content_hash(chunk["chunk_text"])
+            if code == "SOURCE_CHANGED":
+                assert details["expected_content_hash"] == "0" * 64
+            assert failed["data"]["next_tool"]["name"] == "query_chunk_info"
+            assert failed["data"]["next_tool"]["arguments"] == {"chunk_id": chunk["id"]}
+            listed = (await client.call_tool(f"{prefix}-list", {"params": {}})).data
+            assert listed["total"] == 0, "恢复提示不能放宽校验或留下无效记录"
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("format", ["json", "graphml"])

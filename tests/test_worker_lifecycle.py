@@ -35,6 +35,8 @@ def workspace(monkeypatch, tmp_path):
     database.init_database()
     database.init_connection_pool(pool_size=4)
     file_service.ensure_files_dir()
+    # 模拟 Runtime 独立启动解析资源，不由 WorkerManager 接管。
+    parser_helper.start_parser_helpers(config.performance.worker_concurrency)
     yield tmp_path
     parser_helper.stop_parser_helpers()
     parser_helper.start_parser_helpers(2)
@@ -122,6 +124,42 @@ def test_real_pdf_indexing_uses_service_loop_and_database(monkeypatch, workspace
             await manager.stop()
         await manager.stop()
         assert not manager.is_alive()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_worker_lifecycle_does_not_own_shared_parser_sessions(workspace, started):
+    file_id = _file(workspace, "preview", pdf=True)
+    pdf = Path(file_service.get_file_by_id(file_id)["original_file_path"])
+
+    async def check():
+        manager = WorkerManager()
+        assert await run_sync(parser_helper.run_preview_page_count, pdf) == 1
+        preview = parser_helper._preview_session
+        with parser_helper.ParserSession() as document:
+            assert await run_sync(document.run, "page_count", pdf) == 1
+            slots = parser_helper._slots
+            processes = [preview.process, document.process]
+            directories = [Path(session.directory.name) for session in (preview, document)]
+            try:
+                if started:
+                    await manager.start()
+                await manager.stop()
+                await manager.stop()
+                assert not manager.is_alive()
+                assert parser_helper._slots is slots, "Worker 启动不能重配共享解析资源"
+                assert not parser_helper._stopping.is_set()
+                assert parser_helper._preview_session is preview
+                assert {preview, document} <= parser_helper._sessions
+                assert all(process.poll() is None for process in processes)
+                assert all(directory.exists() for directory in directories)
+                assert await run_sync(parser_helper.run_parser, "page_count", pdf) == 1
+                assert await run_sync(document.run, "page_count", pdf) == 1
+                assert await run_sync(parser_helper.run_preview_renderer, pdf, 1, 72)
+                assert preview.process is processes[0]
+            finally:
+                await manager.stop()
 
     asyncio.run(check())
 

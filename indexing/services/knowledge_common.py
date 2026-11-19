@@ -96,10 +96,13 @@ def source_values(cursor, item):
             if row is None:
                 raise BusinessError("INVALID_SOURCE", "本库文件/卡片不存在或卡片不属于指定文件")
             current_hash = content_hash(row["chunk_text"])
+            source = {"source_library_id": item.source_library_id, "source_file_id": item.source_file_id,
+                      "source_chunk_id": item.source_chunk_id, "current_content_hash": current_hash}
             if item.expected_content_hash and item.expected_content_hash != current_hash:
-                raise BusinessError("SOURCE_CHANGED", "卡片正文已变化，请重新读取来源")
+                raise BusinessError("SOURCE_CHANGED", "卡片正文已变化，请重新读取来源",
+                                    data={**source, "expected_content_hash": item.expected_content_hash})
             if values["quote"] not in normalize_newlines(row["chunk_text"]):
-                raise BusinessError("QUOTE_MISMATCH", "引文不在当前卡片正文中，不接受模糊匹配")
+                raise BusinessError("QUOTE_MISMATCH", "引文不在当前卡片正文中，不接受模糊匹配", data=source)
             values.update(source_title=row["doc_title"], heading_path=row["heading_path"],
                           page_number=page_number_from_heading(row["heading_path"]), content_hash=current_hash)
         else:

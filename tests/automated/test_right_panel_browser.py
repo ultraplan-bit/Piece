@@ -40,21 +40,31 @@ def test_right_panel_layout(gui_service):
                     if view == "设置":
                         page.get_by_text("基础设置", exact=True).first.click()
                         expect(page.get_by_text("主题模式", exact=True)).to_be_visible()
+                    results = page.locator(".results-splitter")
+                    middle = results.locator(":scope > .q-splitter__before")
+                    if view == "日志":
+                        expect(middle).to_be_hidden()
+                    else:
+                        expect(middle.locator(":scope > :first-child")).to_be_visible()
+                    expect(results.locator(".workspace-content > :first-child")).to_be_visible()
                     layout = page.evaluate("""() => {
-                        const splitter = [...document.querySelectorAll('.workspace-splitter')].at(-1);
+                        const splitter = document.querySelector('.results-splitter');
                         const before = splitter.querySelector(':scope > .q-splitter__before');
                         const after = splitter.querySelector(':scope > .q-splitter__after');
-                        const left = before.firstElementChild.getBoundingClientRect();
+                        const left = before.firstElementChild?.getBoundingClientRect();
                         const right = after.firstElementChild.firstElementChild.getBoundingClientRect();
-                        return {middle: before.clientWidth, middleContent: left.width,
-                                right: after.clientWidth, rightContent: right.width,
+                        return {middle: before.clientWidth, middleContent: left?.width,
+                                right: after.clientWidth, rightContent: right.width, full: splitter.clientWidth,
                                 height: after.clientHeight, contentHeight: right.height};
                     }""")
-                    expected_width = {FILES: 320, "Wiki": 260, "知识图谱": 260, "召回测试": 300}.get(view, 240)
-                    assert abs(layout["middle"] - expected_width) <= 1, (view, width, layout)
                     navigation = page.locator(".workspace-splitter").first.locator(":scope > .q-splitter__before")
                     expect(navigation).to_have_css("width", "160px")
-                    assert abs(layout["middle"] - layout["middleContent"]) <= 1, (view, width, layout)
+                    if view == "日志":
+                        assert layout["middle"] == 0 and layout["right"] == layout["full"], (view, width, layout)
+                    else:
+                        expected_width = {FILES: 320, "Wiki": 260, "知识图谱": 260, "设置": 220, "召回测试": 300}.get(view, 240)
+                        assert abs(layout["middle"] - expected_width) <= 1, (view, width, layout)
+                        assert abs(layout["middle"] - layout["middleContent"]) <= 1, (view, width, layout)
                     assert abs(layout["right"] - layout["rightContent"]) <= 1, (view, width, layout)
                     assert abs(layout["height"] - layout["contentHeight"]) <= 1, (view, width, layout)
                     page.screenshot(path=str(service["path"] / f"layout-{width}-{view}.png"))

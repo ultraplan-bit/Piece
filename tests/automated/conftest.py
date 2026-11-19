@@ -7,36 +7,15 @@ from types import SimpleNamespace
 
 import pytest
 
-
-def pytest_configure(config):
-    # 仓库没有 pytest.ini，标记在这里注册；slow 用例默认跳过，显式 --run-slow 才跑。
-    config.addinivalue_line("markers", "slow: 大数据量分页/性能验证，默认跳过，使用 --run-slow 运行")
-
-
-def pytest_addoption(parser):
-    parser.addoption("--run-slow", action="store_true", default=False, help="运行标记为 slow 的重量级用例")
-
-
-def pytest_collection_modifyitems(config, items):
-    if config.getoption("--run-slow"):
-        return
-    skip = pytest.mark.skip(reason="需要 --run-slow")
-    for item in items:
-        if "slow" in item.keywords:
-            item.add_marker(skip)
-
-
-@pytest.fixture(autouse=True)
-def isolated_entry_environment(tmp_path, monkeypatch):
-    monkeypatch.setenv("PIECE_DATA_DIR", str(tmp_path / "uninitialized"))
-    monkeypatch.setenv("NICEGUI_STORAGE_PATH", str(tmp_path / "gui-storage"))
-    monkeypatch.delenv("PIECE_API_KEY", raising=False)
+from embedding_stub import embedding_stub  # noqa: F401：供所有离线/浏览器模块复用。
 
 
 @pytest.fixture
-def knowledge_base(tmp_path, monkeypatch):
+def knowledge_base(tmp_path, monkeypatch, request):
     from indexing import settings, database
-    from indexing.services import chunk_service, processor, embedding_client
+    from indexing.services import chunk_service, processor, embedding_client, parser_helper, rate_limiter
+    monkeypatch.setattr(rate_limiter, "_rate_limiter", None)
+    monkeypatch.setattr(processor, "_embedding_semaphore", None)
     monkeypatch.setenv("PIECE_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(settings, "DEFAULT_DATA_PATH", tmp_path)
     config = settings.AppSettings(data_path=str(tmp_path))
@@ -47,8 +26,11 @@ def knowledge_base(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "_settings", config)
     assert settings.save_settings(config)
     database.close_connection_pool()
+    request.addfinalizer(database.close_connection_pool)
     database.init_database()
     database.init_connection_pool()
+    request.addfinalizer(parser_helper.stop_parser_helpers)
+    parser_helper.start_parser_helpers(config.performance.worker_concurrency)
 
     class Embeddings:
         async def aembed_documents(self, texts):
@@ -74,7 +56,6 @@ def knowledge_base(tmp_path, monkeypatch):
         asyncio.run(process())
 
     yield SimpleNamespace(path=tmp_path, settings=config, model=model, drain=drain)
-    database.close_connection_pool()
 
 
 @pytest.fixture

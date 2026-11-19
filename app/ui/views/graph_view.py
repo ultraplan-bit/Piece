@@ -14,7 +14,7 @@ from nicegui import run, ui
 from app.ui.views.graph_presenter import (
     BASES, KINDS, PREDICATES, graph_options, merge_graph,
 )
-from app.ui.components import help_hint
+from app.ui.components import _open_dialog, help_hint
 from app.ui.views.knowledge_common import STATUSES, WorkbenchBase, local_source
 from indexing.services import knowledge_service as service
 from indexing.services.errors import BusinessError
@@ -97,7 +97,7 @@ class GraphWorkbench(WorkbenchBase):
         self.selected_object = None
         self.local_relations = None
         self.graph = None
-        self.chart = None
+        self.chart: ui.echart | None = None
         self.positions = {}
         self.viewport = {}
         self.depth = 1
@@ -116,6 +116,9 @@ class GraphWorkbench(WorkbenchBase):
         self.refresh_edge_table = lambda: None
         self._graph_filters = None
         self._graph_generation = 0
+        self._graph_queries = []
+        self._space_picker: ui.select | None = None
+        self.refresh_graph_stats = lambda: None
 
     def _scoped_call(self, function, *args, graph_id=None, **kwargs):
         """把当前（或调用方捕获的）图谱身份传到支持作用域的服务请求。"""
@@ -141,17 +144,24 @@ class GraphWorkbench(WorkbenchBase):
             data = await self.call(service.list_graphs)
             if not data:
                 return
-            self.graphs = data["graphs"]
             self._graphs_loaded = True
-            selected = next((item for item in self.graphs if item["id"] == self.graph_id), None)
-            if selected is None:
-                selected = next((item for item in self.graphs if item["is_default"]),
-                                self.graphs[0] if self.graphs else None)
-            self.refresh_modes()
-            if selected and selected["id"] != self.graph_id:
-                await self.select_graph(selected["id"])
+            await self.adopt_graphs(data["graphs"], select_default=True)
         finally:
             self._graphs_loading = False
+
+    async def adopt_graphs(self, graphs, *, select_default=False):
+        changed = graphs != self.graphs
+        self.graphs = graphs
+        if not any(item["id"] == self.graph_id for item in graphs) and (self.graph_id is not None or select_default):
+            fallback = next((item for item in graphs if item["is_default"]), graphs[0] if graphs else None)
+            # 先切换再重建选择器，避免 set_options 把已删除的值置空后触发迟到的切换事件。
+            await self.select_graph(fallback["id"] if fallback else None)
+            return
+        if changed:
+            if self._space_picker is not None and not self._space_picker.is_deleted:
+                self._space_picker.set_options({item["id"]: item["name"] for item in graphs})
+            else:
+                self.refresh_modes()
 
     def create_graph_dialog(self):
         name = {"value": ""}
@@ -174,7 +184,7 @@ class GraphWorkbench(WorkbenchBase):
                         await self.select_graph(graph["id"])
 
                 ui.button(self.text("create"), on_click=create).props("unelevated")
-        dialog.open()
+        _open_dialog(dialog)
 
     def rename_graph_dialog(self):
         if not self.graph_id:
@@ -203,7 +213,7 @@ class GraphWorkbench(WorkbenchBase):
                         self.refresh_modes()
 
                 ui.button(self.text("save"), on_click=rename).props("unelevated")
-        dialog.open()
+        _open_dialog(dialog)
 
     def delete_graph_dialog(self):
         graph_id = self.graph_id
@@ -269,7 +279,7 @@ class GraphWorkbench(WorkbenchBase):
                         confirm.set_enabled(True)
 
             ui.timer(0.1, load_preview, once=True)
-        dialog.open()
+        _open_dialog(dialog)
 
     async def select_graph(self, graph_id):
         if graph_id == self.graph_id:
@@ -297,6 +307,9 @@ class GraphWorkbench(WorkbenchBase):
         self.edge_types = ["relation"]
         self.predicates = self.relation_statuses = None
         self._graph_filters = None
+        self._graph_queries = []
+        self._references_params = None
+        self._checks_generation += 1
         self.checks = None
         self.lint_scope = "all"
         self.lint_offset = 0
@@ -349,7 +362,7 @@ class GraphWorkbench(WorkbenchBase):
                     state, graph_id, dialog, message)).props("unelevated no-caps")
                 confirm.disable()
             state.update(dialog=dialog, preview=preview, confirm=confirm, message=message)
-        dialog.open()
+        _open_dialog(dialog)
 
     def clear_graph_import_preview(self, state):
         if state["busy"]:
@@ -481,6 +494,14 @@ class GraphWorkbench(WorkbenchBase):
         self._polling = True
         selection, detail = self._selection, self.detail
         try:
+            previous_graphs = deepcopy(self.graphs)
+            spaces = await run.io_bound(service.list_graphs)
+            if not current():
+                return
+            if previous_graphs == self.graphs:
+                await self.adopt_graphs(spaces["graphs"])
+            if not current():
+                return
             params = dict(self._search_params or self.search_params())
             function = self._list_function(params)
             results = await run.io_bound(function, **params)
@@ -497,33 +518,87 @@ class GraphWorkbench(WorkbenchBase):
                 self.results = results
                 await self._refresh_preserving_scroll(self.refresh_list, "list")
 
-            if not detail or not current() or selection != self._selection or self.detail is not detail:
-                return
-            kind, ident = detail["kind"], detail["record"]["id"]
-            evidence = detail.get("evidence", {})
-            try:
-                incoming = await run.io_bound(service.get_record, kind=kind, id=ident, graph_id=graph_id,
-                                             limit=evidence.get("limit", 25), offset=evidence.get("offset", 0))
-                local = await run.io_bound(service.graph, root_id=ident, depth=1, edge_types=["relation"],
-                                           graph_id=graph_id) if kind == "object" else None
-            except BusinessError as exc:
-                if exc.code != "NOT_FOUND":
-                    raise
-                incoming, local = None, None
-            if not current() or selection != self._selection or self.detail is not detail:
-                return
-            if incoming != detail or local != self.local_relations:
-                self.detail, self.local_relations = incoming, local
-                if incoming is None:
-                    self.error = self.text("broken_link")
-                    if kind == "object":
-                        self.selected_object = None
-                await self._refresh_preserving_scroll(self.refresh_detail, "detail")
+            if detail and current() and selection == self._selection and self.detail is detail:
+                kind, ident = detail["kind"], detail["record"]["id"]
+                evidence = detail.get("evidence", {})
+                try:
+                    incoming = await run.io_bound(service.get_record, kind=kind, id=ident, graph_id=graph_id,
+                                                 limit=evidence.get("limit", 25), offset=evidence.get("offset", 0))
+                    local = await run.io_bound(service.graph, root_id=ident, depth=1, edge_types=["relation"],
+                                               graph_id=graph_id) if kind == "object" else None
+                except BusinessError as exc:
+                    if exc.code != "NOT_FOUND":
+                        raise
+                    incoming, local = None, None
+                if not current():
+                    return
+                if selection == self._selection and self.detail is detail:
+                    if incoming != detail or local != self.local_relations:
+                        self.detail, self.local_relations = incoming, local
+                        if incoming is None:
+                            self.error = self.text("broken_link")
+                            if kind == "object":
+                                self.selected_object = None
+                        await self._refresh_preserving_scroll(self.refresh_detail, "detail")
+            await self.poll_graph(current)
+            await self.poll_auxiliary(current, checks_visible=self.mode == "objects" and self.review_open)
         except Exception as exc:
             # 自动检查失败保留当前画面，下次重试；不每两秒弹一次错误。
             logger.debug("图谱自动更新暂未完成 (%s)", type(exc).__name__)
         finally:
             self._polling = False
+
+    async def poll_graph(self, current):
+        if not current() or self.mode != "graph" or (self.graph is None and not self.overview):
+            return
+        previous, generation, overview = self.graph, self._graph_generation, self.overview
+
+        def unchanged():
+            return (current() and self.mode == "graph" and overview == self.overview
+                    and generation == self._graph_generation and previous is self.graph)
+
+        if overview:
+            incoming = await run.io_bound(service.graph_overview, graph_id=self.graph_id,
+                                          predicates=self.predicates, statuses=self.relation_statuses)
+        else:
+            # 重读每次探索的范围后重新合并，既保留展开范围，也去掉已被外部删除的记录。
+            queries = self._graph_queries or [{"root_id": previous["root_id"], "depth": self.depth,
+                        "edge_types": self.edge_types, "predicates": self.predicates,
+                        "statuses": self.relation_statuses, "max_nodes": 100, "max_edges": 300}]
+            incoming = None
+            for index, params in enumerate(deepcopy(queries)):
+                try:
+                    part = await run.io_bound(service.graph, **params, graph_id=self.graph_id)
+                except BusinessError as exc:
+                    if exc.code != "NOT_FOUND":
+                        raise
+                    if index == 0:
+                        break
+                    continue
+                if not unchanged():
+                    return
+                incoming = merge_graph(incoming, part) if incoming else part
+        if not unchanged() or incoming == previous:
+            return
+        await self.remember_positions()
+        if not unchanged():
+            return
+        self.graph = incoming
+        if incoming is None or not incoming["nodes"] or self.chart is None or self.chart.is_deleted:
+            self.refresh_graph()
+            return
+        options = graph_options(incoming, dark=bool(self.dark()), selected=self.selected_object,
+                                positions=self.positions, label=self.text)
+        if not overview:
+            options["series"][0].update(self.viewport)
+            self.positions.update({node["id"]: (node["x"], node["y"]) for node in options["series"][0]["data"]})
+        # 只更新 series，保留同一个画布和 3D 相机；已有 tooltip/图例不需要重建。
+        self.chart.run_chart_method("setOption", {"series": options["series"]})
+        # options 是可观察字典；同步服务端快照时禁止再次推送整份配置并重置相机。
+        with self.chart._props.suspend_updates():
+            self.chart.options["series"] = options["series"]
+        self.refresh_graph_stats()
+        self.refresh_edge_table()
 
     async def select(self, kind, ident, *, offset=0, reveal=False):
         """读取并选中一条记录。
@@ -598,8 +673,8 @@ class GraphWorkbench(WorkbenchBase):
                         await self.load_graphs()
                         await self.select_graph(event.value)
 
-                    ui.select({item["id"]: item["name"] for item in self.graphs}, value=self.graph_id,
-                              label=self.text("graph_space"), on_change=choose_graph)\
+                    self._space_picker = ui.select({item["id"]: item["name"] for item in self.graphs}, value=self.graph_id,
+                                                   label=self.text("graph_space"), on_change=choose_graph)\
                         .props("dense outlined").classes("graph-space-picker shrink-0")
                     ui.button(self.text("create_graph"), icon="add", color=None, on_click=self.create_graph_dialog)\
                         .props("flat dense no-caps")
@@ -715,12 +790,18 @@ class GraphWorkbench(WorkbenchBase):
             self.notify(self.text("choose_root"), type="info")
             return
         filters = (tuple(self.edge_types), tuple(self.predicates or ()), tuple(self.relation_statuses or ()))
-        incoming = await self._scoped_call(service.graph, root_id=self.selected_object if expand else root,
-                                           depth=1 if expand else self.depth, edge_types=self.edge_types,
-                                           predicates=self.predicates, statuses=self.relation_statuses,
-                                           max_nodes=100, max_edges=300, graph_id=graph_id)
+        params = {"root_id": self.selected_object if expand else root, "depth": 1 if expand else self.depth,
+                  "edge_types": self.edge_types, "predicates": self.predicates, "statuses": self.relation_statuses,
+                  "max_nodes": 100, "max_edges": 300}
+        incoming = await self._scoped_call(service.graph, **params, graph_id=graph_id)
         if incoming and generation == self._graph_generation and graph_id == self.graph_id:
-            self.graph = merge_graph(self.graph, incoming) if expand and self.graph and filters == self._graph_filters else incoming
+            if expand and self.graph and filters == self._graph_filters:
+                self.graph = merge_graph(self.graph, incoming)
+                if not any(query["root_id"] == params["root_id"] for query in self._graph_queries):
+                    self._graph_queries.append(deepcopy(params))
+            else:
+                self.graph = incoming
+                self._graph_queries = [deepcopy(params)]
             self._graph_filters = filters
             if center:
                 self.positions = {}
@@ -800,16 +881,23 @@ class GraphWorkbench(WorkbenchBase):
                     return
                 data = self.graph
                 with ui.column().classes("graph-stats items-end gap-0"):
-                    if data.get("overview"):
-                        ui.label(self.text("overview_count", nodes=len(data["nodes"]), edges=len(data["edges"]),
-                                          total_nodes=data["total_nodes"], total_edges=data["total_edges"])).classes("text-xs theme-text-muted")
-                        if data["truncated"]:
-                            ui.label(self.text("overview_truncated")).classes("text-xs font-semibold theme-text")
-                    else:
-                        ui.label(self.text("graph_count", nodes=len(data["nodes"]), edges=len(data["edges"]),
-                                          depth=data["depth"])).classes("text-xs theme-text-muted")
-                        if data["truncated"]:
-                            ui.label(self.text("truncated")).classes("text-xs font-semibold theme-text")
+                    @ui.refreshable
+                    def stats():
+                        data = self.graph
+                        if data is None:
+                            return
+                        if data.get("overview"):
+                            ui.label(self.text("overview_count", nodes=len(data["nodes"]), edges=len(data["edges"]),
+                                              total_nodes=data["total_nodes"], total_edges=data["total_edges"])).classes("text-xs theme-text-muted")
+                            if data["truncated"]:
+                                ui.label(self.text("overview_truncated")).classes("text-xs font-semibold theme-text")
+                        else:
+                            ui.label(self.text("graph_count", nodes=len(data["nodes"]), edges=len(data["edges"]),
+                                              depth=data["depth"])).classes("text-xs theme-text-muted")
+                            if data["truncated"]:
+                                ui.label(self.text("truncated")).classes("text-xs font-semibold theme-text")
+                    self.refresh_graph_stats = stats.refresh
+                    stats()
                 options = graph_options(data, dark=bool(self.dark()), selected=self.selected_object,
                                         positions=self.positions, label=self.text)
                 if not data.get("overview"):
@@ -1085,6 +1173,13 @@ class GraphWorkbench(WorkbenchBase):
             ui.button(self.text("run_checks"), on_click=self.run_checks).props("outline no-caps")
             ui.button(self.text("disputed"), on_click=partial(self.show_status, "disputed")).props("flat no-caps")
             ui.button(self.text("outdated"), on_click=partial(self.show_status, "outdated")).props("flat no-caps")
+        @ui.refreshable
+        def checks():
+            self.render_check_results()
+        self.refresh_checks = checks.refresh
+        checks()
+
+    def render_check_results(self):
         if self.checks:
             data = self.checks
             ui.label(self.text("checked_count", count=data["checked_objects"])).classes("text-xs theme-text-muted")
@@ -1110,20 +1205,26 @@ class GraphWorkbench(WorkbenchBase):
         await self.search()
         await self.set_mode("objects")
 
-    async def run_checks(self, reset=True):
-        if reset:
-            self.lint_offset = 0
+    def check_params(self):
         params: dict[str, object] = {"limit": 25, "offset": self.lint_offset}
+        if self.graph_id:
+            params["graph_id"] = self.graph_id
         if self.lint_scope == "selected":
             params["object_ids"] = [self.selected_object] if self.selected_object else []
         elif self.lint_scope == "filtered":
             params["object_ids"] = [item["id"] for item in (self.results or {}).get("objects", [])]
+        return params
 
-        graph_id, generation = self.graph_id, self.graph_generation
-        checks = await self._scoped_call(service.lint, **params, graph_id=graph_id)
-        if graph_id == self.graph_id and generation == self.graph_generation:
+    async def run_checks(self, reset=True):
+        self._checks_generation += 1
+        generation = self._checks_generation
+        if reset:
+            self.lint_offset = 0
+        params = self.check_params()
+        checks = await self.call(service.lint, **params)
+        if generation == self._checks_generation and params == self.check_params():
             self.checks = checks
-            self.refresh_workspace()
+            self.refresh_checks()
 
     async def check_page(self, delta):
         self.lint_offset = max(0, self.lint_offset + delta * 25)
@@ -1139,14 +1240,18 @@ class GraphWorkbench(WorkbenchBase):
         await self.search(False)
 
     async def file_references(self, file_id, offset=0):
+        await self.load_graphs()
         graph_id, generation = self.graph_id, self.graph_generation
+        self._references_params = token = {}
         info = await self._scoped_call(service.list_objects, limit=1, graph_id=graph_id)
-        if not info or graph_id != self.graph_id or generation != self.graph_generation:
+        if (not info or graph_id != self.graph_id or generation != self.graph_generation
+                or self._references_params is not token):
             return
-        references = await self._scoped_call(service.references, source_library_id=info["library_id"],
-                                              source_file_id=file_id, limit=25, offset=offset,
-                                              graph_id=graph_id)
-        if graph_id != self.graph_id or generation != self.graph_generation:
+        self._references_params = params = {"source_library_id": info["library_id"], "source_file_id": file_id,
+                                           "limit": 25, "offset": offset, "graph_id": info["graph_id"]}
+        references = await self.call(service.references, **params)
+        if (graph_id != self.graph_id or generation != self.graph_generation
+                or self._references_params is not params or references is None):
             return
         self.reference_file, self.references_data = file_id, references
         if self.show_view:
@@ -1154,21 +1259,26 @@ class GraphWorkbench(WorkbenchBase):
         self.refresh_workspace()
 
     def render_references(self):
-        data = self.references_data
-        if data is None:
-            return
         with ui.expansion(self.text("references"), icon="format_quote", value=True).classes("w-full"):
-            if not data["evidence"]:
-                ui.label(self.text("empty"))
-            for item in data["evidence"]:
-                owner = item["owner"]
-                ui.button(owner.get("title") or owner.get("description") or owner["id"],
-                          on_click=partial(self.select, item["owner_kind"], owner["id"])).props("flat no-caps").classes("w-full break-words")
-            async def page(delta):
-                await self.file_references(self.reference_file, max(0, data["offset"] + delta * 25))
-            self.pager(data["offset"], 25, data["total"], page)
+            @ui.refreshable
+            def references():
+                data = self.references_data
+                if data is None:
+                    return
+                if not data["evidence"]:
+                    ui.label(self.text("empty"))
+                for item in data["evidence"]:
+                    owner = item["owner"]
+                    ui.button(owner.get("title") or owner.get("description") or owner["id"],
+                              on_click=partial(self.select, item["owner_kind"], owner["id"])).props("flat no-caps").classes("w-full break-words")
+                async def page(delta):
+                    await self.file_references(self.reference_file, max(0, data["offset"] + delta * 25))
+                self.pager(data["offset"], 25, data["total"], page)
+            self.refresh_references = references.refresh
+            references()
             ui.button(self.text("close"), on_click=self.close_references).props("flat")
 
     def close_references(self):
+        self._references_params = None
         self.references_data = None
         self.refresh_workspace()

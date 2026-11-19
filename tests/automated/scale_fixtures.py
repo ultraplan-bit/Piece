@@ -5,6 +5,7 @@
 的批量 ``executemany`` 插入，但每一行都满足 knowledge_schema.py 的
 CHECK / UNIQUE / FK 约束，否则分页结论无意义：
 
+- 图谱对象、关系、证据、修订与 FTS 均显式写入同一 graph_id，满足复合外键
 - knowledge_objects：kind ∈ {concept,entity}，status 合法，revision>=1，title_norm 归一化
 - knowledge_relations：predicate/basis/status 合法，source≠target，(source,predicate,target,qualifier) 唯一
 - knowledge_evidence：object_id/relation_id 恰有其一，source_kind/stance 合法，dedup_key 唯一
@@ -23,7 +24,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from indexing.database import get_db_cursor
 from indexing.knowledge_models import normalize_name
-from indexing.services.knowledge_common import content_hash
+from indexing.services.knowledge_common import _json, content_hash
 
 NAMESPACE = NAMESPACE_URL
 
@@ -60,7 +61,7 @@ def library_id(cursor):
 # 图谱：对象 / 关系 / 证据 / 修订
 # --------------------------------------------------------------------------- #
 
-def insert_objects(cursor, count, *, prefix="obj", start=0, title_prefix=GRAPH_KEYWORD + "对象"):
+def insert_objects(cursor, count, *, graph_id, prefix="obj", start=0, title_prefix=GRAPH_KEYWORD + "对象"):
     """插入 count 个对象并同步 knowledge_fts，返回 id 列表。"""
     from retrieval.nodes.preprocess_node import tokenize_query
     rows, fts_rows, ids = [], [], []
@@ -68,18 +69,18 @@ def insert_objects(cursor, count, *, prefix="obj", start=0, title_prefix=GRAPH_K
     for index in range(start, start + count):
         oid = _oid(prefix, index)
         title = f"{title_prefix}{index:06d}"
-        rows.append((oid, KINDS[index % 2], title, normalize_name(title), summary,
+        rows.append((oid, graph_id, KINDS[index % 2], title, normalize_name(title), summary,
                      "[]", "[]", STATUSES[index % 3], 1))
-        fts_rows.append((oid, " ".join(tokenize_query(title)), "", " ".join(tokenize_query(summary))))
+        fts_rows.append((graph_id, oid, " ".join(tokenize_query(title)), "", " ".join(tokenize_query(summary))))
         ids.append(oid)
     cursor.executemany(
-        "INSERT INTO knowledge_objects(id,kind,title,title_norm,summary,aliases_json,aliases_norm_json,status,revision)"
-        " VALUES (?,?,?,?,?,?,?,?,?)", rows)
-    cursor.executemany("INSERT INTO knowledge_fts(object_id,title,aliases,summary) VALUES (?,?,?,?)", fts_rows)
+        "INSERT INTO knowledge_objects(id,graph_id,kind,title,title_norm,summary,aliases_json,aliases_norm_json,status,revision)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+    cursor.executemany("INSERT INTO knowledge_fts(graph_id,object_id,title,aliases,summary) VALUES (?,?,?,?,?)", fts_rows)
     return ids
 
 
-def insert_relations(cursor, object_ids, count, *, prefix="rel", start=0):
+def insert_relations(cursor, object_ids, count, *, graph_id, prefix="rel", start=0):
     """在对象之间插入 count 条关系；qualifier 带序号保证 UNIQUE 约束不冲突。"""
     from retrieval.nodes.preprocess_node import tokenize_query
     rows, fts_rows, ids = [], [], []
@@ -91,26 +92,26 @@ def insert_relations(cursor, object_ids, count, *, prefix="rel", start=0):
             target = object_ids[(index * 7 + 2) % total]
         rid = _oid(prefix, index)
         description, qualifier = f"关系说明{index}", f"q{index}"
-        rows.append((rid, source, PREDICATES[index % len(PREDICATES)], target,
+        rows.append((rid, graph_id, source, PREDICATES[index % len(PREDICATES)], target,
                      description, qualifier, BASES[index % len(BASES)], STATUSES[index % 3], 1))
-        fts_rows.append((rid, " ".join(tokenize_query(description)), " ".join(tokenize_query(qualifier))))
+        fts_rows.append((graph_id, rid, " ".join(tokenize_query(description)), " ".join(tokenize_query(qualifier))))
         ids.append(rid)
     cursor.executemany(
-        "INSERT INTO knowledge_relations(id,source_id,predicate,target_id,description,qualifier,basis,status,revision)"
-        " VALUES (?,?,?,?,?,?,?,?,?)", rows)
-    cursor.executemany("INSERT INTO knowledge_relation_fts(relation_id,description,qualifier) VALUES (?,?,?)", fts_rows)
+        "INSERT INTO knowledge_relations(id,graph_id,source_id,predicate,target_id,description,qualifier,basis,status,revision)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+    cursor.executemany("INSERT INTO knowledge_relation_fts(graph_id,relation_id,description,qualifier) VALUES (?,?,?,?)", fts_rows)
     return ids
 
 
-def insert_owner_evidence(cursor, owner_id, owner_kind, count, *, prefix="ev", start=0):
+def insert_owner_evidence(cursor, owner_id, owner_kind, count, *, graph_id, prefix="ev", start=0):
     """把 count 条 user 证据挂在同一个 object/relation 上，用于证据分页。"""
     owner_column = "object_id" if owner_kind == "object" else "relation_id"
     null_column = "relation_id" if owner_kind == "object" else "object_id"
-    sql = (f"INSERT INTO knowledge_evidence(id,{owner_column},{null_column},source_kind,stance,quote,dedup_key)"
-           " VALUES (?,?,NULL,'user',?,?,?)")
+    sql = (f"INSERT INTO knowledge_evidence(id,graph_id,{owner_column},{null_column},source_kind,stance,quote,dedup_key)"
+           " VALUES (?,?,?,NULL,'user',?,?,?)")
     rows = []
     for index in range(start, start + count):
-        rows.append((_oid(prefix, index), owner_id, STANCES[index % 3], f"用户陈述引文{index}",
+        rows.append((_oid(prefix, index), graph_id, owner_id, STANCES[index % 3], f"用户陈述引文{index}",
                      _dedup("user", owner_kind, owner_id, index)))
     cursor.executemany(sql, rows)
     return [row[0] for row in rows]
@@ -128,7 +129,7 @@ def insert_source_file(cursor, base_path: Path, text, *, name=None):
 
 
 def insert_piece_evidence(cursor, lib, file_id, chunk_id, chunk_text, owner_ids, count,
-                          *, prefix="refev", start=0):
+                          *, graph_id, prefix="refev", start=0):
     """插入指向同一 (库 UUID, 文件 ID) 的 piece 证据，用于 references 反查分页。
 
     content_hash 取真实卡片正文哈希、quote 为正文精确子串，故 location_status 为 current。
@@ -140,27 +141,33 @@ def insert_piece_evidence(cursor, lib, file_id, chunk_id, chunk_text, owner_ids,
     for index in range(start, start + count):
         eid = _oid(prefix, index)
         owner = owner_ids[index % total]
-        rows.append((eid, owner, lib, file_id, chunk_id, "规模资料", "文档 / 第1页 / 正文", 1,
+        rows.append((eid, graph_id, owner, lib, file_id, chunk_id, "规模资料", "文档 / 第1页 / 正文", 1,
                      quote, digest, _dedup("piece", lib, file_id, index)))
     cursor.executemany(
-        "INSERT INTO knowledge_evidence(id,object_id,source_kind,stance,source_library_id,source_file_id,"
+        "INSERT INTO knowledge_evidence(id,graph_id,object_id,source_kind,stance,source_library_id,source_file_id,"
         "source_chunk_id,source_title,heading_path,page_number,quote,content_hash,dedup_key)"
-        " VALUES (?,?,'piece','supports',?,?,?,?,?,?,?,?,?)", rows)
+        " VALUES (?,?,?,'piece','supports',?,?,?,?,?,?,?,?,?)", rows)
     return [row[0] for row in rows]
 
 
-def insert_revisions(cursor, owner_id, owner_kind, count, *, prefix="rev", start=0):
-    """为同一 object/relation 插入 count 条历史，用于 history 分页。"""
+def insert_revisions(cursor, owner_id, owner_kind, count, *, graph_id, prefix="rev", start=0):
+    """为同一 object/relation 插入 count 条完整快照，并推进当前记录版本。"""
+    from indexing.services.knowledge_service import TABLES, _record
+
     column = "object_id" if owner_kind == "object" else "relation_id"
     other = "relation_id" if owner_kind == "object" else "object_id"
+    record = _record(cursor, owner_kind, owner_id, graph_id)
     rows = []
     for index in range(start, start + count):
-        rows.append((owner_id, index + 1, index + 2,
-                     f'{{"revision":{index + 1}}}', f'{{"revision":{index + 2}}}',
+        before = {**record, "revision": index + 1}
+        after = {**record, "revision": index + 2}
+        rows.append((graph_id, owner_id, index + 1, index + 2, _json(before), _json(after),
                      f"历史原因{index}", _oid(prefix + "-batch", index), "tester"))
     cursor.executemany(
-        f"INSERT INTO knowledge_revisions({column},{other},before_revision,after_revision,before_json,after_json,"
-        "reason,batch_id,actor) VALUES (?,NULL,?,?,?,?,?,?,?)", rows)
+        f"INSERT INTO knowledge_revisions(graph_id,{column},{other},before_revision,after_revision,before_json,after_json,"
+        "reason,batch_id,actor) VALUES (?,?,NULL,?,?,?,?,?,?,?)", rows)
+    cursor.execute(f"UPDATE {TABLES[owner_kind]} SET revision=? WHERE graph_id=? AND id=?",
+                   (start + count + 1, graph_id, owner_id))
     return count
 
 
@@ -174,14 +181,15 @@ def _wiki_file_bytes(page_id, title, body, *, summary="", kind="topic", status="
 
     evidence 是 StoredEvidence 字典列表，直接写进 frontmatter，作为 references/lint 的真源。
     """
-    import json
+    from indexing.services.wiki_service import _encode
+    from indexing.wiki_models import PageDocument
+
     stamp = created_at or _now()
-    document = {"format": 1, "id": page_id, "kind": kind, "title": title, "summary": summary,
-                "aliases": [], "status": status, "revision": revision,
-                "created_at": stamp, "updated_at": updated_at or stamp,
-                "evidence": evidence or []}
-    text = "---\n" + json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n---\n" + body
-    data = text.encode("utf-8")
+    document = PageDocument(id=page_id, kind=kind, title=title, summary=summary, body=body,
+                            aliases=[], status=status, revision=revision,
+                            created_at=stamp, updated_at=updated_at or stamp,
+                            evidence=evidence or []).model_dump()
+    data = _encode(document)
     return data, hashlib.sha256(data).hexdigest()
 
 
@@ -195,7 +203,7 @@ def _stored_evidence(index, lib, file_id, chunk_id, chunk_text):
 
 
 def seed_wiki_pages(base_path: Path, count, *, title_prefix=WIKI_KEYWORD + "页面",
-                    evidence_by_page=None):
+                    evidence_by_page=None, revisions_by_page=None):
     """在 <data>/wiki 下写 count 个真实 MD 文件，并写 wiki_pages / wiki_fts 索引行。
 
     返回包含 id / path / content_hash 的页字典列表。正文共享关键词，便于构造全集查询；
@@ -206,6 +214,7 @@ def seed_wiki_pages(base_path: Path, count, *, title_prefix=WIKI_KEYWORD + "页�
     from retrieval.nodes.preprocess_node import tokenize_query
 
     evidence_by_page = evidence_by_page or {}
+    revisions_by_page = revisions_by_page or {}
     root = Path(base_path) / "wiki"
     root.mkdir(parents=True, exist_ok=True)
     pages = []
@@ -219,25 +228,33 @@ def seed_wiki_pages(base_path: Path, count, *, title_prefix=WIKI_KEYWORD + "页�
         body = f"# {page['title']}\n\n{WIKI_KEYWORD}正文内容，用于分页与性能验证。\n"
         if page["index"] % 10 == 0:
             body += f"\n参见 [相邻页](piece://wiki/{link_target})。\n"
+        page["revision"] = revisions_by_page.get(page["index"], 1)
+        page["created_at"] = page["updated_at"] = _now()
         data, digest = _wiki_file_bytes(page["id"], page["title"], body, summary=WIKI_KEYWORD + "摘要",
+                                        revision=page["revision"], created_at=page["created_at"],
                                         evidence=evidence_by_page.get(page["index"], []))
         (root / page["path"]).write_bytes(data)
         page["content_hash"] = digest
         page["body"] = body
 
     with get_db_cursor(write=True) as cursor:
-        page_rows, fts_rows = [], []
+        page_rows, fts_rows, evidence_rows = [], [], []
         for page in pages:
             title = page["title"]
             page_rows.append((page["id"], page["path"], "topic", title, normalize_name(title),
-                              WIKI_KEYWORD + "摘要", "[]", "[]", "active", 1, page["content_hash"]))
+                              WIKI_KEYWORD + "摘要", "[]", "[]", "active", page["revision"], page["content_hash"],
+                              page["created_at"], page["updated_at"]))
             fts_rows.append((page["id"], " ".join(tokenize_query(title)), " ".join(tokenize_query(WIKI_KEYWORD + "摘要")),
                              " ".join(tokenize_query(page["body"]))))
+            evidence_rows.extend((item["id"], page["id"], item["source_library_id"], item["source_file_id"])
+                                 for item in evidence_by_page.get(page["index"], []))
         cursor.executemany(
             "INSERT INTO wiki_pages(id,path,kind,title,title_norm,summary,aliases_json,aliases_norm_json,"
             "status,revision,content_hash,created_at,updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)", page_rows)
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", page_rows)
         cursor.executemany("INSERT INTO wiki_fts(page_id,title,summary,body) VALUES (?,?,?,?)", fts_rows)
+        cursor.executemany("INSERT INTO wiki_evidence(id,page_id,source_library_id,source_file_id) VALUES (?,?,?,?)",
+                           evidence_rows)
         # 链接表：仅登记真实存在的目标，避免与 lint 的 BROKEN_BODY_LINK 语义混淆。
         links = [(page["id"], pages[(page["index"] + 1) % count]["id"]) for page in pages if page["index"] % 10 == 0]
         cursor.executemany("INSERT INTO wiki_links(source_id,target_id) VALUES (?,?)", links)
@@ -245,13 +262,24 @@ def seed_wiki_pages(base_path: Path, count, *, title_prefix=WIKI_KEYWORD + "页�
 
 
 def insert_wiki_operations(cursor, page_id, path, content_hash_value, count, *, prefix="wikiop"):
-    """为同一页面插入 count 条已应用的操作历史；state='applied' 时 _is_applied 直接成立。"""
+    """为同一页面插入 count 条已应用历史，快照与字节哈希均遵循当前文件合同。"""
+    from indexing.services.wiki_service import _decode, _encode, _snapshot, wiki_path
+
+    file_path = wiki_path() / path
+    data = file_path.read_bytes()
+    assert hashlib.sha256(data).hexdigest() == content_hash_value
+    document = _snapshot(_decode(data, file_path))
+    assert document["id"] == page_id and document["revision"] == count + 1
     request_rows, operation_rows = [], []
     for index in range(count):
         key = _oid(prefix + "-req", index)
+        before = {**document, "revision": index + 1}
+        after = {**document, "revision": index + 2}
+        before_hash = hashlib.sha256(_encode(before)).hexdigest()
+        after_hash = hashlib.sha256(_encode(after)).hexdigest()
         request_rows.append((key, _dedup(key), "{}"))
-        operation_rows.append((_oid(prefix, index), key, page_id, path, None, content_hash_value,
-                               None, "{}", "{}", "applied", f"历史原因{index}", "tester"))
+        operation_rows.append((_oid(prefix, index), key, page_id, path, before_hash, after_hash,
+                               _json(before), _json(after), "{}", "applied", f"历史原因{index}", "tester"))
     cursor.executemany("INSERT INTO wiki_requests(request_key,request_hash,result_json) VALUES (?,?,?)", request_rows)
     cursor.executemany(
         "INSERT INTO wiki_operations(id,request_key,page_id,path,before_hash,after_hash,before_json,after_json,"
@@ -274,31 +302,33 @@ def seed_knowledge_base(base_path, *, objects=3000, relations=6000, evidence=300
     stats = {}
     with get_db_cursor(write=True) as cursor:
         lib = library_id(cursor)
-        object_ids = insert_objects(cursor, objects)
-        relation_ids = insert_relations(cursor, object_ids, relations)
+        graph_id = cursor.execute("SELECT id FROM knowledge_graphs WHERE is_default=1").fetchone()[0]
+        object_ids = insert_objects(cursor, objects, graph_id=graph_id)
+        relation_ids = insert_relations(cursor, object_ids, relations, graph_id=graph_id)
 
         # 普通对象证据：分散到各对象，验证 get_record 证据页与全库分页。
         spread = []
         for index in range(evidence):
-            spread.append((_oid("ev", index), object_ids[index % len(object_ids)], STANCES[index % 3],
+            spread.append((_oid("ev", index), graph_id, object_ids[index % len(object_ids)], STANCES[index % 3],
                            f"用户陈述引文{index}", _dedup("user", "object", index)))
         cursor.executemany(
-            "INSERT INTO knowledge_evidence(id,object_id,relation_id,source_kind,stance,quote,dedup_key)"
-            " VALUES (?,?,NULL,'user',?,?,?)", spread)
+            "INSERT INTO knowledge_evidence(id,graph_id,object_id,relation_id,source_kind,stance,quote,dedup_key)"
+            " VALUES (?,?,?,NULL,'user',?,?,?)", spread)
 
         # 热点对象：单个对象挂大量证据，用于 _evidence_page 分页。
         hot_object = object_ids[0]
-        insert_owner_evidence(cursor, hot_object, "object", hot_object_evidence, prefix="hotev")
+        insert_owner_evidence(cursor, hot_object, "object", hot_object_evidence, graph_id=graph_id, prefix="hotev")
 
         # references：同一 (库 UUID, 文件 ID) 的 piece 证据。
         file_id, chunk_id = insert_source_file(cursor, base_path, chunk_text)
-        reference_ids = insert_piece_evidence(cursor, lib, file_id, chunk_id, chunk_text, object_ids, reference_evidence)
+        reference_ids = insert_piece_evidence(cursor, lib, file_id, chunk_id, chunk_text, object_ids,
+                                              reference_evidence, graph_id=graph_id)
 
         # history：同一对象的大量修订。
         history_object = object_ids[1]
-        insert_revisions(cursor, history_object, "object", revisions)
+        insert_revisions(cursor, history_object, "object", revisions, graph_id=graph_id)
 
-        stats.update(library_id=lib, object_ids=object_ids, relation_ids=relation_ids,
+        stats.update(library_id=lib, graph_id=graph_id, object_ids=object_ids, relation_ids=relation_ids,
                      hot_object=hot_object, history_object=history_object,
                      source_file_id=file_id, source_chunk_id=chunk_id,
                      reference_evidence=len(reference_ids))
@@ -313,11 +343,15 @@ def seed_knowledge_base(base_path, *, objects=3000, relations=6000, evidence=300
     for offset in range(wiki_hot_page_evidence):
         evidence_by_page.setdefault(hot_page_index, []).append(
             _stored_evidence(wiki_evidence + offset, lib, file_id, chunk_id, chunk_text))
-    wiki = seed_wiki_pages(base_path, wiki_pages, evidence_by_page=evidence_by_page)
+    history_page_index = 0
+    revisions_by_page = {history_page_index: wiki_history + 1}
+    wiki = seed_wiki_pages(base_path, wiki_pages, evidence_by_page=evidence_by_page,
+                           revisions_by_page=revisions_by_page)
     with get_db_cursor(write=True) as cursor:
-        first = wiki[0]
+        first = wiki[history_page_index]
         insert_wiki_operations(cursor, first["id"], first["path"], first["content_hash"], wiki_history)
-    stats.update(wiki_pages=wiki, wiki_history_page=wiki[0]["id"], wiki_hot_page=wiki[hot_page_index]["id"],
+    stats.update(wiki_pages=wiki, wiki_history_page=wiki[history_page_index]["id"],
+                 wiki_hot_page=wiki[hot_page_index]["id"],
                  wiki_hot_page_evidence=len(evidence_by_page.get(hot_page_index, [])),
                  wiki_reference_evidence=wiki_evidence + wiki_hot_page_evidence)
     return stats

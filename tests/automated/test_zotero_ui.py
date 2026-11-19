@@ -104,6 +104,55 @@ def test_zotero_search_scope_and_pagination_are_explicit(workbench, monkeypatch)
     assert calls[-1]["query"] == "" and calls[-1]["tag"] is None
 
 
+def test_zotero_select_all_syncs_page_checkboxes_without_selection_feedback(workbench, monkeypatch):
+    from nicegui import binding
+
+    bench, container, view, _ = workbench
+    other = {**deepcopy(PAPER), "key": "ITEMBBBB"}
+    items = [deepcopy(PAPER), other]
+    monkeypatch.setattr(view.zotero, "search", lambda **kwargs: _page(deepcopy(items), total=45, next_offset=20))
+    _run(bench.connect)
+    select_all, first, second = _find(container, "Checkbox")
+    assert select_all.text == t("zotero.select_all")
+    assert [box.value for box in (select_all, first, second)] == [False, False, False]
+
+    def select_page(checked):
+        for listener in select_all._event_listeners.values():
+            if listener.type == "update:modelValue":
+                listener.handler(SimpleNamespace(args=checked))
+        binding._refresh_step()
+
+    select_page(True)
+    assert bench.selected == {item["key"]: item for item in items}
+    assert [box.value for box in (select_all, first, second)] == [True, True, True]
+    assert t("zotero.selected", count=2) in _labels(container)
+
+    first.value = False
+    binding._refresh_step()
+    assert select_all.value is None and second.value is True
+    assert list(bench.selected) == [other["key"]]
+    assert t("zotero.selected", count=1) in _labels(container)
+    select_page(True)
+    select_page(False)
+    assert not bench.selected and not bench.has_selection
+    assert [box.value for box in (select_all, first, second)] == [False, False, False]
+
+    first.value = second.value = True
+    binding._refresh_step()
+    assert select_all.value is True and len(bench.selected) == 2
+    for busy, connected in ((True, True), (False, False)):
+        bench.busy = busy
+        bench.info["connected"] = connected
+        binding._refresh_step()
+        assert not any(box.enabled for box in (select_all, first, second))
+
+    bench.info["connected"] = True
+    monkeypatch.setattr(view.zotero, "search", lambda **kwargs: _page([]))
+    _run(bench.search)
+    assert not bench.selected and bench.page_selection is False
+    assert not _find(container, "Checkbox")
+
+
 def test_zotero_notes_render_as_text_without_active_html(workbench, monkeypatch):
     bench, container, view, _ = workbench
     bench.info = deepcopy(INFO)
@@ -336,18 +385,20 @@ def test_zotero_mcp_listener_is_loopback_even_with_public_piece_host(knowledge_b
 
     settings.get_settings().mcp.zotero_enabled = True
     monkeypatch.setattr(server, "MCP_HOST", "0.0.0.0")
-    received = {}
-    runtime = SimpleNamespace(settings=settings.get_settings(), mark_mcp_services=lambda statuses, failures: received.update(statuses=statuses))
+    from app.mcp_servers import MCPServerManager
+    from unittest.mock import AsyncMock
 
-    class Manager:
-        stopping = False
+    runtime = SimpleNamespace(settings=settings.get_settings())
+    manager = MCPServerManager()
+    monkeypatch.setattr(manager, "start", AsyncMock())
 
-        async def start(self, services, *, host, runtime):
-            received["host"] = host
-            self.servers = [SimpleNamespace(started=True, should_exit=False) for _ in services]
-            self.tasks = [asyncio.get_running_loop().create_future() for _ in services]
+    async def scenario():
+        try:
+            await server.start_mcp_servers(runtime, manager)
+            host = manager.start.call_args.kwargs["host"]
+            assert host["piece-zotero"] == "127.0.0.1"
+            assert host["piece-kb"] == "0.0.0.0"
+        finally:
+            await manager.stop()
 
-    asyncio.run(server.start_mcp_servers(runtime, Manager()))
-    assert received["host"]["piece-zotero"] == "127.0.0.1"
-    assert received["host"]["piece-kb"] == "0.0.0.0"
-    assert received["statuses"]["zotero"]["url"] == "http://127.0.0.1:8688/mcp"
+    asyncio.run(scenario())

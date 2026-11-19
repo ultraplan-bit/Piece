@@ -28,6 +28,16 @@ from retrieval.tools import chunk_images
 from retrieval.tools.chunk_images import collect_chunk_images
 
 
+@pytest.fixture(autouse=True)
+def preview_helpers():
+    from indexing.services import parser_helper
+    parser_helper.start_parser_helpers(2)
+    try:
+        yield
+    finally:
+        parser_helper.stop_parser_helpers()
+
+
 def _make_pdf(path: Path, pages: int = 3) -> Path:
     """生成指定页数的 PDF，每页写一行可辨识的文字。"""
     document = pymupdf.open()

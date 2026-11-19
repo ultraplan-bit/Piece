@@ -5,9 +5,11 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
+from fastmcp import Context
 
 from indexing import database
 from indexing.services import collection_service as collections, file_service as files, maintenance_service
@@ -227,27 +229,27 @@ def test_search_and_mcp_use_same_default_scope(knowledge_base, api, monkeypatch)
     assert asyncio.run(search("研究方法", collections=[]))["candidates"] == []
     result = api.post("/api/v1/search", json={"query": "研究方法", "collections": ["论文"], "include_descendants": False}).json()
     assert result["data"]["candidates"] == []
-    listed = asyncio.run(index.query_files.fn(collections=["论文"]))
+    listed = asyncio.run(index.query_files(collections=["论文"]))
     assert listed["data"]["total"] == 1
-    assert asyncio.run(index.query_files.fn(collections=["论文"], include_descendants=False))["data"]["total"] == 0
-    assert asyncio.run(index.query_files.fn(collections=[]))["data"]["total"] == 0
-    assert not asyncio.run(index.query_files.fn(collections=["未知"]))["success"]
-    ctx = SimpleNamespace(info=AsyncMock(), warning=AsyncMock(), error=AsyncMock())
-    assert asyncio.run(retrieval.resolve_keywords_tool.fn(ctx, "研究方法", collections=["论文"]))["keywords"]
-    assert asyncio.run(retrieval.resolve_keywords_tool.fn(ctx, "研究方法", collections=["论文"], include_descendants=False))["keywords"] == []
-    assert asyncio.run(retrieval.resolve_keywords_tool.fn(ctx, "研究方法", collections="[]"))["keywords"] == []
-    read = asyncio.run(retrieval.list_collections_tool.fn(ctx))["collections"]
-    write = asyncio.run(index.query_collections.fn())["data"]["collections"]
+    assert asyncio.run(index.query_files(collections=["论文"], include_descendants=False))["data"]["total"] == 0
+    assert asyncio.run(index.query_files(collections=[]))["data"]["total"] == 0
+    assert not asyncio.run(index.query_files(collections=["未知"]))["success"]
+    ctx = cast(Context, SimpleNamespace(info=AsyncMock(), warning=AsyncMock(), error=AsyncMock()))
+    assert asyncio.run(retrieval.resolve_keywords_tool(ctx, "研究方法", collections=["论文"]))["keywords"]
+    assert asyncio.run(retrieval.resolve_keywords_tool(ctx, "研究方法", collections=["论文"], include_descendants=False))["keywords"] == []
+    assert asyncio.run(retrieval.resolve_keywords_tool(ctx, "研究方法", collections="[]"))["keywords"] == []
+    read = asyncio.run(retrieval.list_collections_tool(ctx))["collections"]
+    write = asyncio.run(index.query_collections())["data"]["collections"]
     assert read == write == collections.list_collections()
-    assert asyncio.run(index.move_collection_tool.fn(child, None))["success"]
-    assert not asyncio.run(index.remove_collection.fn(child))["success"]
-    assert asyncio.run(index.remove_collection.fn(child, dry_run=True))["data"]["direct_file_count"] == 1
-    assert asyncio.run(index.remove_collection.fn(child, confirmed=True))["success"]
-    assigned = asyncio.run(index.set_file_collections.fn(file_id, ["普通/名称"]))
+    assert asyncio.run(index.move_collection_tool(child, None))["success"]
+    assert not asyncio.run(index.remove_collection(child))["success"]
+    assert asyncio.run(index.remove_collection(child, dry_run=True))["data"]["direct_file_count"] == 1
+    assert asyncio.run(index.remove_collection(child, confirmed=True))["success"]
+    assigned = asyncio.run(index.set_file_collections(file_id, ["普通/名称"]))
     assert assigned["success"]
     item = collections.get_file_collections(file_id)[0]
     assert item["name"] == "普通/名称" and item["parent_id"] is None
-    assert not asyncio.run(index.set_file_collections.fn(file_id, '{"bad": "input"}'))["success"]
+    assert not asyncio.run(index.set_file_collections(file_id, '{"bad": "input"}'))["success"]
     assert collections.get_file_collections(file_id)[0]["id"] == item["id"]
 
 

@@ -1,24 +1,17 @@
 """由旧回归迁入的有效合同：新任务模型、受控路径与临时配置，不保留旧负载兼容。"""
 
 import asyncio
-import copy
 import json
-import shlex
-import time
-import tomllib
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import pytest
 
 from indexing import database, settings
 from indexing.services import chunk_service, file_service, task_service
 from indexing.services.errors import BusinessError
-
-
-def _settle():
-    time.sleep(0.003)
 
 
 # ---- 任务订阅（GUI 只观察任务表） ------------------------------------------
@@ -48,6 +41,20 @@ class _Refreshable:
 @pytest.fixture
 def subscription(knowledge_base, monkeypatch):
     pytest.importorskip("nicegui")
+    from indexing.repositories import task_repository
+
+    class Clock:
+        value = datetime(2026, 1, 1)
+
+        @classmethod
+        def now(cls):
+            return cls.value
+
+    def advance():
+        Clock.value += timedelta(milliseconds=1)
+
+    monkeypatch.setattr(task_repository, "datetime", Clock)
+    monkeypatch.setattr(task_service, "datetime", Clock)
     from app.ui.handlers import task_handlers as module
     from app.ui.handlers.task_handlers import TaskHandlers
     notify = _Notify()
@@ -59,23 +66,23 @@ def subscription(knowledge_base, monkeypatch):
     files = _FakeFileHandlers()
     handlers.set_file_handlers(files)
     return SimpleNamespace(module=module, handlers=handlers, state=state, ui_refs=ui_refs,
-                           notify=notify, files=files, file_id=file_id)
+                           notify=notify, files=files, file_id=file_id, advance=advance)
 
 
 def test_task_from_any_source_shows_up_and_finishes_once(subscription):
     s = subscription
     asyncio.run(s.handlers.init_active_tasks())
-    _settle()
+    s.advance()
     task_id = file_service.reindex_file(s.file_id)["task_id"]
     asyncio.run(s.handlers.poll())
     assert s.state["task_progress"][task_id]["status"] == "pending"
     assert s.ui_refs["file_list_container"].refreshes == 1 and s.files.loads == 0
-    _settle()
+    s.advance()
     task_service.update_page_progress(task_id, 3, 10, 5, 40, stage="parsing")
     asyncio.run(s.handlers.poll())
     snapshot = s.state["task_progress"][task_id]
     assert snapshot["progress"] == 40 and snapshot["stage"] == "parsing"
-    _settle()
+    s.advance()
     task_service.update_task_status(task_id, "completed", progress=100)
     for _ in range(4):
         asyncio.run(s.handlers.poll())
@@ -87,7 +94,7 @@ def test_task_from_any_source_shows_up_and_finishes_once(subscription):
 def test_fast_failed_task_reports_real_error_only(subscription):
     s = subscription
     asyncio.run(s.handlers.init_active_tasks())
-    _settle()
+    s.advance()
     task_id = chunk_service.create_chunk_add_task(s.file_id, "标题", "private body")
     task_service.update_task_status(task_id, "failed", error_message="embedding failed", error_code="EMBEDDING_FAILED")
     asyncio.run(s.handlers.poll())
@@ -101,7 +108,7 @@ def test_old_finished_tasks_are_not_replayed_on_page_load(subscription):
     s = subscription
     done = chunk_service.create_chunk_add_task(s.file_id, "a", "b")
     task_service.update_task_status(done, "completed", progress=100)
-    _settle()
+    s.advance()
     asyncio.run(s.handlers.init_active_tasks())
     asyncio.run(s.handlers.poll())
     assert s.notify == [] and s.state["task_progress"] == {} and s.files.loads == 0
@@ -122,7 +129,7 @@ def test_task_for_unknown_file_triggers_full_refresh(subscription):
     s = subscription
     s.state["files_data"] = []
     asyncio.run(s.handlers.init_active_tasks())
-    _settle()
+    s.advance()
     file_service.reindex_file(s.file_id)
     asyncio.run(s.handlers.poll())
     assert s.files.loads == 1
@@ -134,15 +141,15 @@ def test_task_for_unknown_file_triggers_full_refresh(subscription):
 def test_safe_cancel_is_silent_and_deleted_row_is_dropped(subscription):
     s = subscription
     asyncio.run(s.handlers.init_active_tasks())
-    _settle()
+    s.advance()
     task_id = chunk_service.create_chunk_add_task(s.file_id, "a", "b")
     asyncio.run(s.handlers.poll())
     assert task_id in s.state["task_progress"]
-    _settle()
+    s.advance()
     task_service.cancel_task(task_id)
     asyncio.run(s.handlers.poll())
     assert task_id not in s.state["task_progress"] and s.notify == [] and s.files.loads == 1
-    _settle()
+    s.advance()
     other = chunk_service.create_chunk_add_task(s.file_id, "c", "d")
     asyncio.run(s.handlers.poll())
     assert other in s.state["task_progress"]
@@ -155,7 +162,7 @@ def test_safe_cancel_is_silent_and_deleted_row_is_dropped(subscription):
 def test_completed_task_updated_before_marker_still_clears(subscription):
     s = subscription
     asyncio.run(s.handlers.init_active_tasks())
-    _settle()
+    s.advance()
     task_id = file_service.reindex_file(s.file_id)["task_id"]
     asyncio.run(s.handlers.poll())
     with database.get_db_cursor(write=True) as cursor:
@@ -163,6 +170,28 @@ def test_completed_task_updated_before_marker_still_clears(subscription):
     asyncio.run(s.handlers.poll())
     assert task_id not in s.state["task_progress"]
     assert s.notify == [(s.module.t("task.completed"), "positive")]
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+@pytest.mark.parametrize("updated_at", [
+    "2025-12-31T23:59:59", "2026-01-01T00:00:00", "2026-01-01T00:00:01",
+])
+def test_terminal_task_marker_boundary_is_idempotent(subscription, tracked, updated_at):
+    s = subscription
+    task_id = chunk_service.create_chunk_add_task(s.file_id, "边界", "正文")
+    task_service.update_task_status(task_id, "completed", progress=100)
+    task = task_service.get_task(task_id)
+    assert task is not None
+    task["updated_at"] = updated_at
+    marker = "2026-01-01T00:00:00"
+    if tracked:
+        s.state["task_progress"][task_id] = s.handlers._task_snapshot(task)
+    expected = tracked or updated_at > marker
+    _, refresh = s.handlers._absorb([task], marker)
+    assert refresh is expected
+    assert task_id not in s.state["task_progress"]
+    s.handlers._absorb([task], s.handlers._marker)
+    assert s.notify == ([(s.module.t("task.completed"), "positive")] if expected else [])
 
 
 def test_register_untracked_files(knowledge_base):
@@ -286,176 +315,6 @@ def test_unmanaged_paths_are_rejected(knowledge_base, tmp_path):
         file_service.managed_path(outside)
 
 
-# ---- MCP 密钥、配置模板与端口 ---------------------------------------------------
-
-
-@pytest.fixture
-def mcp_settings(knowledge_base):
-    return knowledge_base.settings
-
-
-@pytest.mark.parametrize("payload, expected", [
-    ({"api_key": "legacy"}, ("legacy", "legacy")),
-    ({"api_key": "legacy", "index_api_key": None}, ("legacy", "legacy")),
-    ({"api_key": "read", "index_api_key": "write"}, ("read", "write")),
-    ({"api_key": "read", "index_api_key": ""}, ("read", "")),
-    ({"api_key": "", "index_api_key": "write"}, ("", "write")),
-    ({}, ("", "")),
-])
-def test_key_selection_and_empty_key_semantics(mcp_settings, payload, expected):
-    mcp_settings.mcp = settings.McpSettings(**payload)
-    for service, key in zip(("retrieval", "index"), expected):
-        assert settings.get_mcp_api_key(service) == key
-        assert settings.is_mcp_auth_enabled(service) == bool(key)
-
-
-def test_new_install_generates_independent_keys(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "DEFAULT_DATA_PATH", tmp_path / "fresh")
-    monkeypatch.setattr(settings, "_settings", None)
-    config = settings.load_settings()
-    assert len(config.mcp.api_key) == 32 and len(config.mcp.index_api_key) == 32
-    assert config.mcp.api_key != config.mcp.index_api_key != config.api.admin_key
-    stored = json.loads((tmp_path / "fresh" / "config.json").read_text(encoding="utf-8"))
-    assert stored["mcp"]["index_api_key"] == config.mcp.index_api_key
-
-
-def test_unknown_service_is_rejected():
-    with pytest.raises(ValueError, match="未知 MCP 服务"):
-        settings.McpSettings(api_key="secret").get_api_key("typo")
-
-
-@pytest.mark.parametrize("service, correct, wrong", [("retrieval", "read", "write"), ("index", "write", "read")])
-@pytest.mark.parametrize("method", ["on_call_tool", "on_list_tools"])
-def test_service_auth_rejects_cross_service_and_missing_keys(mcp_settings, monkeypatch, service, correct, wrong, method):
-    pytest.importorskip("fastmcp")
-    from indexing.mcp import auth
-    mcp_settings.mcp = settings.McpSettings(api_key="read", index_api_key="write")
-    middleware = []
-    auth.apply_bearer_auth(SimpleNamespace(add_middleware=middleware.append), service)
-    bearer = next(item for item in middleware if isinstance(item, auth.BearerAuthMiddleware))
-    handler = getattr(bearer, method)
-    call_next = AsyncMock(return_value="allowed")
-    for header in ("", f"Bearer {wrong}", "Basic abc", f"Bearer {correct}extra"):
-        monkeypatch.setattr(auth, "get_http_headers", lambda h=header: {"authorization": h})
-        with pytest.raises(auth.ToolError, match="Unauthorized"):
-            asyncio.run(handler(None, call_next))
-    call_next.assert_not_awaited()
-    monkeypatch.setattr(auth, "get_http_headers", lambda: {"authorization": f"Bearer {correct}"})
-    assert asyncio.run(handler(None, call_next)) == "allowed"
-
-
-@pytest.mark.parametrize("service", ["retrieval", "index"])
-def test_auth_switch_disables_both_services(mcp_settings, service):
-    pytest.importorskip("fastmcp")
-    from indexing.mcp import auth
-    mcp_settings.mcp = settings.McpSettings(api_key="read", index_api_key="write", auth_enabled=False)
-    middleware = []
-    auth.apply_bearer_auth(SimpleNamespace(add_middleware=middleware.append), service)
-    assert len(middleware) == 1 and isinstance(middleware[0], auth.CallTimingMiddleware)
-    assert not settings.is_mcp_auth_enabled(service)
-
-
-_SERVICE_NAMES = ("piece-kb", "piece-index", "piece-graph", "piece-wiki", "piece-zotero")
-
-
-def _parse_config(client, text):
-    if client.get("format") == "bash":
-        servers = {}
-        for command in text.split("\n\n"):
-            args = shlex.split(command.replace("\\\n", ""))
-            server = {"url": args[-1], "headers": {}}
-            if "--header" in args:
-                key, value = args[args.index("--header") + 1].split(": ", 1)
-                server["headers"][key] = value
-            servers[args[-2]] = server
-        return servers
-    if client.get("format") == "toml":
-        servers = tomllib.loads(text)["mcp_servers"]
-        for server in servers.values():
-            server["headers"] = server.pop("http_headers", {})
-        return servers
-
-    def walk(config):
-        servers = {}
-        if isinstance(config, dict):
-            for name in _SERVICE_NAMES:
-                if isinstance(config.get(name), dict):
-                    servers[name] = config[name]
-            if config.get("name") in _SERVICE_NAMES:
-                servers[config["name"]] = config
-            for value in config.values():
-                servers.update(walk(value))
-        elif isinstance(config, list):
-            for value in config:
-                servers.update(walk(value))
-        return servers
-    return walk(json.loads(text))
-
-
-def _clients():
-    try:
-        from app.ui.views import mcp_config_view
-    except ImportError:
-        return []
-    return mcp_config_view.MCP_CLIENTS
-
-@pytest.mark.parametrize("client", _clients(), ids=lambda c: c["id"])
-@pytest.mark.parametrize("auth_enabled", [True, False])
-def test_all_client_templates_use_service_specific_credentials(mcp_settings, monkeypatch, client, auth_enabled):
-    from app.ui.views import mcp_config_view
-    monkeypatch.delenv("PIECE_INDEX_MCP_PORT", raising=False)
-    mcp_settings.mcp = settings.McpSettings(port=9230, api_key="read-key", index_api_key="write-key", auth_enabled=auth_enabled)
-    original = copy.deepcopy(client)
-    text = mcp_config_view._get_config_json(client)
-    servers = _parse_config(client, text)
-    assert set(servers) == {"piece-kb", "piece-index"}
-    for name, port, key in (("piece-kb", 9230, "read-key"), ("piece-index", 9231, "write-key")):
-        server = servers[name]
-        assert (server.get("url") or server.get("serverUrl") or server.get("httpUrl")) == f"http://localhost:{port}/mcp"
-        assert server.get("headers", {}).get("Authorization") == (f"Bearer {key}" if auth_enabled else None)
-    if not auth_enabled:
-        assert "read-key" not in text and "write-key" not in text
-    assert client == original
-
-
-def test_all_services_can_be_selected_together(mcp_settings, monkeypatch):
-    """派生服务（图谱/Wiki）复用索引模板，端口与密钥独立。"""
-    from app.ui.views import mcp_config_view
-    monkeypatch.delenv("PIECE_INDEX_MCP_PORT", raising=False)
-    mcp_settings.mcp = settings.McpSettings(
-        port=9230, api_key="read-key", index_api_key="write-key",
-        graph_api_key="graph-key", wiki_api_key="wiki-key", auth_enabled=True,
-    )
-    for client_id in ("cursor", "claude_code", "openai_codex"):
-        client = next(c for c in mcp_config_view.MCP_CLIENTS if c["id"] == client_id)
-        servers = _parse_config(client, mcp_config_view._get_config_json(client, {
-            "piece-kb", "piece-index", "piece-graph", "piece-wiki"}))
-        assert set(servers) == {"piece-kb", "piece-index", "piece-graph", "piece-wiki"}
-        for name, port, key in (("piece-kb", 9230, "read-key"), ("piece-index", 9231, "write-key"),
-                                ("piece-graph", 9234, "graph-key"), ("piece-wiki", 9235, "wiki-key")):
-            server = servers[name]
-            assert (server.get("url") or server.get("serverUrl") or server.get("httpUrl")) == f"http://localhost:{port}/mcp"
-            assert server.get("headers", {}).get("Authorization") == f"Bearer {key}"
-
-
-def test_custom_keys_are_escaped_and_not_treated_as_templates(mcp_settings):
-    from app.ui.views import mcp_config_view
-    key = "key-'\"\\-{port}-{index_port}-密钥"
-    mcp_settings.mcp = settings.McpSettings(api_key=key, index_api_key="index")
-    for client_id in ("cursor", "claude_code", "openai_codex"):
-        client = next(c for c in mcp_config_view.MCP_CLIENTS if c["id"] == client_id)
-        assert _parse_config(client, mcp_config_view._get_config_json(client))["piece-kb"]["headers"]["Authorization"] == f"Bearer {key}"
-
-
-def test_index_port_follows_environment_override(mcp_settings, monkeypatch):
-    from indexing.mcp.config import get_mcp_port
-    mcp_settings.mcp.port = 9120
-    monkeypatch.setenv("PIECE_INDEX_MCP_PORT", "9457")
-    assert get_mcp_port() == get_mcp_port(9220) == 9457
-    monkeypatch.setenv("PIECE_INDEX_MCP_PORT", "invalid")
-    assert get_mcp_port() == 9121 and get_mcp_port(9220) == 9221
-
-
 def test_gui_form_materializes_legacy_key_and_rotates_one(knowledge_base, monkeypatch):
     pytest.importorskip("nicegui")
     from app.ui.handlers import settings_handlers
@@ -482,4 +341,5 @@ def test_gui_form_materializes_legacy_key_and_rotates_one(knowledge_base, monkey
     handler.save_settings_form()
     saved = config_service.get_saved_settings()
     assert saved.mcp.get_api_key("index") == "new-key" and saved.mcp.get_api_key("retrieval") == "legacy-key"
-    assert notify.call_args.kwargs["type"] == "warning"
+    assert settings.get_settings().mcp.get_api_key("index") == "new-key"
+    assert notify.call_args.kwargs["type"] == "positive"

@@ -7,13 +7,14 @@ import socket
 import sys
 import threading
 from contextlib import asynccontextmanager
+from typing import cast
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import anyio
 import pytest
-from fastmcp import Client, FastMCP
+from fastmcp import Client, Context, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp.shared.exceptions import McpError
 
@@ -48,7 +49,7 @@ def _service(name, events):
 
 
 def _url(manager, index):
-    listener = manager._servers[index].servers[0]
+    listener = manager.servers[index].servers[0]
     port = listener.sockets[0].getsockname()[1]
     return f"http://127.0.0.1:{port}/mcp"
 
@@ -81,9 +82,9 @@ def test_both_servers_share_loop_and_close_lifespans(iteration):
                     assert result.data == {"name": name, "loop": loop_id, "thread": thread_id}
 
             await asyncio.gather(check(urls[0], "piece-kb"), check(urls[1], "piece-index"))
-            original_tasks = list(manager._tasks)
+            original_tasks = manager.tasks
             await manager.start(services, host="127.0.0.1")
-            assert manager._tasks == original_tasks, "重复启动不应再绑定端口"
+            assert manager.tasks == original_tasks, "重复启动不应再绑定端口"
         finally:
             await manager.stop()
         assert len(events) == 4
@@ -92,13 +93,30 @@ def test_both_servers_share_loop_and_close_lifespans(iteration):
             ("piece-index", "start"), ("piece-index", "stop"),
             ("piece-kb", "start"), ("piece-kb", "stop"),
         ]
-        assert not manager._tasks and not manager._servers
+        assert not manager.tasks and not manager.servers
         await manager.stop()  # 关闭幂等
         for url in urls:
             port = int(url.split(":")[2].split("/")[0])
             with socket.socket() as probe:
                 probe.settimeout(0.2)
                 assert probe.connect_ex(("127.0.0.1", port)) != 0
+
+    _run(scenario())
+
+
+def test_manager_can_restart_after_complete_stop():
+    async def scenario():
+        events = []
+        manager = MCPServerManager()
+        service = _service("reusable", events)
+        for _ in range(2):
+            try:
+                await manager.start([(service, 0)], host="127.0.0.1")
+                async with Client(_url(manager, 0)) as client:
+                    assert await client.ping()
+            finally:
+                await manager.stop()
+        assert [(name, state) for name, state, _ in events] == [("reusable", "start"), ("reusable", "stop")] * 2
 
     _run(scenario())
 
@@ -116,9 +134,9 @@ def test_occupied_port_does_not_exit_loop_or_break_other_server(caplog):
                     (_service("occupied", events), port),
                     (_service("healthy", events), 0),
                 ], host="127.0.0.1")
-                assert manager._tasks[0].done()
-                assert not manager._servers[0].started
-                assert manager._servers[1].started
+                assert manager.tasks[0].done()
+                assert not manager.servers[0].started
+                assert manager.servers[1].started
                 async with Client(_url(manager, 1)) as client:
                     assert (await client.call_tool("identity")).data["name"] == "healthy"
             finally:
@@ -145,7 +163,7 @@ def test_lifespan_startup_failure_is_isolated(caplog):
                 (FastMCP("failed", lifespan=failing_lifespan), 0),
                 (_service("healthy", []), 0),
             ], host="127.0.0.1")
-            assert manager._tasks[0].done()
+            assert manager.tasks[0].done()
             async with Client(_url(manager, 1)) as client:
                 assert await client.ping()
         finally:
@@ -171,7 +189,7 @@ def test_runtime_failure_closes_listener_and_lifespan(monkeypatch, caplog):
         manager = MCPServerManager()
         try:
             await manager.start([(_service("failed", events), 0)], host="127.0.0.1")
-            await asyncio.gather(*manager._tasks)
+            await asyncio.gather(*manager.tasks)
             assert [state for _, state, _ in events] == ["start", "stop"]
             with socket.socket() as probe:
                 probe.settimeout(0.2)
@@ -291,7 +309,7 @@ def test_index_tools_offload_synchronous_io(monkeypatch, tool_name, backend_name
 
     monkeypatch.setattr(server, backend_name, backend)
     main_thread = threading.get_ident()
-    result = _run(getattr(server, tool_name).fn(*args))
+    result = _run(getattr(server, tool_name)(*args))
     assert result["thread"] != main_thread
 
 
@@ -316,7 +334,7 @@ def test_cancelled_index_call_waits_for_synchronous_write(monkeypatch):
 
         async def invoke():
             with scope:
-                await server.create_file.fn("a.md")
+                await server.create_file("a.md")
             call_finished.set()
 
         task = asyncio.create_task(invoke())
@@ -351,7 +369,7 @@ def test_retrieval_offloads_database_and_image_work(monkeypatch):
     monkeypatch.setattr(server, "get_docs", get_docs)
     monkeypatch.setattr(server, "collect_chunk_images", collect_images)
     ctx = SimpleNamespace(info=AsyncMock(), warning=AsyncMock(), error=AsyncMock())
-    _run(server.get_docs_tool.fn(ctx, ["title"], include_images=True))
+    _run(server.get_docs_tool(cast(Context, ctx), ["title"], include_images=True))
     assert len(threads) == 2
     assert all(thread != threading.get_ident() for thread in threads)
 
@@ -490,7 +508,7 @@ def test_get_docs_rejects_invalid_image_offset(retrieval_image_documents, image_
 @pytest.fixture
 def source_page_document(monkeypatch):
     import pymupdf
-    from indexing.services import file_service, maintenance_service
+    from indexing.services import file_service, maintenance_service, parser_helper
     from indexing.services.errors import BusinessError
     from retrieval import server
 
@@ -518,15 +536,20 @@ def source_page_document(monkeypatch):
 
     monkeypatch.setattr(maintenance_service, "file_info", file_info)
     monkeypatch.setattr(server, "get_docs", lambda _: pytest.fail("查看原页不应依赖卡片查询"))
-    return server, document, source
+    parser_helper.start_parser_helpers(2)
+    try:
+        yield server, document, source
+    finally:
+        parser_helper.stop_parser_helpers()
 
 
 def test_get_source_page_contract_and_offloads_io(source_page_document, monkeypatch):
-    from indexing.services import maintenance_service
+    from indexing.services import maintenance_service, parser_helper
 
     server, _, source = source_page_document
     backend = maintenance_service.source_page
     calls = []
+    monkeypatch.setattr(parser_helper, "run_preview_page_count", lambda _: pytest.fail("成功取原页不应额外查询总页数"))
 
     def source_page(file_id, page_number):
         calls.append((file_id, page_number, threading.get_ident()))
@@ -587,20 +610,29 @@ def test_get_source_page_reuses_office_conversion(source_page_document, monkeypa
     assert converted == [office]
 
 
-@pytest.mark.parametrize("problem, code", [
-    ("unknown_file", "NOT_FOUND"),
-    ("no_original", "NOT_FOUND"),
-    ("missing_original", "PAGE_UNAVAILABLE"),
-    ("unsupported", "PAGE_UNAVAILABLE"),
-    ("out_of_range", "PAGE_UNAVAILABLE"),
-    ("outside_managed_storage", "INVALID_PATH"),
-    ("converter_unavailable", "PAGE_UNAVAILABLE"),
+@pytest.mark.parametrize("problem, code, reason, retryable", [
+    ("unknown_file", "NOT_FOUND", None, None),
+    ("no_original", "NOT_FOUND", "original_missing", False),
+    ("missing_original", "PAGE_UNAVAILABLE", "original_missing", False),
+    ("unsupported", "PAGE_UNAVAILABLE", "unsupported_format", False),
+    ("out_of_range", "PAGE_UNAVAILABLE", "page_out_of_range", False),
+    ("outside_managed_storage", "INVALID_PATH", None, None),
+    ("converter_unavailable", "PAGE_UNAVAILABLE", "converter_unavailable", False),
+    ("conversion_failed", "PAGE_UNAVAILABLE", "conversion_failed", True),
+    ("conversion_exception", "PAGE_UNAVAILABLE", "conversion_failed", True),
+    ("render_failed", "PAGE_UNAVAILABLE", "render_failed", True),
+    ("render_exception", "PAGE_UNAVAILABLE", "render_failed", True),
+    ("bad_pdf", "PAGE_UNAVAILABLE", "render_failed", True),
 ])
-def test_get_source_page_reports_unavailable(source_page_document, monkeypatch, problem, code):
-    from indexing.services import page_render
+def test_get_source_page_reports_unavailable(source_page_document, monkeypatch, problem, code, reason, retryable):
+    from indexing.services import office_convert, page_render
 
     server, document, source = source_page_document
     arguments = {"file_id": 7, "page_number": 1}
+
+    def fail(*args):
+        raise OSError(f"故障包含敏感原件路径：{source}")
+
     if problem == "unknown_file":
         arguments["file_id"] = 999
     elif problem == "no_original":
@@ -613,11 +645,19 @@ def test_get_source_page_reports_unavailable(source_page_document, monkeypatch, 
         arguments["page_number"] = 3
     elif problem == "outside_managed_storage":
         document["original_file_path"] = str(source.parent.parent / "outside.pdf")
-    elif problem == "converter_unavailable":
+    elif problem in {"converter_unavailable", "conversion_failed", "conversion_exception"}:
         office = source.with_suffix(".docx")
-        office.write_bytes(b"converter unavailable")
+        office.write_bytes(b"office conversion is stubbed")
         document.update(original_file_path=str(office), original_file_type="docx")
-        monkeypatch.setattr(page_render, "convert_to_pdf", lambda _: None)
+        converters = [] if problem == "converter_unavailable" else [("com", "")]
+        monkeypatch.setattr(office_convert, "list_converters", lambda: converters)
+        monkeypatch.setattr(page_render, "convert_to_pdf", fail if problem == "conversion_exception" else lambda _: None)
+    elif problem == "render_failed":
+        monkeypatch.setattr(page_render, "render_pdf_page", lambda *_: None)
+    elif problem == "render_exception":
+        monkeypatch.setattr(page_render, "render_pdf_page", fail)
+    elif problem == "bad_pdf":
+        source.write_bytes(b"not a PDF")
 
     async def scenario():
         async with Client(server.mcp) as client:
@@ -625,10 +665,38 @@ def test_get_source_page_reports_unavailable(source_page_document, monkeypatch, 
             assert response.is_error
             assert all(block.type == "text" for block in response.content)
             message = "\n".join(block.text for block in response.content if block.type == "text")
-            assert code in message
+            error = json.loads(message)
+            assert set(error) == {"code", "message", "data"}
+            assert error["code"] == code
+            assert error["message"]
             assert str(source.parent) not in message
+            if reason is None:
+                assert error["data"] is None
+            else:
+                assert error["data"]["reason"] == reason
+                assert error["data"]["retryable"] is retryable
+                assert "get-docs" in error["data"]["hint"]
+                if problem == "out_of_range":
+                    assert error["data"]["total_pages"] == 2
+                    assert "page_number" in error["data"]["hint"]
+                if problem == "converter_unavailable":
+                    assert "LibreOffice" in error["data"]["hint"]
 
     _run(scenario())
+
+
+@pytest.mark.parametrize("page_number", [0, -1])
+def test_source_page_reports_lower_bound_with_total_pages(source_page_document, page_number):
+    from indexing.services import maintenance_service
+    from indexing.services.errors import BusinessError
+
+    with pytest.raises(BusinessError) as caught:
+        maintenance_service.source_page(7, page_number)
+    assert caught.value.code == "PAGE_UNAVAILABLE"
+    assert caught.value.data is not None
+    assert caught.value.data["reason"] == "page_out_of_range"
+    assert caught.value.data["retryable"] is False
+    assert caught.value.data["total_pages"] == 2
 
 
 @pytest.mark.parametrize("arguments", [

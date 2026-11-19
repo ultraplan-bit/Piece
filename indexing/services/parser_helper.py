@@ -38,7 +38,7 @@ class ParserStopped(ParserError):
 
 
 def start_parser_helpers(max_concurrency: int) -> None:
-    """复用索引并发配置限制原生解析的峰值内存。"""
+    """由 Runtime 在 Worker 启动前配置共享解析资源；停止排空后才可重启。"""
     global _slots
     with _condition:
         if _calls:
@@ -47,11 +47,21 @@ def start_parser_helpers(max_concurrency: int) -> None:
         _stopping.clear()
 
 
-def stop_parser_helpers() -> None:
-    """拒绝新解析，排空调用后回收所有会话，包括等待 HTTP 的空闲 VLM helper。"""
-    global _preview_session
+def begin_parser_shutdown() -> None:
+    """Runtime 退出时先关闭共享闸门；不等待调用，也不关闭预览/VLM 会话。"""
     with _condition:
         _stopping.set()
+
+
+def stop_parser_helpers() -> None:
+    """在线程中排空调用并回收所有会话；Runtime 须在关库前等待本函数完成。
+
+    Runtime 先调用 begin_parser_shutdown 并停止 Worker，再执行此最终回收。
+    单独调用仍会先关闸门，供独立解析脚本和 atexit 安全收尾。
+    """
+    global _preview_session
+    begin_parser_shutdown()
+    with _condition:
         while _calls:
             _condition.wait(_POLL_SECONDS)
         errors = []

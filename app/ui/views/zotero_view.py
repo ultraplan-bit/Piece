@@ -136,6 +136,14 @@ class ZoteroWorkbench:
     def selection_text(self):
         return t("zotero.selected", count=len(self.selected))
 
+    @property
+    def page_selection(self):
+        items = (self.results or {}).get("items", [])
+        count = sum(item["key"] in self.selected for item in items)
+        if not count:
+            return False
+        return True if count == len(items) else None
+
     async def call(self, function, *args, **kwargs):
         if self.busy:
             return None
@@ -222,6 +230,10 @@ class ZoteroWorkbench:
         else:
             self.selected.pop(item["key"], None)
 
+    def toggle_select_all(self, checked):
+        for item in (self.results or {}).get("items", []):
+            self.toggle_selection(item, checked)
+
     def collection_options(self):
         return {key: f"{item['data'].get('name', key)} · {key}" for key, item in self.collections.items()}
 
@@ -292,7 +304,13 @@ class ZoteroWorkbench:
         if self.results is None:
             return
         with ui.column().classes("w-full gap-0"):
-            if not self.results["items"]:
+            if self.results["items"]:
+                # 只响应用户事件，避免绑定同步勾选状态时反过来改动选择。
+                ui.checkbox(t("zotero.select_all")).props("dense").classes(
+                    "px-2 py-1 text-xs theme-text-secondary").bind_value_from(self, "page_selection").on(
+                        "update:model-value", lambda event: self.toggle_select_all(bool(event.args)), [None],
+                    ).bind_enabled_from(self, "can_read")
+            else:
                 ui.label(t("zotero.empty")).classes("p-4 text-sm theme-text-muted")
             for item in self.results["items"]:
                 key = item["key"]
@@ -300,7 +318,8 @@ class ZoteroWorkbench:
                 with ui.row().classes("w-full gap-1 items-start flex-nowrap px-2 py-1 zotero-item" + (" zotero-item-active" if selected else "")):
                     ui.checkbox(value=key in self.selected,
                                 on_change=lambda event, row=item: self.toggle_selection(row, event.value)).props(
-                                    "dense").bind_enabled_from(self, "can_read")._props["aria-label"] = t("zotero.select_item", title=_title(item))
+                                    "dense").bind_value_from(self, "selected", backward=lambda value, row_key=key: row_key in value).bind_enabled_from(
+                                        self, "can_read")._props["aria-label"] = t("zotero.select_item", title=_title(item))
                     with ui.button(on_click=partial(self.open_item, key), color=None).props(
                         "flat dense no-caps no-ripple align=left").classes("flex-1 min-w-0 text-left").bind_enabled_from(self, "can_read"):
                         with ui.column().classes("w-full gap-1 min-w-0"):

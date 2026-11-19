@@ -135,9 +135,14 @@ class Runtime:
         self.mark_component("api", "ready")
 
     def begin_shutdown(self) -> None:
+        from indexing.services.parser_helper import begin_parser_shutdown
+        from indexing.worker_manager import worker_manager
+
         self.ready = False
         self.mark_component("core", "stopping")
         self.mark_component("api", "stopping")
+        begin_parser_shutdown()
+        worker_manager.request_stop()
 
     def shutdown_failed(self, exc: BaseException) -> None:
         self.ready = False
@@ -158,7 +163,10 @@ class Runtime:
             init_database(self.database_path)
             init_connection_pool(self.database_path)
             from indexing.services.sync_service import get_sync_service
+            from indexing.services.parser_helper import start_parser_helpers
+
             get_sync_service().start()
+            start_parser_helpers(self.settings.performance.worker_concurrency)
             await worker_manager.start()
         except BaseException:
             await self._stop_resources()
@@ -170,6 +178,7 @@ class Runtime:
         """排空同步、Worker/helper 后关库；任一停止失败都保留数据库和锁。"""
         from indexing.database import close_connection_pool
         from indexing.services.sync_service import get_sync_service
+        from indexing.services.parser_helper import stop_parser_helpers
         from indexing.worker_manager import worker_manager
         from indexing.utils import run_sync
 
@@ -182,6 +191,10 @@ class Runtime:
                 errors.append(exc)
             try:
                 await worker_manager.stop()
+            except Exception as exc:
+                errors.append(exc)
+            try:
+                await run_sync(stop_parser_helpers)
             except Exception as exc:
                 errors.append(exc)
             if errors:

@@ -30,13 +30,17 @@ def scale(tmp_path_factory):
     config.mcp.api_key = "read-test-key"
     config.mcp.index_api_key = "write-test-key"
     settings._settings = config
-    database.close_connection_pool()
-    database.init_database()
-    database.init_connection_pool()
-    stats = seed_knowledge_base(tmp_path, **SCALE)
-    yield stats
-    database.close_connection_pool()
-    settings._settings = previous
+    try:
+        database.close_connection_pool()
+        database.init_database()
+        database.init_connection_pool()
+        stats = seed_knowledge_base(tmp_path, **SCALE)
+        yield stats
+    finally:
+        try:
+            database.close_connection_pool()
+        finally:
+            settings._settings = previous
 
 
 def collect_pages(call, *, limit, key, **kwargs):

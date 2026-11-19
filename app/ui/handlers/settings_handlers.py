@@ -10,7 +10,7 @@ from app.i18n import t, set_language
 from indexing.settings import (
     get_settings, AppSettings, OcrOptionalPayload, OfficeSettings, generate_api_key,
 )
-from indexing.services.config_service import get_saved_settings, update_config
+from indexing.services.config_service import config_effects, get_saved_settings, update_config
 from indexing.services.errors import BusinessError
 from indexing.utils import run_sync
 
@@ -92,7 +92,6 @@ class SettingsHandlers:
         self.active_group = "appearance"
         self._form_settings = None
         self._baseline_form = {}
-        self.pending_restart = ()
         self.reindex_groups = set()
         self.errors = {}
         self.saved_groups = set()
@@ -109,9 +108,14 @@ class SettingsHandlers:
         self.settings_form.clear()
         self.settings_form.update(deepcopy(self._baseline_form))
         self.settings_form.update(drafts)
-        effective = get_settings()
-        self.pending_restart = tuple(key for key in ("api", "mcp", "performance", "data_path")
-                                     if getattr(settings, key) != getattr(effective, key))
+
+    @property
+    def pending_restart(self):
+        return tuple(config_effects(self._form_settings or get_settings())["pending_restart"])
+
+    @property
+    def pending_apply(self):
+        return tuple(config_effects(self._form_settings or get_settings())["pending_apply"])
 
     def group_fields(self, group=None):
         if group is None:
@@ -149,7 +153,8 @@ class SettingsHandlers:
 
     @property
     def can_save(self):
-        return bool(self.changed_fields(self.active_group))
+        retry = self.active_group in {"mcp", "zotero"} and config_effects(self._form_settings or get_settings())["apply_error"]
+        return bool(self.changed_fields(self.active_group) or retry)
 
     @property
     def error_message(self):
@@ -157,7 +162,7 @@ class SettingsHandlers:
 
     @property
     def status_message(self):
-        if self.can_save:
+        if self.changed_fields(self.active_group):
             return t("settings.unsaved_group")
         if self.active_group in self.saved_groups:
             return t("settings.saved_group")
@@ -174,6 +179,9 @@ class SettingsHandlers:
         if self.pending_restart:
             names = [t(f"settings.effect_{key}") for key in self.pending_restart]
             messages.append(t("settings.pending_restart", groups="、".join(names)))
+        if self.pending_apply:
+            effects = config_effects(self._form_settings or get_settings())
+            messages.append(t("settings.apply_failed") if effects["apply_error"] else t("settings.pending_apply"))
         if any(key in self.reindex_groups for key in CONFIG_GROUPS[self.active_group]):
             messages.append(t("settings.pending_reindex"))
         return "\n".join(messages)
@@ -245,7 +253,10 @@ class SettingsHandlers:
             baseline = self._form_settings or get_saved_settings()
             new_settings = self._settings_from_form(groups)
             previous_language = get_settings().appearance.language
-            result = update_config(_changes(baseline.model_dump(), new_settings.model_dump()))
+            patch = _changes(baseline.model_dump(), new_settings.model_dump())
+            if group in {"mcp", "zotero"} and config_effects(baseline)["apply_error"]:
+                patch.setdefault("mcp", {})
+            result = update_config(patch)
             self.init_settings_form(keep_fields=drafts)
             self.reindex_groups.update(result["requires_reindex"])
             self.saved_groups.update(groups)
@@ -256,7 +267,7 @@ class SettingsHandlers:
                 set_language(language)
                 self.language_changed = True
             if notify:
-                warning = bool(result["requires_restart"] or result["requires_reindex"])
+                warning = bool(result["requires_restart"] or result["pending_apply"] or result["requires_reindex"])
                 ui.notify(t("settings.saved_pending") if warning else t("settings.saved_immediately"),
                           type="warning" if warning else "positive")
             return True

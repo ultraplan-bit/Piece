@@ -1,0 +1,122 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      run_extended:
+        description: '同时运行规模回归与联网安装验收'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: '1'
+
+jobs:
+  regression:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 安装离线回归依赖
+        run: uv sync --frozen --extra desktop
+      - name: 离线回归与主进程分支覆盖
+        run: |
+          uv run --no-sync coverage erase
+          uv run --no-sync coverage run -m pytest -q --junitxml=.test-results/regression.xml
+      - name: 生成分支覆盖率报告
+        if: always()
+        run: |
+          uv run --no-sync coverage report --skip-covered
+          uv run --no-sync coverage xml
+          uv run --no-sync coverage json
+          uv run --no-sync coverage html
+      - name: 核心路径覆盖率门槛
+        run: |
+          uv run --no-sync coverage report --fail-under=85 \
+            --include=app/runtime.py,indexing/mcp/auth.py,indexing/services/task_service.py,indexing/services/chunk_service.py,indexing/services/processor.py,indexing/services/config_service.py,indexing/services/knowledge_service.py,indexing/services/wiki_service.py
+      - name: 保存回归与覆盖率报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-and-coverage
+          path: .test-results/
+          include-hidden-files: true
+          retention-days: 7
+
+  browser:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - name: 安装浏览器测试依赖
+        run: uv sync --frozen --extra desktop --group browser
+      - name: 确认 Edge 已安装
+        run: test -f '/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
+      - name: 运行全部浏览器验收
+        run: uv run --no-sync pytest --run-browser -m browser -q --durations=15 --junitxml=.test-results/browser.xml --basetemp=.test-results/browser
+      - name: 保存浏览器日志与截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-results
+          path: .test-results/
+          include-hidden-files: true
+          retention-days: 7
+
+  extended:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_extended)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - name: 安装验收依赖
+        run: uv sync --frozen --extra desktop
+      - name: 规模回归
+        run: uv run --no-sync pytest --run-slow -m slow -q --junitxml=.test-results/scale.xml
+      - name: 仓库外安装验收
+        if: ${{ !cancelled() }}
+        run: uv run --no-sync pytest --run-external -m external -q --junitxml=.test-results/install.xml
+      - name: 保存扩展验收结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extended-results
+          path: .test-results/
+          include-hidden-files: true
+          retention-days: 7

@@ -185,7 +185,7 @@ def test_mcp_keywords_and_get_docs_keep_legacy_fields_without_title_overwrite(kn
     with database.get_db_cursor(write=True) as cursor:
         cursor.execute("UPDATE chunks SET doc_title='唯一标题' WHERE id=?", (first,))
     ctx = SimpleNamespace(info=AsyncMock(), warning=AsyncMock(), error=AsyncMock())
-    legacy = asyncio.run(server.get_docs_tool.fn(ctx, '["唯一标题"]', include_images=False))
+    legacy = asyncio.run(server.get_docs_tool(ctx, '["唯一标题"]', include_images=False))
     assert legacy["documents"]["唯一标题"]["chunk_id"] == first
     assert legacy["not_found"] == []
 

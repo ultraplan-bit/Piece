@@ -43,6 +43,7 @@ dist-info/
 
 # 单元测试/覆盖率
 .pytest_cache/
+.test-results/
 .coverage
 .coverage.*
 htmlcov/

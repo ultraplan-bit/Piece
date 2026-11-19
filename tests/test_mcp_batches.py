@@ -68,7 +68,7 @@ async def _client(workspace, token=TEST_INDEX_KEY):
     manager = MCPServerManager()
     try:
         await manager.start([(workspace.server.mcp, 0)], host="127.0.0.1")
-        port = manager._servers[0].servers[0].sockets[0].getsockname()[1]
+        port = manager.servers[0].servers[0].sockets[0].getsockname()[1]
         transport = StreamableHttpTransport(
             f"http://127.0.0.1:{port}/mcp", headers={"Authorization": f"Bearer {token}"},
         )

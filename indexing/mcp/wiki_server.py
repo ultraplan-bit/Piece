@@ -28,7 +28,7 @@ wiki-lint 做只读结构检查，wiki-history/request 读修订与已提交结�
 收 params 对象；wiki-list-recovery、wiki-purge-recovery、wiki-page-add/update 使用顶层参数；wiki-rebuild-index 无参数。
 
 写：高频路径用扁平意图工具 wiki-page-add/update（字段直接作为顶层参数，证据写 "CHUNK_ID:行号" 或 "CHUNK_ID:grep=子串"，
-request_key 自动生成并回传）；一次提交多页或需要字段级控制时用 wiki-apply/delete 批次工具（只收一个 params JSON 对象，
+request_key 可自行指定，省略时自动生成并回传）；一次提交多页或需要字段级控制时用 wiki-apply/delete 批次工具（只收一个 params JSON 对象，
 正式提交必填 request_key，dry_run 只校验不消耗键）。不要给扁平工具套 params。
 
 并发与冲突：更新页面必须带 expected_revision 和 expected_content_hash 两个并发条件，缺一不可，因为 MD 可能被外部编辑器改过；
@@ -37,7 +37,9 @@ request_key 自动生成并回传）；一次提交多页或需要字段级控�
 恢复：更新或删除页面会把被替换的原文件留作本地恢复副本 .wiki-recovery-<operation_id>.bak，回执给出路径。
 用 wiki-list-recovery 只读列出状态（needed 的副本是未提交操作的唯一旧内容，永不清理），确认后用 wiki-purge-recovery 清理，
 默认 dry_run 预览。索引未更新或外部改了 MD 时用 wiki-rebuild-index 从 MD 重建派生索引，绝不从数据库旧正文反写 MD。
-超时或响应丢失用 wiki-request 按 request_key 查原结果，或原键原样重试。
+需要可靠恢复时，扁平工具调用前指定 request_key；省略时自动生成，整个响应丢失后将拿不到键。
+超时或响应丢失先用 wiki-request 按 request_key 查原结果，或原键原样重试，不要换键重复新建。
+失败回执的 data.next_tool 或 data.errors[].next_tool 给出下一步工具与参数；先重读来源/页面再决定，不自动改引文或并发条件。
 
 跨服务：文件/卡片/集合的导入与整理在 piece-index；精确引文用 piece-kb 的 extract-quote 或 piece-index 的 query_chunk_info。
 图谱实体与语义关系是另一套独立数据，在 piece-graph；写页不建图，删页不删实体。
@@ -244,19 +246,22 @@ async def wiki_page_add(
     stance: Union[Stances, str, None] = None,
     reason: Reason | None = None,
     dry_run: bool = False,
+    request_key: wm.Key | None = None,
 ) -> dict:
-    """一步新建一个 Wiki 页面（Markdown 正源）并附带证据；request_key 自动生成并回传。
+    """一步新建一个 Wiki 页面（Markdown 正源）并附带证据；request_key 可选，省略时自动生成并回传。
 
     参数全部是顶层扁平字段，不要套在 params 里。前置：先用 wiki-search 避免重复页面。
     body 是 Markdown 正文，可直接写 [页面标题](piece://wiki/<UUID>) 链接（导航用，不是语义关系）；UUID 从 wiki-get 读取，[[标题]] 不会自动解析。
     evidence 每项 "CHUNK_ID:定位"，用法同图谱的 knowledge-object-add。页面与图谱实体彼此独立，写页不建图；
     页面 kind 与图实体 kind 同名不代表同一条记录。
     提交后用 wiki-get 读回 data.pages[0].id；index_status!=current 时用 wiki-rebuild-index 恢复。
+    需要可靠重试时调用前指定 request_key；丢响应先用 wiki-request 查询。同键只能用于同内容，来源变化后先查原回执。
+    dry_run=true 不写入，也不消耗 request_key。
     """
     values = {"kind": kind, "title": title, "summary": summary or None, "body": body or None, "status": status,
               "aliases": shared.intent_coerce(aliases)}
     return await shared.intent_write(wiki, "page", "add", values, evidence, stance,
-                                     reason=reason, dry_run=dry_run, actor="mcp:wiki")
+                                     reason=reason, dry_run=dry_run, request_key=request_key, actor="mcp:wiki")
 
 
 @mcp.tool(name="wiki-page-update", annotations=shared.INTENT_UPDATE)
@@ -274,17 +279,18 @@ async def wiki_page_update(
     stance: Union[Stances, str, None] = None,
     reason: Reason | None = None,
     dry_run: bool = False,
+    request_key: wm.Key | None = None,
 ) -> dict:
     """增量修订一个 Wiki 页面或只补证据；只填要改的字段。body 是整体替换，不是追加。
 
     前置：id、expected_revision、expected_content_hash 三个都必填，且全部来自 wiki-get 的
     record.id / record.revision / record.content_hash；两个并发条件缺一不可，因为 MD 可能被外部编辑器改过。
     哈希不符返回 CONTENT_CONFLICT、版本不符返回 VERSION_CONFLICT，重读后再决定，不要只换并发条件覆盖。
-    被替换的页面保留本地恢复副本（回执给出路径）。evidence/stance 用法同 wiki-page-add。
+    被替换的页面保留本地恢复副本（回执给出路径）。evidence/stance/request_key 用法同 wiki-page-add。
     """
     values = {"kind": kind, "title": title, "summary": summary, "body": body, "status": status,
               "aliases": shared.intent_coerce(aliases)}
     return await shared.intent_write(wiki, "page", "update", values, evidence, stance,
-                                     reason=reason, dry_run=dry_run, actor="mcp:wiki",
+                                     reason=reason, dry_run=dry_run, request_key=request_key, actor="mcp:wiki",
                                      record_id=id, expected_revision=expected_revision,
                                      expected_content_hash=expected_content_hash)

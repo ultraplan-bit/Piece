@@ -78,6 +78,7 @@ MCP_PORT_OFFSETS: dict[McpService, int] = {"retrieval": 0, "index": 1, "graph": 
 MCP_PORT_ENV: dict[McpService, str] = {
     "index": "PIECE_INDEX_MCP_PORT", "graph": "PIECE_GRAPH_MCP_PORT", "wiki": "PIECE_WIKI_MCP_PORT",
 }
+MCP_LISTENER_FIELDS = ("port", "zotero_enabled", "zotero_port")
 
 
 class McpSettings(BaseModel):
@@ -377,13 +378,13 @@ def get_mcp_api_key(service: McpService = "retrieval") -> str:
     return get_settings().mcp.get_api_key(service)
 
 
-def get_mcp_service_port(service: McpService, base_port: int | None = None) -> int:
+def get_mcp_service_port(service: McpService, base_port: int | None = None, *, config: McpSettings | None = None) -> int:
     """取某个 MCP 服务的监听端口。
 
     检索用基端口，索引/图谱/Wiki 由基端口加固定偏移派生（可被各自的环境变量覆盖），
     Zotero 用独立的 zotero_port 字段。传入 base_port 用于设置页预览尚未保存的基端口。
     """
-    config = get_settings().mcp
+    config = config or get_settings().mcp
     if service == "zotero":
         return config.zotero_port
     base = config.port if base_port is None else base_port
@@ -417,12 +418,12 @@ def get_performance_config() -> PerformanceSettings:
     return get_settings().performance
 
 
-def get_pdf_parser() -> str:
+def get_pdf_parser(config: OcrSettings | None = None) -> str:
     """返回 PDF 解析后端: "paddle" | "vlm" | "mineru" | "local"。
 
     所选后端的凭据填全时才启用，否则回落到本地 PyMuPDF 文本层。
     """
-    ocr = get_ocr_config()
+    ocr = config or get_ocr_config()
     if ocr.provider == "vlm":
         if ocr.vlm_base_url.strip() and ocr.vlm_api_key.strip() and ocr.vlm_model.strip():
             return "vlm"
@@ -444,9 +445,9 @@ def get_parser_max_size() -> Optional[int]:
     return MINERU_MAX_FILE_SIZE if get_pdf_parser() == "mineru" else None
 
 
-def is_mcp_auth_enabled(service: McpService = "retrieval") -> bool:
-    """检查指定 MCP 服务是否启用认证。"""
-    config = get_settings().mcp
+def is_mcp_auth_enabled(service: McpService = "retrieval", *, config: McpSettings | None = None) -> bool:
+    """检查指定 MCP 服务是否启用认证，可沿用单次请求的配置快照。"""
+    config = config or get_settings().mcp
     enabled = config.zotero_auth_enabled if service == "zotero" else config.auth_enabled
     return enabled and bool(config.get_api_key(service))
 

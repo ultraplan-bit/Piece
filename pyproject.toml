@@ -39,20 +39,26 @@ gui = [
 ]
 # MCP 服务及其 FastMCP 框架。
 mcp = [
-    "fastmcp==2.14.4",
+    "fastmcp==3.4.11",
 ]
 # 完整桌面模式：GUI、MCP、托盘和 Windows 原生窗口。
 # 托盘在 macOS 需要 Cocoa 主循环，故不装；原生窗口仅 Windows 走 WebView2，
 # mac / Linux 由 window.py 降级为浏览器 --app 窗口。
 desktop = [
     "nicegui==3.3.1",
-    "fastmcp==2.14.4",
+    "fastmcp==3.4.11",
     "pystray==0.19.5; sys_platform != 'darwin'",
     "pywebview==6.1; sys_platform == 'win32'",
 ]
 
 [dependency-groups]
+browser = [
+    "playwright>=1.55,<2",
+]
 dev = [
+    "coverage>=7.10.6,<8",
+    "httpx2>=2.16.2,<3",
+    "networkx>=3,<4",
     "pyinstaller==6.17.0",
     "pytest==9.1.1",
 ]
@@ -74,3 +80,33 @@ packages = ["app", "indexing", "retrieval"]
 
 [tool.hatch.build.targets.sdist]
 include = ["app", "indexing", "retrieval", "assets/icon.ico", "skills", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests/automated"]
+addopts = "--strict-markers"
+markers = [
+    "slow: 大数据量分页和性能回归，使用 --run-slow 运行",
+    "browser: 真实浏览器验收，使用 --run-browser -m browser 运行",
+    "external: 联网构建和安装验收，使用 --run-external -m external 运行",
+]
+
+[tool.coverage.run]
+branch = true
+data_file = ".test-results/coverage-data/.coverage"
+source = ["app", "indexing", "retrieval"]
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+precision = 2
+skip_empty = true
+
+[tool.coverage.html]
+directory = ".test-results/htmlcov"
+
+[tool.coverage.xml]
+output = ".test-results/coverage.xml"
+
+[tool.coverage.json]
+output = ".test-results/coverage.json"

@@ -45,14 +45,16 @@ supports/contradicts/context 和来源状态。current 只表示来源定位/内
 只读检索不要调用写工具，也不要根据邻接关系创造图中不存在的边。
 
 写：高频路径用扁平意图工具 knowledge_object_add/update、knowledge_relation_add/update（字段直接作为顶层参数，
-证据写 "CHUNK_ID:行号" 或 "CHUNK_ID:grep=子串"，request_key 自动生成并回传）；一次提交多条或需要字段级控制时用
+证据写 "CHUNK_ID:行号" 或 "CHUNK_ID:grep=子串"，request_key 可自行指定，省略时自动生成并回传）；一次提交多条或需要字段级控制时用
 knowledge_apply/delete 批次工具（只收一个 params JSON 对象，正式提交必填 request_key，dry_run 只校验不消耗键）。
 证据归属必须逐条明确：实体引文不能替代关系证据；纯补关系证据用 knowledge-apply，并在对应 evidence 项写 `relation: {id: 关系UUID}`，不要写成 object owner。
 不要给扁平工具套 params。图谱写入是同步本地事务，不调用模型或嵌入，没有 task_id。
 
 写前先读：用 knowledge-search 查重，写后用 knowledge-get 读回；更新一律带 expected_revision，冲突时重读再决定，
 不要盲改。记录删除必须先 dry_run 预览并取得用户确认，返回的 impact_token 要在正式删除时原样带回。删除知识空间也必须先调用 knowledge-space-delete（confirmed=false）预览，再取得用户确认后原样传回 impact_token 并设置 confirmed=true；默认空间不可删除。
-超时或响应丢失用 knowledge-request 按 request_key 查原结果，或原键原样重试，不要换键重复新建。
+需要可靠恢复时，扁平工具调用前指定 request_key；省略时自动生成，整个响应丢失后将拿不到键。
+超时或响应丢失先用 knowledge-request 按 request_key 查原结果，或原键原样重试，不要换键重复新建。
+失败回执的 data.next_tool 给出下一步工具与参数；引文失配/来源变化先重读提取，版本冲突先重读比较，不自动改引文或并发条件。
 
 从文档建图（一次读一段、边读边写，不要先读完整篇再动手）：
 1. 定位来源：piece-index 的 query_files / query_file_info 拿 file_id，list_file_chunks 分页读卡片。先用默认大纲
@@ -354,21 +356,23 @@ async def knowledge_object_add(
     stance: Union[Stances, str, None] = None,
     reason: Reason | None = None,
     dry_run: bool = False,
+    request_key: km.Key | None = None,
 ) -> dict:
-    """一步新增一个图实体并附带证据；不用拼嵌套批次，request_key 自动生成并在 data.request_key 回传。
+    """一步新增一个图实体并附带证据；不用拼嵌套批次，request_key 可选，省略时自动生成并在 data.request_key 回传。
 
     参数全部是顶层扁平字段，不要套在 params 里（params 只属于 knowledge-apply/delete 批次工具）。
     前置：先用 knowledge-search 确认没有同义实体；证据需要已索引的卡片 CHUNK_ID（piece-index 的 query_chunk_info 可读回正文）。
     evidence 每项为 "CHUNK_ID:定位"，定位是行号 "12" / "12-14"、"grep=子串" 或 "re=正则"；
     服务按定位切出正文精确子串，匹配不唯一就拒绝并返回 next_tool，不猜第一条。
     stance 给一个作用于全部证据（默认 supports），给多个按证据顺序逐一对应。
-    用 dry_run=true 预检；提交后用 knowledge-get 读回 data.refs.item.id。
+    用 dry_run=true 预检（不消耗 request_key）；提交后用 knowledge-get 读回 data.refs.item.id。
+    需要可靠重试时调用前指定 request_key；丢响应先用 knowledge-request 查询。同键只能用于同内容，来源变化后先查原回执。
     需要一次提交多条记录或更新已有记录的多字段时改用 knowledge-apply。
     """
     values = {"kind": kind, "title": title, "summary": summary or None, "status": status,
               "aliases": shared.intent_coerce(aliases)}
     return await shared.intent_write(knowledge, "object", "add", values, evidence, stance,
-                                     reason=reason, dry_run=dry_run, actor="mcp:graph")
+                                     reason=reason, dry_run=dry_run, request_key=request_key, actor="mcp:graph")
 
 
 @mcp.tool(name="knowledge-object-update", annotations=shared.INTENT_UPDATE)
@@ -384,17 +388,18 @@ async def knowledge_object_update(
     stance: Union[Stances, str, None] = None,
     reason: Reason | None = None,
     dry_run: bool = False,
+    request_key: km.Key | None = None,
 ) -> dict:
     """增量修订一个图实体；只填要改的字段，省略保留原值，空字符串/数组清空，可同时附证据。
 
     前置：id 与 expected_revision 必须来自 knowledge-get（record.id / record.revision），不要按标题猜。
     必须至少修改一个实体字段；只补证据请用 knowledge-apply，并在 evidence 中明确填写 object owner。
-    版本不符返回 VERSION_CONFLICT，重读后再决定，不要盲改。evidence/stance 用法同 knowledge-object-add。
+    版本不符返回 VERSION_CONFLICT，按 data.next_tool 重读后再决定，不要盲改。evidence/stance/request_key 用法同 knowledge-object-add。
     """
     values = {"kind": kind, "title": title, "summary": summary, "status": status,
               "aliases": shared.intent_coerce(aliases)}
     return await shared.intent_write(knowledge, "object", "update", values, evidence, stance,
-                                     reason=reason, dry_run=dry_run, actor="mcp:graph",
+                                     reason=reason, dry_run=dry_run, request_key=request_key, actor="mcp:graph",
                                      record_id=id, expected_revision=expected_revision)
 
 
@@ -411,19 +416,20 @@ async def knowledge_relation_add(
     stance: Union[Stances, str, None] = None,
     reason: Reason | None = None,
     dry_run: bool = False,
+    request_key: km.Key | None = None,
 ) -> dict:
     """一步在两个已有实体间新增语义关系并附带证据；source/target 是实体 UUID，不接受标题。
 
     前置：两端实体必须已存在（先 knowledge-search 查重，没有再 knowledge-object-add）。
     is_a/part_of/depends_on/applies_to/supports 有方向；contradicts/related_to 对称，related_to 须在 description 说明关联原因。
-    basis 区分原文明示 / 综合 / 推断 / 用户陈述，不是可信度认证。evidence/stance 用法同 knowledge-object-add。
+    basis 区分原文明示 / 综合 / 推断 / 用户陈述，不是可信度认证。evidence/stance/request_key 用法同 knowledge-object-add。
     相同端点、谓词、qualifier 的关系只保留一条：内容一致时返回 action=reused，内容不同时返回 KNOWLEDGE_CONFLICT，
     data.id 是已有关系 UUID，data.existing 是它的可读摘要；要改它就按 data.next_tool 调 knowledge-relation-update。
     """
     values = {"source": source, "predicate": predicate, "target": target, "description": description,
               "basis": basis, "qualifier": qualifier or None, "status": status}
     return await shared.intent_write(knowledge, "relation", "add", values, evidence, stance,
-                                     reason=reason, dry_run=dry_run, actor="mcp:graph")
+                                     reason=reason, dry_run=dry_run, request_key=request_key, actor="mcp:graph")
 
 
 @mcp.tool(name="knowledge-relation-update", annotations=shared.INTENT_UPDATE)
@@ -441,6 +447,7 @@ async def knowledge_relation_update(
     stance: Union[Stances, str, None] = None,
     reason: Reason | None = None,
     dry_run: bool = False,
+    request_key: km.Key | None = None,
 ) -> dict:
     """增量修订一条已有语义关系；只填要改的字段，省略保留原值，qualifier 传空字符串可清空，可同时附关系证据。
 
@@ -448,10 +455,10 @@ async def knowledge_relation_update(
     必须至少修改一个关系字段；只补证据请用 knowledge-apply，并在 evidence 中明确填写 relation owner。
     版本不符返回 VERSION_CONFLICT，重读后再决定。改 description 不改结构：纠正谓词传 predicate，
     纠正方向传 source/target。改成与另一条关系相同的端点、谓词和 qualifier 会返回 KNOWLEDGE_CONFLICT。
-    evidence/stance 用法同 knowledge-object-add。
+    evidence/stance/request_key 用法同 knowledge-object-add。
     """
     values = {"source": source, "predicate": predicate, "target": target, "description": description,
               "basis": basis, "qualifier": qualifier, "status": status}
     return await shared.intent_write(knowledge, "relation", "update", values, evidence, stance,
-                                     reason=reason, dry_run=dry_run, actor="mcp:graph",
+                                     reason=reason, dry_run=dry_run, request_key=request_key, actor="mcp:graph",
                                      record_id=id, expected_revision=expected_revision)

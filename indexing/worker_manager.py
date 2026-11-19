@@ -6,9 +6,7 @@ import threading
 from typing import Optional
 
 from indexing.services import task_service
-from indexing.services.parser_helper import start_parser_helpers, stop_parser_helpers
 from indexing.services.processor import TaskProcessor, mark_file_failure
-from indexing.settings import get_performance_config
 from indexing.utils import run_sync
 
 logger = logging.getLogger(__name__)
@@ -46,7 +44,6 @@ class WorkerManager:
             from indexing.services.file_service import recover_file_storage
             await run_sync(recover_file_storage)
             await run_sync(recover_working_files)
-            start_parser_helpers(get_performance_config().worker_concurrency)
             self._stop_event = threading.Event()
             self._task = asyncio.create_task(
                 TaskProcessor().run(self._stop_event), name="PieceWorker",
@@ -58,24 +55,23 @@ class WorkerManager:
         if not task.cancelled() and task.exception() is not None:
             logger.error("[Worker] 任务编排异常退出", exc_info=task.exception())
 
+    def request_stop(self) -> None:
+        """仅发出停止领取/推进任务的信号，供 Runtime 在等待其他资源前调用。"""
+        self._stop_event.set()
+
     async def stop(self) -> None:
-        """停止领任务；取消等待并排空同步写入后，调用方才可关闭数据库。"""
+        """停止领任务并排空在途协程/同步操作；不关闭 Runtime 的共享解析资源。"""
         async with self._lock:
             if self._task is None:
-                await run_sync(stop_parser_helpers)
                 return
-            self._stop_event.set()
-            helpers = asyncio.create_task(run_sync(stop_parser_helpers))
+            self.request_stop()
             done, _ = await asyncio.wait({self._task}, timeout=self.shutdown_timeout)
             if not done:
                 logger.warning("[Worker] 正在取消在途任务并等待同步操作收尾")
                 self._task.cancel()
             # ponytail: OCR/VLM 沿用同步客户端，退出须等当前 HTTP 请求结束；
             # 如需秒级退出，再改 AsyncClient，不能遗留仍在使用资源的线程。
-            results = await asyncio.gather(self._task, helpers, return_exceptions=True)
-            # 编排任务取消是预期行为；helper 回收失败则不能向 Runtime 宣称已停止。
-            if isinstance(results[1], BaseException):
-                raise results[1]
+            await asyncio.gather(self._task, return_exceptions=True)
             await run_sync(self._mark_processing_failed, "应用关闭，索引任务已中断")
             self._task = None
             logger.info("[Worker] Worker 已停止")

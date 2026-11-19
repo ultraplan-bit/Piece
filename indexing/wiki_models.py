@@ -6,7 +6,7 @@ from pydantic import Field, model_validator
 
 from .knowledge_models import (
     Aliases, Input, Key, Limit, Offset, PositiveInt, Ref, ShortText, SourceInput,
-    Status, Target, Text, Title, Uuid, ReferencesInput, RequestInput, nonblank,
+    Status, Target, Text, Title, Uuid, ReferencesInput, nonblank,
 )
 from pydantic import AfterValidator
 
@@ -104,6 +104,10 @@ class HistoryInput(Input):
     id: Uuid
     limit: Limit = 50
     offset: Offset = 0
+
+
+class RequestInput(Input):
+    request_key: Key
 
 
 class DeleteInput(Input):

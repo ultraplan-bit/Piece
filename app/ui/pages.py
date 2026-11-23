@@ -222,8 +222,8 @@ def register_pages(port: int = 8689):
             state["navigation_hidden"] = navigation_splitter.value >= MIN_NAVIGATION_WIDTH
             adapt_navigation()
 
-        def focus_catalog():
-            ui.run_javascript('''const catalog = document.querySelector('[data-catalog]');
+        async def focus_catalog():
+            await ui.run_javascript('''const catalog = document.querySelector('[data-catalog]');
                 const target = catalog?.querySelector('[data-catalog-row][tabindex="0"]') || catalog?.querySelector('input');
                 target?.focus({preventScroll: true});
                 target?.scrollIntoView({block: 'nearest'});''')

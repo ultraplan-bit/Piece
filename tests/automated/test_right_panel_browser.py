@@ -103,7 +103,7 @@ def test_right_panel_layout(gui_service):
                 expect(before).to_have_css("width", f"{width}px")
                 focus.click()
                 expect(before).to_have_css("width", f"{width}px")
-                assert page.evaluate("!!document.activeElement.closest('[data-catalog]')")
+                expect(page.locator("[data-catalog] :focus")).to_have_count(1, timeout=5000)
                 page.locator(".workspace-primary").get_by_role("button", name=other, exact=True).click()
                 expect(before).to_have_css("width", f"{other_width}px")
                 page.locator(".workspace-primary").get_by_role("button", name=view, exact=True).click()

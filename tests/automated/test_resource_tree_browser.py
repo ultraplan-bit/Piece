@@ -70,7 +70,7 @@ def test_resource_tree_inline_collection_actions(gui_service):
             expect(page.get_by_role("menuitem", name=t("collections.delete"), exact=True)).to_be_disabled()
             page.keyboard.press("Escape")
             child_row.click(button="right")
-            page.get_by_role("menuitem", name=t("collections.delete"), exact=True).click()
+            page.get_by_role("menuitem", name=t("collections.delete"), exact=True, disabled=False).click()
             dialog = page.get_by_role("dialog")
             expect(dialog).to_contain_text("不会删除文档或原件")
             dialog.get_by_role("button", name=t("confirm_dialog.btn_delete"), exact=True).click()

@@ -82,7 +82,9 @@ jobs:
       - name: 确认 Edge 已安装
         run: test -f '/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
       - name: 运行全部浏览器验收
-        run: uv run --no-sync pytest --run-browser -m browser -q --durations=15 --junitxml=.test-results/browser.xml --basetemp=.test-results/browser
+        run: |
+          mkdir -p .test-results
+          uv run --no-sync pytest --run-browser -m browser -q --durations=15 --junitxml=.test-results/browser.xml --basetemp=.test-results/browser
       - name: 保存浏览器日志与截图
         if: always()
         uses: actions/upload-artifact@v4

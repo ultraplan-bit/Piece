@@ -215,6 +215,44 @@ THEME_CSS = '''
     .reader-view-switch { border: 1px solid var(--border-color); border-radius: 3px; padding: 1px; flex-shrink: 0; }
     .reader-view-switch .q-btn, .reader-source-toggle.q-btn { min-height: 25px; padding: 2px 8px; border-radius: 1px; font-size: 12px; }
     .mode-active { background: var(--bg-hover); color: var(--text-primary); font-weight: 600; }
+    .cloud-sync-sidebar { border-right: 1px solid var(--border-color); }
+    .cloud-sync-sidebar-header { min-height: var(--toolbar-height); padding: 0 12px; gap: 8px; border-bottom: 1px solid var(--border-color); }
+    .cloud-sync-header-icon { color: var(--text-accent); font-size: 18px; }
+    .cloud-sync-content { min-height: 0; }
+    .cloud-sync-overview { padding: 14px; gap: 12px; }
+    .cloud-sync-status { padding: 12px; gap: 8px; border: 1px solid var(--border-color); border-radius: var(--control-radius); background: var(--bg-content); }
+    .cloud-sync-status-heading { min-height: 24px; }
+    .cloud-sync-status-icon { font-size: 19px; }
+    .cloud-sync-connected, .cloud-sync-result-success, .cloud-sync-log-success,
+    .cloud-sync-log-transfer { color: var(--text-accent); }
+    .cloud-sync-config-hint { line-height: 1.6; }
+    .cloud-sync-settings-link { min-height: 32px; color: var(--text-accent); }
+    .cloud-sync-divider { margin: 0; background: var(--border-color); }
+    .cloud-sync-last-sync { padding: 2px 1px; }
+    .cloud-sync-subtle-icon { margin-top: 1px; color: var(--text-muted); font-size: 16px; }
+    .cloud-sync-stage { padding: 10px; border: 1px solid var(--border-color); border-radius: var(--control-radius); background: var(--bg-content); }
+    .cloud-sync-stage-spinner { margin-top: 2px; color: var(--text-accent); }
+    .cloud-sync-stage-message { max-width: 100%; overflow-wrap: anywhere; line-height: 1.5; }
+    .cloud-sync-result { padding: 12px; border-left: 2px solid var(--text-accent); border-radius: 0 var(--control-radius) var(--control-radius) 0; background: var(--bg-content); }
+    .cloud-sync-result-icon { flex: 0 0 18px; font-size: 18px; }
+    .cloud-sync-result-error, .cloud-sync-log-error { color: var(--text-danger); }
+    .cloud-sync-result-time { margin-left: auto; font-variant-numeric: tabular-nums; }
+    .cloud-sync-result-message { overflow-wrap: anywhere; line-height: 1.55; }
+    .cloud-sync-strategy { padding: 12px; border: 1px solid var(--border-color); border-radius: var(--control-radius); background: var(--bg-panel); }
+    .cloud-sync-strategy .q-label { line-height: 1.6; }
+    .cloud-sync-action-bar { padding: 12px; border-top: 1px solid var(--border-color); background: var(--bg-content); }
+    .cloud-sync-primary.q-btn { min-height: 40px; }
+    .cloud-sync-log-pane { min-width: 0; }
+    .cloud-sync-log-header { min-height: var(--toolbar-height); padding: 0 16px; border-bottom: 1px solid var(--border-color); }
+    .cloud-sync-log-scroll { min-height: 0; }
+    .cloud-sync-log-list { padding: 8px 16px; }
+    .cloud-sync-log-row { min-height: 54px; padding: 12px 8px; border-bottom: 1px solid var(--border-color); }
+    .cloud-sync-log-row:hover { background: var(--bg-hover); }
+    .cloud-sync-log-icon { flex: 0 0 16px; margin-top: 2px; }
+    .cloud-sync-log-info { color: var(--text-muted); }
+    .cloud-sync-log-message { line-height: 1.6; overflow-wrap: anywhere; }
+    .cloud-sync-log-time { font-variant-numeric: tabular-nums; }
+    .cloud-sync-empty { padding: 32px; color: var(--text-muted); }
     .file-info-drawer {
         position: absolute;
         top: var(--toolbar-height);
@@ -384,15 +422,97 @@ THEME_CSS = '''
     .workspace-search .q-field__native { font-size: 13px; }
     .workspace-document { padding: 28px clamp(16px, 4vw, 56px); }
 
-    .zotero-item { border-bottom: 1px solid var(--border-color); }
+    .zotero-workbench { container-type: inline-size; }
+    .zotero-workbench .q-btn, .zotero-workbench .q-field__control { border-radius: var(--control-radius); }
+    .zotero-library-header { padding: 0 12px; gap: 6px; }
+    .zotero-library-icon, .zotero-detail-icon { color: var(--text-muted); font-size: 18px; }
+    .zotero-connection {
+        flex-shrink: 0;
+        padding: 10px 14px 11px;
+        gap: 4px;
+        background: var(--bg-content);
+        border-bottom: 1px solid var(--border-color);
+    }
+    .zotero-connection-top { gap: 7px; min-width: 0; }
+    .zotero-connection-icon { flex: 0 0 16px; margin-top: 1px; font-size: 16px; color: var(--text-accent); }
+    .zotero-library-type { margin-left: auto; white-space: nowrap; }
+    .zotero-write-status { line-height: 1.45; overflow-wrap: anywhere; }
+    .zotero-server-id { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .zotero-error:not(:empty) { margin-top: 4px; padding: 7px 9px; background: var(--bg-panel); border-radius: var(--control-radius); }
+    .zotero-filters { flex-shrink: 0; padding: 12px; gap: 8px; border-bottom: 1px solid var(--border-color); }
+    .zotero-search-row .q-field__control { background: var(--bg-content); }
+    .zotero-search-button.q-btn { min-height: 38px; padding: 4px 10px; }
+    .zotero-filters .q-field__control { min-height: 38px; }
+    .zotero-filters .q-field__native { min-width: 0; font-size: 13px; }
+    .zotero-filters > .q-label { padding-top: 1px; line-height: 1.5; }
+    .zotero-results-header { min-height: 40px; border-bottom: 1px solid var(--border-color); }
+    .zotero-results-header .q-checkbox { min-height: 36px; }
+    .zotero-item {
+        min-height: 66px;
+        padding: 9px 12px !important;
+        align-items: center !important;
+        border-left: 2px solid transparent;
+        border-bottom: 1px solid var(--border-color);
+        transition: background-color 120ms ease, border-color 120ms ease;
+    }
     .zotero-item:hover { background: var(--bg-hover); }
-    .zotero-item-active { background: var(--bg-selected-inactive); }
-    .zotero-item .q-btn__content { justify-content: flex-start; }
-    .zotero-tabs { border-bottom: 1px solid var(--border-color); padding-bottom: 4px; }
-    .zotero-tab-active { color: var(--text-primary); font-weight: 600; text-decoration: underline; text-underline-offset: 6px; }
+    .zotero-item-active { background: var(--bg-selected); border-left-color: var(--text-accent); }
+    .zotero-item .q-checkbox { align-self: center; min-width: 32px; min-height: 40px; }
+    .zotero-item .q-btn { min-height: 44px; }
+    .zotero-item .q-btn__content { width: 100%; justify-content: flex-start; }
+    .zotero-item-title { font-weight: 500; }
+    .zotero-results > .q-label { padding: 20px 16px; line-height: 1.65; }
+    .zotero-results > .q-row:last-child { min-height: 48px; border-top: 1px solid var(--border-color); }
+    .zotero-selection-bar { padding: 9px 12px 10px; border-top: 1px solid var(--border-color); background: var(--bg-content); }
+    .zotero-selection-count { padding: 0 2px; font-variant-numeric: tabular-nums; }
+    .zotero-selection-actions { flex-wrap: nowrap; }
+    .zotero-selection-actions .q-btn { min-height: 34px; }
+    .zotero-import-action { flex: 1; background: var(--text-accent); color: var(--text-primary) !important; }
+    body.body--dark .zotero-import-action:not(.q-btn--disabled) { background: var(--bg-hover); }
+    .zotero-import-action.q-btn--disabled { background: var(--bg-hover) !important; color: var(--text-muted) !important; }
+    .zotero-detail-header { padding: 0 16px; gap: 12px; }
+    .zotero-detail-hint { white-space: nowrap; }
+    .zotero-paper { max-width: 980px; padding: 32px clamp(24px, 4cqw, 56px) 64px; }
+    .zotero-record { gap: 0; overflow-wrap: anywhere; }
+    .zotero-record-title { font-size: 27px; font-weight: 600; line-height: 1.42; letter-spacing: -0.02em; text-wrap: pretty; }
+    .zotero-record-meta { margin-top: 10px; }
+    .zotero-type-chip { max-width: 100%; padding: 3px 8px; border-radius: var(--control-radius); background: var(--bg-hover); color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+    .zotero-record-actions { margin-top: 18px; margin-bottom: 20px; }
+    .zotero-record-actions .q-btn { min-height: 34px; padding: 4px 10px; color: var(--text-secondary); }
+    .zotero-record-actions .q-btn--outline { color: var(--text-primary); background: var(--bg-hover); }
+    .zotero-record-actions a { display: inline-flex; min-height: 34px; align-items: center; padding: 4px 10px; border-radius: var(--control-radius); font-size: 13px; }
+    .zotero-tabs { flex-wrap: nowrap; gap: 4px; margin: 0 0 20px; border-bottom: 1px solid var(--border-color); }
+    .zotero-tabs .q-btn { position: relative; min-height: 42px; padding: 7px 12px; border-radius: var(--control-radius) var(--control-radius) 0 0; color: var(--text-muted); }
+    .zotero-tab-active { color: var(--text-primary) !important; font-weight: 600; background: var(--bg-hover); }
+    .zotero-tab-active:after { position: absolute; right: 10px; bottom: -1px; left: 10px; height: 2px; background: var(--text-accent); content: ""; }
+    .zotero-record > .q-row + .q-row { margin-top: 2px; }
+    .zotero-record > .q-label { max-width: 100%; overflow-wrap: anywhere; }
+    .zotero-authors { margin-bottom: 20px; font-size: 15px; line-height: 1.65; }
+    .zotero-field-heading { font-weight: 600; }
+    .zotero-abstract, .zotero-reading-block { margin: 0 0 20px; padding: 16px 18px; border-left: 2px solid var(--border-color); background: var(--bg-panel); }
+    .zotero-reading-copy { line-height: 1.8; overflow-wrap: anywhere; }
+    .zotero-record-fields { margin-top: 8px; border-top: 1px solid var(--border-color); }
+    .zotero-field { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); gap: 20px; padding: 11px 0; border-bottom: 1px solid var(--border-color); }
+    .zotero-field-key { padding-top: 2px; overflow-wrap: anywhere; }
+    .zotero-field-value { line-height: 1.65; overflow-wrap: anywhere; }
+    .zotero-child { min-height: 54px; padding: 10px 0; border-bottom: 1px solid var(--border-color); }
+    .zotero-child .q-btn { min-height: 36px; }
+    .zotero-empty { padding: 64px 24px; gap: 12px; text-align: center; }
+    .zotero-empty-icon { margin-bottom: 4px; color: var(--text-muted); font-size: 34px; }
+    .zotero-empty-title { font-size: 16px; font-weight: 500; color: var(--text-secondary); }
+    .zotero-empty-hint { max-width: 340px; line-height: 1.75; }
+    @container (max-width: 500px) {
+        .zotero-detail-header { padding: 0 10px; gap: 6px; }
+        .zotero-detail-hint { max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+        .zotero-paper { padding: 24px 20px 48px; }
+        .zotero-record-title { font-size: 23px; }
+        .zotero-tabs { overflow-x: auto; }
+        .zotero-tabs .q-btn { flex-shrink: 0; padding-right: 9px; padding-left: 9px; }
+        .zotero-field { grid-template-columns: minmax(0, 1fr); gap: 5px; }
+        .zotero-field-key { font-weight: 500; }
+    }
     .zotero-child { border-bottom: 1px solid var(--border-color); }
     [data-zotero-browser] .library-footer { height: auto; align-items: stretch; }
-    [data-zotero-browser] .q-btn, [data-zotero-detail] .q-btn { border-radius: var(--control-radius); }
 
     /* 设置沿用桌面工作区的密度，分组靠对齐与分隔，不使用嵌套卡片。 */
     .settings-workspace { container-type: inline-size; }
@@ -734,27 +854,38 @@ THEME_CSS = '''
         border-color: rgba(120, 130, 140, 0.35);
     }
 
-    /* 图谱标签：画布铺满整栏。画布绝对定位后不占布局高度，整栏高度都归它；
-       范围控件收成一条工具条、关系表格收进底部抽屉，都不再挤压画布。
-       这里必须覆盖 NiceGUI 给 .nicegui-echart 的默认 16rem 高度。 */
+    /* 图谱右栏与阅读器共用主题、控件和留白；局部样式不影响 Wiki。 */
+    .graph-workbench { container-type: inline-size; }
+    .graph-header { gap: 8px; }
+    .graph-space-picker { flex: 0 1 220px; min-width: 80px; }
+    .graph-space-picker .q-field__control, .graph-space-picker .q-field__marginal {
+        height: var(--control-height); min-height: var(--control-height);
+    }
+    .graph-space-picker .q-field__native { min-height: var(--control-height); padding: 0; font-size: 13px; font-weight: 500; }
+    .graph-space-picker .q-field__native > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .graph-space-actions.q-btn { width: 30px; padding: 0; flex-shrink: 0; color: var(--text-muted); }
+    .graph-workbench .q-field--outlined .q-field__control { border-radius: var(--control-radius); }
+    .graph-workbench .q-field--outlined .q-field__control:before { border-color: var(--border-color); }
+    .graph-workbench .q-btn { font-size: 13px; border-radius: var(--control-radius); }
+    .graph-workbench .q-btn .q-icon { font-size: 18px; }
     .graph-toolbar {
         flex-shrink: 0;
+        flex-wrap: wrap;
+        gap: 8px 12px;
+        padding: 10px 12px;
         background: var(--bg-panel);
         border-bottom: 1px solid var(--border-color);
     }
-    .graph-space-picker { width: 156px; }
-    /* 知识空间同时显示字段标签和所选值，不能套用普通按钮的 30px 高度。 */
-    .graph-space-picker .q-field__control { height: 44px; min-height: 44px; }
-    .graph-space-picker .q-field__native { font-size: 13px; }
     .graph-mode-switch {
         margin-left: auto;
+        flex-shrink: 0;
         padding: 2px;
         gap: 2px;
         border: 1px solid var(--border-color);
         border-radius: var(--control-radius);
         background: var(--bg-content);
     }
-    .graph-mode-switch .q-btn {
+    .graph-workbench .graph-mode-switch .q-btn {
         min-height: 26px;
         padding: 3px 9px;
         border-radius: 3px;
@@ -762,9 +893,14 @@ THEME_CSS = '''
         font-size: 12px;
     }
     .graph-mode-switch .q-btn.mode-active { background: var(--bg-hover); color: var(--text-primary); }
-    /* 筛选控件要有最小宽度：多选框空值时没有值可撑宽，只给 max-width 会被挤成一条窄缝。 */
-    .graph-toolbar .graph-control { min-width: 128px; max-width: 168px; }
-    .graph-stage { position: relative; }
+    .graph-scope-action { color: var(--text-secondary); flex-shrink: 0; }
+    .graph-filters { flex: 1 1 360px; min-width: 0; gap: 8px; }
+    .graph-toolbar .graph-control { flex: 1 1 104px; min-width: 104px; }
+    .graph-control .q-field__control { background: var(--bg-content); }
+    .graph-control .q-field__native { font-size: 12px; overflow-wrap: anywhere; }
+    .graph-view-actions { margin-left: auto; flex-shrink: 0; gap: 2px; }
+    .graph-view-actions .q-btn, .graph-canvas-tools .q-btn { min-width: 30px; min-height: 30px; padding: 4px; color: var(--text-muted); }
+    .graph-stage { position: relative; background: var(--bg-content); }
     .graph-canvas {
         position: absolute !important;
         inset: 0 !important;
@@ -778,6 +914,22 @@ THEME_CSS = '''
         right: 12px;
         z-index: 1;
         pointer-events: none;
+        max-width: calc(100% - 24px);
+        padding: 6px 8px;
+        border-radius: var(--control-radius);
+        background: var(--bg-content);
+    }
+    .graph-canvas-tools {
+        position: absolute;
+        bottom: 16px;
+        right: 16px;
+        z-index: 1;
+        gap: 2px;
+        padding: 3px;
+        border: 1px solid var(--border-color);
+        border-radius: var(--control-radius);
+        background: var(--bg-content);
+        box-shadow: var(--shadow-card);
     }
     .graph-drawer {
         flex-shrink: 0;
@@ -787,7 +939,53 @@ THEME_CSS = '''
         padding: 0 !important;
         gap: 0 !important;
     }
-    .graph-drawer .q-item { min-height: 36px; }
+    .graph-drawer > .q-expansion-item__container > .q-item { min-height: 40px; padding: 8px 16px; color: var(--text-secondary); font-size: 13px; }
+    .graph-drawer .q-item__section--avatar { min-width: 28px; }
+    .graph-drawer .q-item .q-icon { font-size: 18px; }
+    .graph-paper { max-width: 900px; padding: 28px clamp(20px, 4cqw, 48px) 48px; gap: 28px; }
+    .graph-detail { gap: 0; color: var(--text-primary); overflow-wrap: anywhere; }
+    .graph-detail > *, .graph-detail .nicegui-row, .graph-detail .nicegui-column,
+    .graph-detail .knowledge-evidence > * { min-width: 0; max-width: 100%; }
+    .graph-detail .break-words { overflow-wrap: anywhere; }
+    .graph-detail-meta { gap: 8px; margin-bottom: 16px; }
+    .graph-detail .knowledge-metadata { color: var(--text-muted); border: 0; padding: 0; }
+    .graph-kind-label { padding: 3px 8px; background: var(--bg-hover); border-radius: var(--control-radius); font-size: 12px; color: var(--text-secondary); }
+    .graph-detail-actions .q-btn { color: var(--text-muted); min-height: 30px; }
+    .graph-detail-title { font-size: 26px; line-height: 1.45; font-weight: 600; letter-spacing: -0.02em; }
+    .graph-aliases { margin-top: 8px; line-height: 1.6; }
+    .graph-summary { margin-top: 16px; font-size: 15px; line-height: 1.85; white-space: pre-wrap; color: var(--text-secondary); }
+    .graph-detail-primary { margin: 20px 0 28px; }
+    .graph-detail-primary .q-btn { min-height: 34px; padding: 4px 12px; color: var(--text-secondary); }
+    .graph-detail-primary .graph-primary-action { background: var(--bg-hover); color: var(--text-primary); }
+    .graph-section { border-top: 1px solid var(--border-color); padding: 0 !important; gap: 0; }
+    .graph-relations > .q-expansion-item__container > .q-item { padding: 14px 0; min-height: 48px; font-size: 13px; font-weight: 500; }
+    .graph-relations .q-item__section--avatar { min-width: 28px; color: var(--text-muted); }
+    .graph-relations .q-item .q-icon { font-size: 18px; }
+    .graph-relations .q-expansion-item__content { padding-bottom: 16px; }
+    .graph-section-heading { padding: 16px 0 12px; font-size: 13px; font-weight: 500; }
+    .graph-section-heading > .q-icon { color: var(--text-muted); }
+    .graph-evidence-empty { width: 100%; padding: 16px; border-radius: var(--control-radius); background: var(--bg-panel); }
+    .graph-detail .knowledge-evidence { margin-bottom: 12px; padding: 16px; background: var(--bg-panel); line-height: 1.7; }
+    .graph-relation-path { margin: 20px 0 16px; padding: 8px; background: var(--bg-panel); border-radius: var(--control-radius); }
+    .graph-relation-path ~ .theme-text-secondary { margin-bottom: 12px; }
+    .graph-edge-row .q-btn__content { overflow-wrap: anywhere; }
+    .graph-review { padding: 0 !important; border-top: 1px solid var(--border-color); color: var(--text-muted); }
+    .graph-review > .q-expansion-item__container > .q-item { padding: 12px 0; min-height: 44px; font-size: 12px; }
+    .graph-review .q-item__section--avatar { min-width: 28px; }
+    .graph-review .q-icon { font-size: 18px; }
+    .graph-review .q-expansion-item__content { padding: 4px 0 16px; }
+    .graph-empty { padding: 48px 24px; gap: 12px; text-align: center; color: var(--text-muted); }
+    .graph-empty-icon { font-size: 32px; margin-bottom: 4px; }
+    .graph-empty-title { font-size: 16px; font-weight: 500; color: var(--text-secondary); }
+    .graph-empty-hint { max-width: 360px; font-size: 13px; line-height: 1.8; }
+    .graph-empty .q-btn { margin-top: 8px; color: var(--text-secondary); }
+    @container (max-width: 540px) {
+        .graph-header { height: auto; min-height: var(--toolbar-height); flex-wrap: wrap; padding-top: 6px; padding-bottom: 6px; }
+        .graph-space-picker { flex: 1 1 120px; }
+        .graph-filters { order: 3; flex-basis: 100%; }
+        .graph-paper { padding: 24px 20px 40px; }
+        .graph-detail-title { font-size: 23px; }
+    }
     /* 图谱标签里的「被资料引用」面板：与表格抽屉同风格，但保留自身内边距。 */
     .graph-references {
         flex-shrink: 0;

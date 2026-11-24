@@ -223,11 +223,9 @@ def sync_status():
 
 def run_sync_job(confirmed=False):
     from .sync_service import get_sync_service, start_sync
-    if not confirmed:
-        raise BusinessError("CONFIRMATION_REQUIRED", "同步会上传文档，日常同步还会删除云端对应文件，需要明确确认")
     if not get_sync_service().is_enabled():
         raise BusinessError("SYNC_DISABLED", "请先配置并启用 WebDAV")
-    if not start_sync():
+    if not start_sync(confirmed=confirmed):
         raise BusinessError("SYNC_BUSY", "已有同步任务或服务正在退出")
     return {"status": "accepted", "message": "同步已受理，请通过 sync status 查询结果"}
 

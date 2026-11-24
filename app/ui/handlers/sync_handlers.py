@@ -14,6 +14,8 @@ from typing import Optional
 
 from nicegui import ui
 
+from app.ui.components import confirm_dialog
+from indexing.services.errors import BusinessError
 from indexing.services.sync_service import get_sync_service, start_sync
 from app.i18n import t
 
@@ -98,12 +100,26 @@ class SyncHandlers:
         return changed
 
     def do_sync(self):
-        """启动一次后台同步"""
+        """说明同步影响并取得用户确认后启动。"""
         if not self.is_enabled():
             ui.notify(t("cloud_sync.not_configured"), type="warning")
             return
 
-        if not start_sync(start_message=t("cloud_sync.sync_started")):
+        confirm_dialog(
+            title=t("cloud_sync.confirm_title"),
+            message=t("cloud_sync.confirm_message"),
+            on_confirm=self._start_confirmed_sync,
+            confirm_text=t("cloud_sync.confirm_start"),
+            danger=True,
+        )
+
+    def _start_confirmed_sync(self):
+        try:
+            started = start_sync(start_message=t("cloud_sync.sync_started"), confirmed=True)
+        except BusinessError as exc:
+            ui.notify(str(exc), type="negative")
+            return
+        if not started:
             ui.notify(t("cloud_sync.already_syncing"), type="warning")
             return
 

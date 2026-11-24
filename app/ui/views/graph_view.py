@@ -663,10 +663,10 @@ class GraphWorkbench(WorkbenchBase):
     def render_right(self, controls=None):
         if not self._graphs_loaded and not self._graphs_loading:
             ui.timer(0.1, self.load_graphs, once=True)
-        with ui.column().classes("w-full h-full flex-1 min-h-0 min-w-0 theme-content gap-0"):
+        with ui.column().classes("graph-workbench w-full h-full flex-1 min-h-0 min-w-0 theme-content gap-0"):
             @ui.refreshable
             def modes():
-                with ui.row().classes("w-full items-center library-heading workspace-toolbar overflow-x-auto"):
+                with ui.row().classes("graph-header w-full items-center library-heading workspace-toolbar"):
                     if controls:
                         controls()
                     async def choose_graph(event):
@@ -674,23 +674,23 @@ class GraphWorkbench(WorkbenchBase):
                         await self.select_graph(event.value)
 
                     self._space_picker = ui.select({item["id"]: item["name"] for item in self.graphs}, value=self.graph_id,
-                                                   label=self.text("graph_space"), on_change=choose_graph)\
-                        .props("dense outlined").classes("graph-space-picker shrink-0")
-                    ui.button(self.text("create_graph"), icon="add", color=None, on_click=self.create_graph_dialog)\
-                        .props("flat dense no-caps")
-                    ui.button(self.text("rename_graph"), icon="edit", color=None, on_click=self.rename_graph_dialog)\
-                        .props("flat dense no-caps").set_enabled(bool(self.graph_id))
-                    current_graph = next((item for item in self.graphs if item["id"] == self.graph_id), None)
-                    if current_graph and not current_graph.get("is_default"):
-                        ui.button(self.text("delete_graph"), icon="delete", on_click=self.delete_graph_dialog)\
-                            .props("flat dense no-caps color=negative")
-                    if self.graph_id:
-                        with ui.button(self.text("graph_exchange"), icon="more_vert", color=None).props("flat dense no-caps"):
-                            with ui.menu():
+                                                   on_change=choose_graph)\
+                        .props(f'dense outlined options-dense aria-label="{self.text("graph_space")}"')\
+                        .classes("graph-space-picker").tooltip(self.text("graph_space"))
+                    with ui.button(icon="more_horiz", color=None).props(
+                            f'flat dense aria-label="{self.text("space_actions")}"').classes("graph-space-actions").tooltip(self.text("space_actions")):
+                        with ui.menu():
+                            ui.menu_item(self.text("create_graph"), on_click=self.create_graph_dialog)
+                            ui.menu_item(self.text("rename_graph"), on_click=self.rename_graph_dialog).set_enabled(bool(self.graph_id))
+                            if self.graph_id:
+                                ui.separator()
                                 ui.menu_item(self.text("export_graph_json"), on_click=partial(self.export_graph, "json"))
                                 ui.menu_item(self.text("export_graphml"), on_click=partial(self.export_graph, "graphml"))
-                                ui.separator()
                                 ui.menu_item(self.text("import_graph"), on_click=self.import_graph_dialog)
+                            current_graph = next((item for item in self.graphs if item["id"] == self.graph_id), None)
+                            if current_graph and not current_graph.get("is_default"):
+                                ui.separator()
+                                ui.menu_item(self.text("delete_graph"), on_click=self.delete_graph_dialog).classes("theme-danger")
                     self.query_input = self.query_input if self.query_input and not self.query_input.is_deleted else None
                     self.filter_controls = [item for item in self.filter_controls if not item.is_deleted]
                     with ui.row().classes("graph-mode-switch items-center flex-nowrap").props(
@@ -715,13 +715,9 @@ class GraphWorkbench(WorkbenchBase):
                     # 图谱标签只显示图与关系表：实体详情在「实体」标签读，不在图下方再叠一份。
                     self.refresh_detail = lambda: None
                     return
-                with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(detail=e.vertical_position)).classes("w-full flex-1") as area:
+                with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(detail=e.vertical_position)).classes("w-full flex-1 scroll-flush") as area:
                     self._scroll_areas["detail"] = area
-                    with ui.column().classes("w-full min-w-0 p-5 gap-4"):
-                        if self.mode == "objects":
-                            with ui.expansion(self.text("review"), icon="fact_check", value=self.review_open,
-                                              on_value_change=lambda e: setattr(self, "review_open", e.value)).classes("w-full"):
-                                self.render_review()
+                    with ui.column().classes("graph-paper w-full min-w-0 mx-auto"):
                         if self.references_data is not None:
                             self.render_references()
 
@@ -730,6 +726,9 @@ class GraphWorkbench(WorkbenchBase):
                             self.render_detail()
                         self.refresh_detail = detail.refresh
                         detail()
+                        with ui.expansion(self.text("review"), icon="fact_check", value=self.review_open,
+                                          on_value_change=lambda e: setattr(self, "review_open", e.value)).classes("graph-review w-full"):
+                            self.render_review()
             self.refresh_workspace = workspace.refresh
             workspace()
 
@@ -842,42 +841,36 @@ class GraphWorkbench(WorkbenchBase):
                 await self.select("object", data["id"], reveal=True)
 
     def render_graph(self):
-        # 范围与视图控件收成一条工具条；画布吃掉整栏剩余高度，控件不再挤压图。
-        with ui.row().classes("graph-toolbar w-full items-center gap-1 px-3 py-1 flex-nowrap overflow-x-auto"):
-            if self.overview:
-                ui.button(self.text("local_graph"), on_click=self.show_local_graph).props("flat dense no-caps shrink-0")
+        # 筛选决定显示什么；画布操作独立成组，窄栏自然换行。
+        with ui.row().classes("graph-toolbar w-full items-center"):
+            ui.button(self.text("local_graph" if self.overview else "global_graph"), icon="public" if not self.overview else "hub",
+                      color=None, on_click=self.show_local_graph if self.overview else self.show_global_graph)\
+                .props("flat dense no-caps").classes("graph-scope-action")
+            with ui.row().classes("graph-filters items-center"):
+                if not self.overview:
+                    ui.select({1: self.text("one_hop"), 2: self.text("two_hops")}, value=self.depth, label=self.text("depth"),
+                              on_change=lambda e: self.reload_on_change("depth", e.value)).props("dense outlined options-dense").classes("graph-control")
                 ui.select(self.choices(PREDICATES), label=self.text("predicate"), value=self.predicates, multiple=True, clearable=True,
-                          on_change=lambda e: self.reload_on_change("predicates", e.value or None)).props("dense outlined").classes("graph-control shrink-0")
+                          on_change=lambda e: self.reload_on_change("predicates", e.value or None)).props("dense outlined options-dense").classes("graph-control")
                 ui.select(self.choices(STATUSES), label=self.text("status"), value=self.relation_statuses, multiple=True, clearable=True,
-                          on_change=lambda e: self.reload_on_change("relation_statuses", e.value or None)).props("dense outlined").classes("graph-control shrink-0")
-                ui.button(self.text("refresh"), on_click=self.load_overview).props("flat dense no-caps shrink-0")
-                ui.button(self.text("reset_view"), on_click=self.reset_graph_view).props("flat dense no-caps shrink-0")
-            else:
-                ui.button(self.text("global_graph"), on_click=self.show_global_graph).props("flat dense no-caps shrink-0")
-                ui.select({1: self.text("one_hop"), 2: self.text("two_hops")}, value=self.depth,
-                          on_change=lambda e: self.reload_on_change("depth", e.value)).props("dense outlined").classes("graph-control shrink-0")
-                ui.select(self.choices(PREDICATES), label=self.text("predicate"), value=self.predicates, multiple=True, clearable=True,
-                          on_change=lambda e: self.reload_on_change("predicates", e.value or None)).props("dense outlined").classes("graph-control shrink-0")
-                ui.select(self.choices(STATUSES), label=self.text("status"), value=self.relation_statuses, multiple=True, clearable=True,
-                          on_change=lambda e: self.reload_on_change("relation_statuses", e.value or None)).props("dense outlined").classes("graph-control shrink-0")
-                ui.button(self.text("refresh"), on_click=self.load_graph).props("flat dense no-caps shrink-0")
-                ui.button(self.text("center"), on_click=partial(self.load_graph, center=True)).props("flat dense no-caps shrink-0")
-                ui.button(self.text("expand"), on_click=partial(self.load_graph, expand=True)).props("flat dense no-caps shrink-0")
-                ui.button(self.text("reset_view"), on_click=self.reset_graph_view).props("flat dense no-caps shrink-0")
-            # 缩放按倍率作用于画布；画布铺满后仍可放大看局部。
-            ui.button(icon="zoom_in", on_click=partial(self.zoom_graph, 1.25)).props(
-                f'flat dense round size=sm aria-label="{self.text("zoom_in")}"'
-            ).tooltip(self.text("zoom_in"))
-            ui.button(icon="zoom_out", on_click=partial(self.zoom_graph, 0.8)).props(
-                f'flat dense round size=sm aria-label="{self.text("zoom_out")}"'
-            ).tooltip(self.text("zoom_out"))
-            help_hint(self.text("overview_scope" if self.overview else "graph_scope"))
+                          on_change=lambda e: self.reload_on_change("relation_statuses", e.value or None)).props("dense outlined options-dense").classes("graph-control")
+            with ui.row().classes("graph-view-actions items-center"):
+                actions = [("refresh", "refresh", self.load_overview if self.overview else self.load_graph)]
+                if not self.overview:
+                    actions.extend((("center", "my_location", partial(self.load_graph, center=True)),
+                                    ("expand", "open_in_full", partial(self.load_graph, expand=True))))
+                for name, icon, action in actions:
+                    ui.button(icon=icon, color=None, on_click=action).props(
+                        f'flat dense aria-label="{self.text(name)}"').tooltip(self.text(name))
+                help_hint(self.text("overview_scope" if self.overview else "graph_scope"))
         with ui.element("div").classes("graph-stage w-full flex-1 min-h-0"):
             @ui.refreshable
             def graph_body():
                 if self.graph is None or not self.graph["nodes"]:
-                    with ui.column().classes("absolute inset-0 items-center justify-center"):
-                        ui.label(self.text("empty" if self.overview else "choose_root")).classes("theme-text-muted")
+                    with ui.column().classes("graph-empty absolute inset-0 items-center justify-center"):
+                        ui.icon("hub").classes("graph-empty-icon").props("aria-hidden=true")
+                        ui.label(self.text("global_graph" if self.overview else "local_graph")).classes("graph-empty-title")
+                        ui.label(self.text("empty" if self.overview else "choose_root")).classes("graph-empty-hint")
                     return
                 data = self.graph
                 with ui.column().classes("graph-stats items-end gap-0"):
@@ -908,6 +901,12 @@ class GraphWorkbench(WorkbenchBase):
                 self.chart.on("chart:click", self.graph_click, ["data", "dataType"])
             graph_body_refresh = graph_body.refresh
             graph_body()
+            with ui.row().classes("graph-canvas-tools items-center").props(f'role=group aria-label="{self.text("view_mode")}"'):
+                for name, icon, action in (("zoom_out", "remove", partial(self.zoom_graph, 0.8)),
+                                           ("zoom_in", "add", partial(self.zoom_graph, 1.25)),
+                                           ("reset_view", "fit_screen", self.reset_graph_view)):
+                    ui.button(icon=icon, color=None, on_click=action).props(
+                        f'flat dense aria-label="{self.text(name)}"').tooltip(self.text(name))
         # 关系表格默认收起，展开时才占用画布高度。
         with ui.expansion(self.text("table"), icon="table_rows").classes("graph-drawer w-full"):
             with ui.column().classes("w-full max-h-[240px] overflow-y-auto px-3 pb-2"):
@@ -991,7 +990,7 @@ class GraphWorkbench(WorkbenchBase):
             ui.label(self.text("no_edges")).classes("text-sm theme-text-muted")
         for edge in edges:
             selected = self.detail and self.detail["record"]["id"] == edge["id"]
-            with ui.row().classes("w-full items-center gap-1 knowledge-list-item py-2" + (" theme-selected" if selected else "")):
+            with ui.row().classes("graph-edge-row w-full items-center gap-1 knowledge-list-item py-2" + (" theme-selected" if selected else "")):
                 ui.button(names[edge["source_id"]], on_click=partial(self.select, "object", edge["source_id"])).props("flat dense no-caps").classes("max-w-full break-words")
                 ui.label("↔" if edge.get("symmetric") else "→")
                 ui.button(names[edge["target_id"]], on_click=partial(self.select, "object", edge["target_id"])).props("flat dense no-caps").classes("max-w-full break-words")
@@ -1004,42 +1003,49 @@ class GraphWorkbench(WorkbenchBase):
             ui.label(self.error).classes("theme-text-muted")
             ui.button(self.text("back"), on_click=self.clear_error).props("flat")
         if not self.detail:
-            ui.label(self.text("choose_node")).classes("text-sm theme-text-muted py-8")
+            with ui.column().classes("graph-empty w-full items-center"):
+                ui.icon("account_tree").classes("graph-empty-icon").props("aria-hidden=true")
+                ui.label(self.text("heading")).classes("graph-empty-title")
+                ui.label(self.text("choose_node")).classes("graph-empty-hint")
+                ui.button(self.text("create"), icon="add", color=None, on_click=self.edit_object)\
+                    .props("outline no-caps").set_enabled(bool(self.graph_id))
             return
         data, kind = self.detail["record"], self.detail["kind"]
-        with ui.column().classes("knowledge-detail w-full max-w-[1000px] mx-auto gap-3 min-w-0"):
-            ui.label(data.get("title", self.text(kind))).classes("text-2xl font-semibold theme-text break-words")
+        with ui.column().classes("knowledge-detail graph-detail w-full min-w-0"):
             if kind in ("object", "relation"):
-                with ui.row().classes("w-full items-center gap-2 knowledge-metadata"):
-                    ui.icon("help_outline" if data["status"] == "disputed" else "schedule" if data["status"] == "outdated" else "label_outline", size="xs")
-                    ui.label(self.text(data["status"])).classes("text-xs theme-text-muted").tooltip(
-                        self.text("revision", revision=data["revision"], updated=data["updated_at"])
-                    )
-                    ui.space()
-                    ui.button(self.text("edit"), icon="edit", on_click=self.edit_current).props("flat dense no-caps")
-                    with ui.button(icon="more_horiz").props(f'flat dense round size=sm aria-label="{self.text("more")}"').tooltip(self.text("more")):
-                        with ui.menu():
-                            ui.menu_item(self.text("add_evidence"), on_click=partial(self.edit_evidence, kind, data["id"]))
-                            ui.menu_item(self.text("history"), on_click=partial(self.show_history, kind, data["id"]))
-                            ui.separator()
-                            ui.menu_item(self.text("delete"), on_click=partial(self.preview_delete, kind, deepcopy(data))).classes("theme-danger")
+                with ui.row().classes("graph-detail-meta w-full items-center justify-between"):
+                    with ui.row().classes("items-center gap-2 knowledge-metadata"):
+                        ui.label(self.text(data["kind"] if kind == "object" else kind)).classes("graph-kind-label")
+                        ui.icon("help_outline" if data["status"] == "disputed" else "schedule" if data["status"] == "outdated" else "check_circle_outline", size="xs").props("aria-hidden=true")
+                        ui.label(self.text(data["status"])).classes("text-xs theme-text-muted").tooltip(
+                            self.text("revision", revision=data["revision"], updated=data["updated_at"]))
+                    with ui.row().classes("graph-detail-actions items-center gap-1"):
+                        ui.button(self.text("edit"), icon="edit", color=None, on_click=self.edit_current).props("flat dense no-caps")
+                        with ui.button(icon="more_horiz", color=None).props(f'flat dense aria-label="{self.text("more")}"').tooltip(self.text("more")):
+                            with ui.menu():
+                                ui.menu_item(self.text("add_evidence"), on_click=partial(self.edit_evidence, kind, data["id"]))
+                                ui.menu_item(self.text("history"), on_click=partial(self.show_history, kind, data["id"]))
+                                ui.separator()
+                                ui.menu_item(self.text("delete"), on_click=partial(self.preview_delete, kind, deepcopy(data))).classes("theme-danger")
+            ui.label(data.get("title", self.text(kind))).classes("graph-detail-title").props("role=heading aria-level=1")
             if kind == "object":
-                ui.label(self.text(data["kind"]) + (" · " + " / ".join(data["aliases"]) if data.get("aliases") else "")).classes("text-sm theme-text-muted")
+                if data.get("aliases"):
+                    ui.label(" / ".join(data["aliases"])).classes("graph-aliases text-sm theme-text-muted")
                 if data["summary"]:
-                    ui.label(data["summary"]).classes("text-base theme-text-secondary break-words")
-                with ui.row().classes("gap-2"):
-                    ui.button(self.text("create_relation"), on_click=partial(self.edit_edge, data["id"])).props("flat no-caps")
-                    ui.button(self.text("view_graph"), on_click=self.view_graph).props("flat no-caps")
-                with ui.expansion(self.text("relations"), icon="share").classes("w-full"):
+                    ui.label(data["summary"]).classes("graph-summary")
+                with ui.row().classes("graph-detail-primary w-full items-center gap-2"):
+                    ui.button(self.text("view_graph"), icon="hub", color=None, on_click=self.view_graph).props("unelevated no-caps").classes("graph-primary-action")
+                    ui.button(self.text("create_relation"), icon="add_link", color=None, on_click=partial(self.edit_edge, data["id"])).props("flat no-caps")
+                with ui.expansion(self.text("relations"), icon="share").classes("graph-section graph-relations w-full"):
                     if self.local_relations:
                         if self.local_relations["truncated"]:
                             ui.label(self.text("truncated"))
                         self.edge_table(self.local_relations)
             elif kind == "relation":
-                with ui.row().classes("gap-2"):
-                    ui.button(self.text("source_object"), on_click=partial(self.select, "object", data["source_id"])).props("flat no-caps")
+                with ui.row().classes("graph-relation-path w-full items-center gap-2"):
+                    ui.button(self.text("source_object"), color=None, on_click=partial(self.select, "object", data["source_id"])).props("flat no-caps")
                     ui.label("↔" if data.get("symmetric") else "→")
-                    ui.button(self.text("target_object"), on_click=partial(self.select, "object", data["target_id"])).props("flat no-caps")
+                    ui.button(self.text("target_object"), color=None, on_click=partial(self.select, "object", data["target_id"])).props("flat no-caps")
                 for key in ("predicate", "description", "qualifier", "basis"):
                     value = self.text(data[key]) if key in ("basis", "predicate") else data[key]
                     ui.label(self.text(key) + " · " + value).classes("text-sm break-words theme-text-secondary")
@@ -1047,13 +1053,16 @@ class GraphWorkbench(WorkbenchBase):
                 self.render_evidence(data)
             if "evidence" in self.detail:
                 evidence = self.detail["evidence"]
-                ui.label(self.text("evidence_count", count=evidence["total"])).classes("font-semibold theme-text")
-                if not evidence["items"]:
-                    ui.label(self.text("no_evidence")).classes("text-sm theme-text-muted")
-                for item in evidence["items"]:
-                    self.render_evidence(item)
-                self.pager(evidence["offset"], evidence["limit"], evidence["total"],
-                           partial(self.evidence_page, kind, data["id"], evidence["offset"]))
+                with ui.column().classes("graph-section graph-evidence-section w-full"):
+                    with ui.row().classes("graph-section-heading w-full items-center gap-2"):
+                        ui.icon("format_quote", size="xs").props("aria-hidden=true")
+                        ui.label(self.text("evidence_count", count=evidence["total"])).props("role=heading aria-level=2")
+                    if not evidence["items"]:
+                        ui.label(self.text("no_evidence")).classes("graph-evidence-empty text-sm theme-text-muted")
+                    for item in evidence["items"]:
+                        self.render_evidence(item)
+                    self.pager(evidence["offset"], evidence["limit"], evidence["total"],
+                               partial(self.evidence_page, kind, data["id"], evidence["offset"]))
 
     def clear_error(self):
         self.error = None

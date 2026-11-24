@@ -1,6 +1,6 @@
 """文件级 WebDAV 同步，不同步配置或 SQLite，不合并多端数据库。
 
-首次同步保护两端已有文件，只补缺项；后续以本地为准，可能删除云端对应文件。
+首次同步检测两端同路径内容冲突，冲突时暂停；后续以本地为准，可能删除云端对应文件。
 作业由核心服务持有，与 GUI 会话无关；目录枚举失败不能被当作空目录。
 """
 
@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 
 from webdav4.client import Client as WebDAV4Client
 from indexing.settings import get_settings
+from .errors import BusinessError
 
 logger = logging.getLogger(__name__)
 _MAX_LOG_ENTRIES = 100
@@ -150,7 +151,11 @@ class SyncService:
                 result.errors.append(f"登记下载文件失败：{type(exc).__name__}")
         if result.errors:
             result.success = False
-            result.message = f"同步部分失败：↑{len(result.uploaded)} ↓{len(result.downloaded)}，错误 {len(result.errors)} 项"
+            if result.message.startswith("同步完成"):
+                result.message = (
+                    f"同步部分失败：↑{len(result.uploaded)} ↓{len(result.downloaded)}，"
+                    f"错误 {len(result.errors)} 项"
+                )
         for name in result.uploaded:
             self.add_log("upload", f"↑ {name}")
         for name in result.downloaded:
@@ -239,8 +244,10 @@ class SyncService:
         return files
 
     def _same_content(self, client, remote_file, local_file, expected_size):
+        if local_file.stat().st_size != expected_size:
+            return False
         if expected_size == 0:
-            return local_file.stat().st_size == 0
+            return True
         # ponytail: 无服务端内容校验和时，等长文件需逐个下载；流量成为瓶颈再接入可信校验和。
         with tempfile.TemporaryDirectory(prefix="piece-sync-") as directory:
             temporary = Path(directory) / "remote"
@@ -296,6 +303,27 @@ class SyncService:
             for remote, local in paths.items():
                 local.mkdir(parents=True, exist_ok=True)
                 snapshots.append((remote, local, self._get_local_files(local), self._get_remote_files(client, remote)))
+            if first:
+                conflicts = []
+                for remote, local, local_files, remote_files in snapshots:
+                    for rel in sorted(local_files.keys() & remote_files.keys()):
+                        if (
+                            local_files[rel] != remote_files[rel]
+                            or not self._same_content(
+                                client, f"{remote}/{rel}", local / rel, remote_files[rel]
+                            )
+                        ):
+                            conflicts.append(f"{remote}/{rel}")
+                if conflicts:
+                    result.success = False
+                    result.errors.extend(
+                        f"首次同步内容冲突，请先人工核对并处理后重试：{name}" for name in conflicts
+                    )
+                    result.message = (
+                        f"首次同步发现 {len(conflicts)} 个同名文件内容不同，"
+                        "未修改任何一端文件；处理冲突后重试"
+                    )
+                    return result
             for remote, local, local_files, remote_files in snapshots:
                 self._sync_directory(client, local, remote, result, progress_callback,
                                      snapshot=(local_files, remote_files), first=first)
@@ -391,5 +419,12 @@ def _register_downloads(result):
         result.success = False
 
 
-def start_sync(start_message="同步已开始..."):
-    return get_sync_service().start_background_sync(on_finished=_register_downloads, start_message=start_message)
+def start_sync(start_message="同步已开始...", *, confirmed=False):
+    if confirmed is not True:
+        raise BusinessError(
+            "CONFIRMATION_REQUIRED",
+            "同步会上传文档，日常同步还可能覆盖或删除云端文件，需要明确确认",
+        )
+    return get_sync_service().start_background_sync(
+        on_finished=_register_downloads, start_message=start_message
+    )

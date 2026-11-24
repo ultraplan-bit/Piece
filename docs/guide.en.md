@@ -148,7 +148,7 @@ Inline evidence as `CHUNK_ID:line` or `CHUNK_ID:grep=substring`; `request_key` i
 
 Use the batch tools `wiki-apply` / `knowledge-apply` when submitting multiple records at once or when you need field-level control.
 
-See the built-in [Wiki skill](../skills/piece-wiki/SKILL.md) and [graph skill](../skills/piece-graph/SKILL.md) for detailed operations and checking workflows. Those instructions are in Chinese.
+See the built-in [Wiki skill guide](../skills/piece-wiki/SKILL.en.md) and [graph skill guide](../skills/piece-graph/SKILL.en.md) for detailed operations and checking workflows.
 
 ## Graph data exchange
 
@@ -223,7 +223,8 @@ Before upgrading or moving, fully exit and back up the entire data directory, in
 Connect a WebDAV service such as Nutstore under **Cloud Sync**, but note that it **syncs files only, not a complete knowledge base**:
 
 - Other devices need to rebuild their indexes.
-- Later syncs favor the local side and may overwrite cloud files.
+- The first sync pauses when the same path has different content on both sides; it keeps both copies and does not advance sync state. Rename or resolve the conflict manually, then retry.
+- Later syncs favor local files and may overwrite or delete cloud files. Old and current versions share the same WebDAV folders, and old versions do not perform conflict checks; stop old clients and update every device before syncing.
 - One-shot Obsidian / Zotero imports are not continuous sync either.
 
 Back up before syncing, reindexing, or moving.

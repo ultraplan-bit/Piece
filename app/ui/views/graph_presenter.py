@@ -23,13 +23,8 @@ NODE_BASE = 18.0
 NODE_MAX = 34.0
 # 同一环上相邻节点的最小弧距：小于它节点会挤在一起，按节点数放大环半径。
 RING_MIN_ARC = 46.0
-# 少于这个节点数就全部显示标签；超过后只标注根、选中和连接较多的节点，其余靠悬停。
-# ponytail: 按数量分级显示；ECharts 6 的 labelLayout 会使边标签错位，修复后再恢复自动避让。
-LABEL_ALL_MAX = 60
-LABEL_MIN_DEGREE = 2
-# 少量关系常驻显示；密集时只标注选中节点（未选中时为根）的邻接边，其余靠悬停。
-EDGE_LABEL_ALL_MAX = 24
-
+# 全局 3D 概览只显示枢纽标签；密集图仍可通过悬停读取名称。
+OVERVIEW_LABEL_MIN_DEGREE = 2
 
 def _adjacency(graph):
     """无向邻接表；布局与度数都按无向计算，方向仍由箭头表达。"""
@@ -122,6 +117,67 @@ def _label_position(x, y):
     return "left"
 
 
+def _visible_graph_labels(graph, positions, degree, selected, label):
+    """Hide estimated initial-view collisions; emphasis still reveals hidden labels."""
+    if not positions:
+        return set(), set()
+    xs, ys = zip(*positions.values())
+    # A conservative fit estimate keeps the heuristic independent of the browser viewport.
+    scale = min(760 / max(max(xs) - min(xs), 1), 600 / max(max(ys) - min(ys), 1))
+    padding = 4 / scale
+    occupied = []
+    visible_nodes, visible_edges = set(), set()
+
+    def add(kind, record_id, box):
+        x1, y1, x2, y2 = box
+        box = (x1 - padding, y1 - padding, x2 + padding, y2 + padding)
+        if any(not (box[2] <= other[0] or other[2] <= box[0]
+                    or box[3] <= other[1] or other[3] <= box[1]) for other in occupied):
+            return
+        occupied.append(box)
+        (visible_nodes if kind == "node" else visible_edges).add(record_id)
+
+    def text_width(text, limit=160):
+        return min(limit, max(12, sum(12 if ord(char) > 0x2E80 else 7 for char in text))) / scale
+
+    candidates = []
+    root = graph["root_id"]
+    focus = selected if selected in degree else root
+    for node in graph["nodes"]:
+        node_id = node["id"]
+        x, y = positions[node_id]
+        radius = _node_size(degree.get(node_id, 0)) / 2
+        width, height, gap = text_width(node["title"]), 16 / scale, 6 / scale
+        side = _label_position(x, y)
+        if side == "right":
+            box = (x + radius + gap, y - height / 2, x + radius + gap + width, y + height / 2)
+        elif side == "left":
+            box = (x - radius - gap - width, y - height / 2, x - radius - gap, y + height / 2)
+        elif side == "top":
+            box = (x - width / 2, y - radius - gap - height, x + width / 2, y - radius - gap)
+        else:
+            box = (x - width / 2, y + radius + gap, x + width / 2, y + radius + gap + height)
+        rank = 5 if node_id == selected else 4 if node_id == root else 3 if degree.get(node_id, 0) >= 2 else 1
+        candidates.append(((rank, degree.get(node_id, 0), node_id), "node", node_id, box))
+
+    for edge in graph["edges"]:
+        source, target = edge["source_id"], edge["target_id"]
+        sx, sy = positions[source]
+        tx, ty = positions[target]
+        width = text_width(label(edge.get("predicate") or "relation"), 140)
+        height = 18 / scale
+        box = ((sx + tx - width) / 2, (sy + ty - height) / 2,
+               (sx + tx + width) / 2, (sy + ty + height) / 2)
+        rank = 2 if focus in (source, target) else 0
+        candidates.append(((rank, degree.get(source, 0) + degree.get(target, 0), edge["id"]),
+                           "edge", edge["id"], box))
+
+    # ponytail: O((nodes + edges)^2); graph results are capped, so a spatial index is unnecessary.
+    for _, kind, record_id, box in sorted(candidates, reverse=True):
+        add(kind, record_id, box)
+    return visible_nodes, visible_edges
+
+
 def _overview_options(graph, *, dark, selected, label):
     """可旋转的 3D 球面全局概览，隐藏球面外壳。"""
     surface, ink = ("#202226", "#e6e9ee") if dark else ("#ffffff", "#1f2328")
@@ -165,7 +221,7 @@ def _overview_options(graph, *, dark, selected, label):
             data.append({"id": node_id, "name": item["title"], "value": points[node_id],
                          "symbolSize": _node_size(degree.get(node_id, 0)) * (1.15 if is_focus else 0.72),
                          "tooltip_text": item["title"] + " · " + label(kind),
-                         "label": {"show": is_focus or degree.get(node_id, 0) >= LABEL_MIN_DEGREE,
+                         "label": {"show": is_focus or degree.get(node_id, 0) >= OVERVIEW_LABEL_MIN_DEGREE,
                                    "formatter": "{b}",
                                    "textStyle": {"color": ink, "textBorderColor": surface, "textBorderWidth": 3}},
                          "itemStyle": {"color": PALETTES[dark][color],
@@ -208,29 +264,26 @@ def graph_options(graph, *, dark=False, selected=None, positions=None, label=lam
     layers = _depth_layers(graph, adjacency)
     computed = _layered_positions(graph, adjacency, layers)
     override = positions or {}
-    show_all_labels = len(graph["nodes"]) <= LABEL_ALL_MAX
-
+    layout_positions = {node["id"]: override.get(node["id"], computed.get(node["id"], (0.0, 0.0)))
+                        for node in graph["nodes"]}
+    visible_nodes, visible_edges = _visible_graph_labels(graph, layout_positions, degree, selected, label)
     nodes, names = [], {n["id"]: n["title"] for n in graph["nodes"]}
     for item in graph["nodes"]:
         node_id = item["id"]
         color, symbol = TYPE_MARKS[item["kind"]]
         x, y = override.get(node_id, computed.get(node_id, (0.0, 0.0)))
         size = _node_size(degree.get(node_id, 0))
-        is_selected = node_id == selected
-        labeled = show_all_labels or is_selected or node_id == graph["root_id"] or degree.get(node_id, 0) >= LABEL_MIN_DEGREE
         nodes.append({"id": node_id, "name": item["title"], "category": KINDS.index(item["kind"]),
                       "symbol": symbol, "symbolSize": size, "x": x, "y": y,
                       "itemStyle": {"color": PALETTES[dark][color], "borderColor": surface,
                                     "borderWidth": 1.5},
                       # 文字描边光晕代替实心底块：标签压在连线上仍可读，又不遮挡图形。
-                      "label": {"show": labeled, "color": ink, "position": _label_position(x, y),
+                      "label": {"show": node_id in visible_nodes, "color": ink, "position": _label_position(x, y),
                                 "distance": 6, "width": 160, "overflow": "truncate",
                                 "textBorderColor": surface, "textBorderWidth": 3, "textBorderRadius": 3},
                       "tooltip_text": item["title"] + " · " + label(item["kind"])})
 
     edges, pairs = [], {}
-    show_all_edges = len(graph["edges"]) <= EDGE_LABEL_ALL_MAX
-    focus = selected if selected in adjacency else graph["root_id"]
     for edge in graph["edges"]:
         pair = tuple(sorted((edge["source_id"], edge["target_id"])))
         ordinal = pairs.get(pair, 0)
@@ -238,7 +291,7 @@ def graph_options(graph, *, dark=False, selected=None, positions=None, label=lam
         edge_name = label(edge.get("predicate") or "relation")
         arrow = " ↔ " if edge.get("symmetric") else " → "
         edges.append({"id": edge["id"], "source": edge["source_id"], "target": edge["target_id"], "name": edge_name,
-                      "label": {"show": show_all_edges or focus in pair, "formatter": edge_name},
+                      "label": {"show": edge["id"] in visible_edges, "formatter": edge_name},
                       "emphasis": {"label": {"show": True}},
                       "symbol": ["none", "none" if edge.get("symmetric") else "arrow"],
                       "lineStyle": {"width": 0.9, "opacity": 0.42, "curveness": 0.12 + ordinal * 0.12,

@@ -6,7 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from indexing.services import config_service
-from indexing.services.sync_service import SyncService
+from indexing.services.errors import BusinessError
+from indexing.services.sync_service import SyncService, start_sync
 
 
 class MemoryDav:
@@ -122,13 +123,84 @@ def test_atomic_download_keeps_partial_file_invisible(sync):
     assert not list(sync.root.rglob(".sync-*"))
 
 
-def test_first_sync_never_overwrites_local_even_when_cloud_is_larger(sync):
-    sync.client.files["originals/document.md"] = b"remote content"
+def test_first_sync_conflict_stays_unresolved_on_retry(sync):
+    sync.client.files["originals/document.md"] = b"cloud content"
+    sync.client.files["originals/cloud-only.md"] = b"remote"
     local = sync.root / "originals" / "document.md"
     local.write_bytes(b"local")
+    local_only = sync.root / "originals" / "local-only.md"
+    local_only.write_bytes(b"local")
     result = sync.service.sync()
-    assert result.success
-    assert local.read_bytes() == b"local" and sync.client.files["originals/document.md"] == b"remote content"
+    assert not result.success
+    assert any("originals/document.md" in error for error in result.errors)
+    assert local.read_bytes() == b"local"
+    assert sync.client.files["originals/document.md"] == b"cloud content"
+    assert "originals/local-only.md" not in sync.client.files
+    assert sync.client.files["originals/cloud-only.md"] == b"remote"
+    assert not (sync.root / "originals" / "cloud-only.md").exists()
+    assert config_service.get_saved_settings().webdav.last_sync_time is None
+
+    sync.service._run_background(None)
+    result = sync.service.last_result
+    assert not result.success and result.message.startswith("首次同步发现")
+    assert local.read_bytes() == b"local" and sync.client.files["originals/document.md"] == b"cloud content"
+    assert config_service.get_saved_settings().webdav.last_sync_time is None
+    assert not any(action[0] in {"upload", "delete"} for action in sync.client.actions)
+    assert not any(action == ("download", "originals/cloud-only.md") for action in sync.client.actions)
+
+
+def test_first_sync_detects_same_size_content_conflicts(sync):
+    sync.client.files["originals/document.md"] = b"cloud"
+    (sync.root / "originals" / "document.md").write_bytes(b"local")
+    result = sync.service.sync()
+    assert not result.success
+    assert any("originals/document.md" in error for error in result.errors)
+    assert sync.client.files["originals/document.md"] == b"cloud"
+    assert any(action == ("download", "originals/document.md") for action in sync.client.actions)
+    assert not any(action[0] == "upload" for action in sync.client.actions)
+
+
+def test_sync_requires_explicit_confirmation():
+    with pytest.raises(BusinessError) as caught:
+        start_sync()
+    assert caught.value.code == "CONFIRMATION_REQUIRED"
+
+
+def test_sync_api_requires_confirmation(sync, monkeypatch):
+    from indexing.services import maintenance_service, sync_service
+
+    starts = []
+    service = SimpleNamespace(
+        is_enabled=lambda: True,
+        start_background_sync=lambda **kwargs: starts.append(kwargs) or True,
+    )
+    monkeypatch.setattr(sync_service, "get_sync_service", lambda: service)
+    with pytest.raises(BusinessError) as caught:
+        maintenance_service.run_sync_job()
+    assert caught.value.code == "CONFIRMATION_REQUIRED" and starts == []
+
+    result = maintenance_service.run_sync_job(confirmed=True)
+    assert result["status"] == "accepted" and len(starts) == 1
+
+
+def test_sync_ui_starts_only_after_confirmation(monkeypatch):
+    from app.ui.handlers import sync_handlers
+
+    service = SimpleNamespace(
+        last_finished_at=None, last_result=None,
+        is_enabled=lambda: True, is_running=lambda: False,
+        get_log_version=lambda: 0, get_logs=lambda: [],
+    )
+    dialog, starts = {}, []
+    monkeypatch.setattr(sync_handlers, "get_sync_service", lambda: service)
+    monkeypatch.setattr(sync_handlers, "confirm_dialog", lambda **kwargs: dialog.update(kwargs))
+    monkeypatch.setattr(sync_handlers, "start_sync", lambda **kwargs: starts.append(kwargs) or True)
+
+    handler = sync_handlers.SyncHandlers({}, {})
+    handler.do_sync()
+    assert starts == []
+    dialog["on_confirm"]()
+    assert starts == [{"start_message": sync_handlers.t("cloud_sync.sync_started"), "confirmed": True}]
 
 
 def test_daily_sync_deletes_only_missing_remote_files_and_preserves_zero_bytes(sync):

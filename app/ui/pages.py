@@ -228,10 +228,6 @@ def register_pages(port: int = 8689):
                 target?.focus({preventScroll: true});
                 target?.scrollIntoView({block: 'nearest'});''')
 
-        def focus_search():
-            ui.run_javascript('''const input = document.querySelector('[data-catalog] .workspace-search input');
-                input?.focus(); input?.select();''')
-
         def set_library_view(view):
             if view not in ("reading", "compare"):
                 return
@@ -290,7 +286,7 @@ def register_pages(port: int = 8689):
                 await zotero.open_item(key, server_id)
 
         ui_refs.update(toggle_navigation=toggle_navigation, focus_catalog=focus_catalog,
-                       focus_search=focus_search, open_task_file=open_task_file,
+                       open_task_file=open_task_file,
                        open_reader=open_reader, open_library=open_library,
                        open_recall_result=open_recall_result,
                        open_settings=open_settings, open_webdav_settings=lambda: open_settings("webdav"),

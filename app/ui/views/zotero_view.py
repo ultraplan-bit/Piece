@@ -238,9 +238,11 @@ class ZoteroWorkbench:
         return {key: f"{item['data'].get('name', key)} · {key}" for key, item in self.collections.items()}
 
     def render_middle(self):
-        with ui.column().classes("w-full h-full theme-panel gap-0 overflow-hidden").props("data-zotero-browser"):
-            with ui.row().classes("workspace-toolbar w-full justify-between"):
-                ui.label(t("zotero.title")).classes("text-sm font-medium theme-text")
+        with ui.column().classes("zotero-workbench zotero-browser w-full h-full theme-panel gap-0 overflow-hidden").props("data-zotero-browser"):
+            with ui.row().classes("zotero-library-header workspace-toolbar w-full justify-between"):
+                with ui.row().classes("items-center gap-2 min-w-0"):
+                    ui.icon("menu_book").classes("zotero-library-icon").props("aria-hidden=true")
+                    ui.label(t("zotero.title")).classes("text-sm font-medium theme-text")
                 ui.spinner(size="xs").bind_visibility_from(self, "busy")
                 ui.button(t("zotero.connect"), icon="refresh", color=None, on_click=self.connect).props(
                     "flat dense no-caps").bind_enabled_from(self, "busy", backward=lambda value: not value)
@@ -248,45 +250,55 @@ class ZoteroWorkbench:
             self.filters()
             with ui.scroll_area().classes("w-full flex-1 min-h-0 scroll-flush"):
                 self.library()
-            with ui.column().classes("w-full p-3 gap-2 library-footer"):
-                ui.label().classes("text-xs theme-text-muted").bind_text_from(self, "selection_text")
-                with ui.row().classes("w-full gap-1"):
+            with ui.column().classes("zotero-selection-bar w-full gap-2 library-footer"):
+                ui.label().classes("zotero-selection-count text-xs theme-text-muted").bind_text_from(self, "selection_text")
+                with ui.row().classes("zotero-selection-actions w-full items-center gap-1"):
                     ui.button(t("zotero.preview_import"), icon="file_download", color=None,
                               on_click=lambda: self.import_dialog(item_keys=list(self.selected))).props(
-                                  "outline dense no-caps").bind_enabled_from(self, "has_selection")
-                    with ui.button(t("zotero.actions"), color=None).props("flat dense no-caps").bind_enabled_from(self, "can_read"):
+                                  "unelevated dense no-caps").classes("zotero-import-action").bind_enabled_from(self, "has_selection")
+                    with ui.button(t("zotero.actions"), icon="more_horiz", color=None).props("flat dense no-caps").bind_enabled_from(self, "can_read"):
                         with ui.menu().props("auto-close"):
                             ui.menu_item(t("zotero.export"), on_click=lambda: self.citations_dialog(list(self.selected))).props("role=menuitem").bind_enabled_from(
                                 self, "has_selection")
                             ui.menu_item(t("zotero.organize"), on_click=self.organize_dialog).props("role=menuitem").bind_enabled_from(self, "can_write")
                             ui.menu_item(t("zotero.create_note"), on_click=self.note_dialog).props("role=menuitem").bind_enabled_from(self, "can_write")
                             ui.menu_item(t("zotero.resume_plan"), on_click=self.plan_dialog).props("role=menuitem").bind_enabled_from(self, "plan", backward=bool)
-                if self.open_settings:
-                    ui.button(t("zotero.settings"), on_click=self.open_settings, color=None).props("flat dense no-caps")
+                    if self.open_settings:
+                        ui.button(icon="settings", on_click=self.open_settings, color=None).props(
+                            f'flat dense aria-label="{t("zotero.settings")}"').tooltip(t("zotero.settings"))
 
     @ui.refreshable
     def connection(self):
-        with ui.column().classes("w-full px-3 py-2 gap-1"):
+        with ui.column().classes("zotero-connection w-full gap-1"):
             if not self.info.get("connected"):
-                ui.label(t("zotero.local_hint")).classes("text-xs theme-text-muted leading-relaxed")
+                with ui.row().classes("items-start gap-2"):
+                    ui.icon("info_outline").classes("zotero-connection-icon").props("aria-hidden=true")
+                    ui.label(t("zotero.local_hint")).classes("text-xs theme-text-muted leading-relaxed")
             else:
-                ui.label(f"Zotero {self.info.get('zotero_version') or '?'} · {t('zotero.personal_library')}").classes(
-                    "text-xs theme-text-secondary")
-                ui.label(self.server_id or t("zotero.legacy_identity")).classes("text-xs font-mono theme-text-muted break-all")
+                with ui.row().classes("zotero-connection-top w-full items-center gap-2"):
+                    ui.icon("check_circle_outline").classes("zotero-connection-icon").props("aria-hidden=true")
+                    ui.label(f"Zotero {self.info.get('zotero_version') or '?'}").classes(
+                        "text-xs font-medium theme-text").tooltip(t("zotero.personal_library"))
+                    ui.label(t("zotero.personal_library")).classes("zotero-library-type text-xs theme-text-muted")
                 grant = self.info.get("authorization", {}).get("state")
                 state = "write_off" if not get_settings().zotero_write_enabled else (
                     "write_unsupported" if not self.info.get("write_supported") else "auth_cached" if grant == "cached" else "auth_required")
-                ui.label(t(f"zotero.{state}")).classes("text-xs theme-text-muted")
+                ui.label(t(f"zotero.{state}")).classes("zotero-write-status text-xs theme-text-secondary")
+                ui.label(self.server_id or t("zotero.legacy_identity")).classes(
+                    "zotero-server-id text-xs font-mono theme-text-muted").tooltip(self.server_id or "")
             ui.label().classes("text-xs theme-danger break-words").props('role="alert"').bind_text_from(self, "error").bind_visibility_from(
                 self, "error", backward=bool)
 
     @ui.refreshable
     def filters(self):
-        with ui.column().classes("w-full p-3 gap-2"):
-            ui.input(t("zotero.query"), value=self.query).props("dense outlined clearable").classes(
-                "w-full workspace-search").bind_value(self, "query").on("keydown.enter", self.search).bind_enabled_from(self, "can_read")
+        with ui.column().classes("zotero-filters w-full gap-2"):
+            with ui.row().classes("zotero-search-row w-full items-center gap-1"):
+                ui.input(t("zotero.query"), value=self.query).props("dense outlined clearable").classes(
+                    "flex-1 min-w-0 workspace-search").bind_value(self, "query").on("keydown.enter", self.search).bind_enabled_from(self, "can_read")
+                ui.button(t("zotero.search"), icon="search", on_click=self.search).props(
+                    "dense unelevated no-caps").classes("zotero-search-button").bind_enabled_from(self, "can_read")
             ui.select(self.collection_options(), label=t("zotero.collection"), value=self.collection_key,
-                      with_input=True, clearable=True).props("dense outlined").classes("w-full").bind_value(
+                      with_input=True, clearable=True).props("dense outlined options-dense").classes("w-full").bind_value(
                           self, "collection_key").bind_enabled_from(self, "can_read")
             if self.collection_next is not None:
                 ui.button(t("zotero.more_collections"), on_click=partial(self.load_collections, self.collection_next), color=None).props(
@@ -296,26 +308,25 @@ class ZoteroWorkbench:
                     self, "tag").on("keydown.enter", self.search).bind_enabled_from(self, "can_read")
                 ui.button(t("zotero.tags"), on_click=self.tags_dialog, color=None).props("flat dense no-caps").bind_enabled_from(self, "can_read")
             ui.label(t("zotero.search_hint")).classes("text-xs theme-text-muted leading-relaxed")
-            ui.button(t("zotero.search"), icon="search", on_click=self.search).props("dense unelevated no-caps").classes(
-                "w-full").bind_enabled_from(self, "can_read")
 
     @ui.refreshable
     def library(self):
         if self.results is None:
             return
-        with ui.column().classes("w-full gap-0"):
+        with ui.column().classes("zotero-results w-full gap-0"):
             if self.results["items"]:
                 # 只响应用户事件，避免绑定同步勾选状态时反过来改动选择。
-                ui.checkbox(t("zotero.select_all")).props("dense").classes(
-                    "px-2 py-1 text-xs theme-text-secondary").bind_value_from(self, "page_selection").on(
-                        "update:model-value", lambda event: self.toggle_select_all(bool(event.args)), [None],
-                    ).bind_enabled_from(self, "can_read")
+                with ui.row().classes("zotero-results-header w-full items-center justify-between px-3"):
+                    ui.checkbox(t("zotero.select_all")).props("dense").classes(
+                        "text-xs theme-text-secondary").bind_value_from(self, "page_selection").on(
+                            "update:model-value", lambda event: self.toggle_select_all(bool(event.args)), [None],
+                        ).bind_enabled_from(self, "can_read")
             else:
                 ui.label(t("zotero.empty")).classes("p-4 text-sm theme-text-muted")
             for item in self.results["items"]:
                 key = item["key"]
                 selected = self.current and self.current["key"] == key
-                with ui.row().classes("w-full gap-1 items-start flex-nowrap px-2 py-1 zotero-item" + (" zotero-item-active" if selected else "")):
+                with ui.row().classes("w-full gap-2 items-start flex-nowrap px-2 py-1 zotero-item" + (" zotero-item-active" if selected else "")):
                     ui.checkbox(value=key in self.selected,
                                 on_change=lambda event, row=item: self.toggle_selection(row, event.value)).props(
                                     "dense").bind_value_from(self, "selected", backward=lambda value, row_key=key: row_key in value).bind_enabled_from(
@@ -323,7 +334,7 @@ class ZoteroWorkbench:
                     with ui.button(on_click=partial(self.open_item, key), color=None).props(
                         "flat dense no-caps no-ripple align=left").classes("flex-1 min-w-0 text-left").bind_enabled_from(self, "can_read"):
                         with ui.column().classes("w-full gap-1 min-w-0"):
-                            ui.label(_title(item)).classes("text-sm theme-text text-left leading-snug line-clamp-2")
+                            ui.label(_title(item)).classes("zotero-item-title text-sm theme-text text-left leading-snug line-clamp-2")
                             subtitle = " · ".join(filter(None, (_authors(item), item["data"].get("date"), key)))
                             ui.label(subtitle).classes("text-xs theme-text-muted truncate max-w-full")
             self.pagination(self.results, self.search)
@@ -341,26 +352,33 @@ class ZoteroWorkbench:
                     "flat dense no-caps").set_enabled(next_offset is not None and not self.busy)
 
     def render_right(self):
-        with ui.column().classes("w-full h-full min-w-0 theme-content gap-0").props("data-zotero-detail"):
-            with ui.row().classes("workspace-toolbar w-full"):
-                ui.label(t("zotero.details")).classes("text-sm font-medium theme-text")
+        with ui.column().classes("zotero-workbench zotero-detail-pane w-full h-full min-w-0 theme-content gap-0").props("data-zotero-detail"):
+            with ui.row().classes("zotero-detail-header workspace-toolbar w-full"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("description").classes("zotero-detail-icon").props("aria-hidden=true")
+                    ui.label(t("zotero.details")).classes("text-sm font-medium theme-text")
                 ui.space()
-                ui.label(t("zotero.read_hint")).classes("text-xs theme-text-muted")
-            with ui.scroll_area().classes("w-full flex-1 min-h-0"):
-                with ui.column().classes("w-full p-5 gap-4 min-w-0"):
+                ui.label(t("zotero.read_hint")).classes("zotero-detail-hint text-xs theme-text-muted")
+            with ui.scroll_area().classes("w-full flex-1 min-h-0 scroll-flush"):
+                with ui.column().classes("zotero-paper w-full min-w-0 mx-auto"):
                     self.detail()
 
     @ui.refreshable
     def detail(self):
         if self.current is None:
-            ui.label(t("zotero.choose_item")).classes("text-sm theme-text-muted py-8")
+            with ui.column().classes("zotero-empty w-full items-center"):
+                ui.icon("menu_book").classes("zotero-empty-icon").props("aria-hidden=true")
+                ui.label(t("zotero.details")).classes("zotero-empty-title")
+                ui.label(t("zotero.choose_item")).classes("zotero-empty-hint text-sm theme-text-muted")
             return
         item, data = self.current, self.current["data"]
         kind = data.get("itemType")
-        with ui.column().classes("w-full gap-3 min-w-0"):
-            ui.label(_title(item)).classes("text-xl font-semibold theme-text break-words")
-            ui.label(f"{kind} · {item['key']} · v{item.get('version', 0)}").classes("text-xs font-mono theme-text-muted")
-            with ui.row().classes("gap-1 flex-wrap"):
+        with ui.column().classes("zotero-record w-full gap-3 min-w-0"):
+            ui.label(_title(item)).classes("zotero-record-title theme-text break-words").props("role=heading aria-level=1")
+            with ui.row().classes("zotero-record-meta items-center gap-2 flex-wrap"):
+                ui.label(kind or "").classes("zotero-type-chip")
+                ui.label(f"{item['key']} · v{item.get('version', 0)}").classes("text-xs font-mono theme-text-muted")
+            with ui.row().classes("zotero-record-actions items-center gap-1 flex-wrap"):
                 if data.get("parentItem"):
                     ui.button(t("zotero.parent"), icon="arrow_back", on_click=partial(self.open_item, data["parentItem"]), color=None).props(
                         "flat dense no-caps").bind_enabled_from(self, "can_read")
@@ -377,13 +395,15 @@ class ZoteroWorkbench:
                 elif kind == "attachment" and data.get("contentType") == "application/pdf":
                     ui.button(t("zotero.preview_import"), on_click=lambda: self.import_dialog(attachment_keys=[item["key"]]), color=None).props(
                         "outline dense no-caps").bind_enabled_from(self, "can_read")
-            with ui.row().classes("w-full gap-1 zotero-tabs"):
+            with ui.row().classes("w-full gap-1 zotero-tabs").props(
+                    f'role="group" aria-label="{t("zotero.details")}"'):
                 panels = ["metadata", "children", "links"]
                 if kind == "attachment":
                     panels.insert(2, "fulltext")
                 for panel in panels:
                     ui.button(t(f"zotero.{panel}"), on_click=partial(self.show_panel, panel), color=None).props(
-                        "flat dense no-caps").classes("zotero-tab-active" if self.panel == panel else "theme-text-secondary").bind_enabled_from(self, "can_read")
+                        f'flat dense no-caps aria-pressed={str(self.panel == panel).lower()}')\
+                        .classes("zotero-tab-active" if self.panel == panel else "theme-text-secondary").bind_enabled_from(self, "can_read")
             if self.panel == "metadata":
                 self.metadata(item)
             elif self.panel == "children" and self.children is not None:
@@ -428,26 +448,29 @@ class ZoteroWorkbench:
     def metadata(self, item):
         data = item["data"]
         if _authors(item):
-            ui.label(_authors(item)).classes("text-sm theme-text-secondary")
+            ui.label(_authors(item)).classes("zotero-authors text-sm theme-text-secondary")
         if "note" in data:
-            ui.label(t("zotero.user_note")).classes("text-xs theme-text-muted")
-            ui.label(note_text(data["note"])).classes("text-sm theme-text whitespace-pre-wrap break-words leading-relaxed")
+            with ui.column().classes("zotero-reading-block w-full gap-2"):
+                ui.label(t("zotero.user_note")).classes("zotero-field-heading text-xs theme-text-muted")
+                ui.label(note_text(data["note"])).classes("zotero-reading-copy text-sm theme-text whitespace-pre-wrap break-words leading-relaxed")
         if data.get("itemType") == "annotation":
-            ui.label(t("zotero.user_annotation")).classes("text-xs theme-text-muted")
+            ui.label(t("zotero.user_annotation")).classes("zotero-field-heading text-xs theme-text-muted")
             for key in ("annotationPageLabel", "annotationText", "annotationComment"):
                 if data.get(key):
-                    ui.label(f"{key}: {data[key]}").classes("text-sm theme-text whitespace-pre-wrap break-words")
+                    ui.label(f"{key}: {data[key]}").classes("zotero-reading-copy text-sm theme-text whitespace-pre-wrap break-words")
         if data.get("abstractNote"):
-            ui.label(t("zotero.abstract")).classes("text-xs font-semibold theme-text-muted")
-            ui.label(data["abstractNote"]).classes("text-sm theme-text whitespace-pre-wrap break-words leading-relaxed")
+            with ui.column().classes("zotero-abstract w-full gap-2"):
+                ui.label(t("zotero.abstract")).classes("zotero-field-heading text-xs theme-text-muted")
+                ui.label(data["abstractNote"]).classes("zotero-reading-copy text-sm theme-text whitespace-pre-wrap break-words leading-relaxed")
         excluded = {"key", "version", "title", "creators", "note", "abstractNote", "annotationText", "annotationComment", "annotationPosition"}
-        for key, value in data.items():
-            if key in excluded or value in (None, "", [], {}):
-                continue
-            text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
-            with ui.row().classes("w-full gap-3 flex-nowrap"):
-                ui.label(key).classes("text-xs theme-text-muted w-32 shrink-0 break-words")
-                ui.label(text).classes("text-sm theme-text-secondary whitespace-pre-wrap break-all min-w-0")
+        with ui.column().classes("zotero-record-fields w-full gap-0"):
+            for key, value in data.items():
+                if key in excluded or value in (None, "", [], {}):
+                    continue
+                text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+                with ui.row().classes("zotero-field w-full items-start gap-4"):
+                    ui.label(key).classes("zotero-field-key text-xs theme-text-muted")
+                    ui.label(text).classes("zotero-field-value text-sm theme-text-secondary whitespace-pre-wrap min-w-0")
 
     async def show_panel(self, panel):
         if panel == "children":

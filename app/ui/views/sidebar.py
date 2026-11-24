@@ -20,12 +20,9 @@ def render_app_header(current_view: dict, switch_view: Callable, callbacks: dict
         ui.icon("chevron_right", size="xs").classes("theme-text-muted")
         title = ui.label().classes("app-view-title text-sm theme-text-secondary")
         ui.space()
-        search = ui.button(icon="search", color=None, on_click=(callbacks or {}).get("focus_search")).props(
-            f'flat dense round size=sm aria-label="{t("workspace.search_catalog")}" aria-keyshortcuts="Control+K Meta+K"'
-        ).classes("theme-text-muted").tooltip(t("workspace.search_shortcut"))
         if state is not None:
             render_task_activity(state, callbacks or {}, file_handlers)
-        with ui.button(t("sidebar.tools"), icon="tune", color=None).props("flat dense no-caps").classes("app-tools theme-text-secondary"):
+        with ui.button(t("sidebar.tools"), icon="apps", color=None).props("flat dense no-caps").classes("app-tools theme-text-secondary"):
             with ui.menu().props("auto-close"):
                 for group, items in (
                     ("tools_integrations", (("zotero", "local_library"), ("mcp_config", "settings_input_component"), ("skills", "extension"))),
@@ -49,7 +46,6 @@ def render_app_header(current_view: dict, switch_view: Callable, callbacks: dict
         if header.is_deleted:
             return
         title.set_text(t(f"sidebar.{current_view['value']}"))
-        search.set_visibility(current_view["value"] in ("files", "wiki", "graph"))
 
     refresh()
     return SimpleNamespace(refresh=refresh)

@@ -82,7 +82,11 @@ def test_graph_spaces_and_canvas_refresh_without_reload(live_gui):
             graph_service.delete_graph(created["id"], confirmed=True, impact_token=preview["impact_token"])
             expect(picker).to_contain_text(default["name"], timeout=15000)
             page.locator(f'[data-catalog-row="{root}"]').click()
+            overview_canvas_id = page.locator(".nicegui-echart").get_attribute("id")
             page.locator(".graph-inspector").get_by_role("button", name=text("graph", "center"), exact=True).click()
+            expect(page.get_by_role("button", name=text("graph", "local_graph"), exact=True)).to_have_attribute("aria-pressed", "true")
+            # 全局与局部此时都是 1 节点、0 边；必须等展示模式切换后的新画布，不能命中旧图。
+            expect(page.locator(".nicegui-echart")).not_to_have_attribute("id", overview_canvas_id)
             wait_chart(page, 1, 0)
             canvas_id = page.locator(".nicegui-echart").get_attribute("id")
             page.locator(".nicegui-echart").evaluate("""el => {

@@ -38,8 +38,8 @@ def graph_view():
     return view
 
 
-def fake_chart():
-    return SimpleNamespace(is_deleted=False, options={}, run_chart_method=Mock(),
+def fake_chart(view):
+    return SimpleNamespace(is_deleted=False, options=view.graph_chart_options(), run_chart_method=Mock(),
                            _props=SimpleNamespace(suspend_updates=nullcontext))
 
 
@@ -76,7 +76,8 @@ def test_space_changes_preserve_selection_and_deleted_space_falls_back(knowledge
         graph_service.delete_graph(created["id"], confirmed=True, impact_token=preview["impact_token"])
         await view.poll()
         assert view.graph_id == default
-        assert view.detail is None and view.selected_object is None and view.graph is None
+        assert view.detail is None and view.selected_object is None
+        assert view.graph["graph_id"] == default and view.graph["nodes"] == []
         assert all(item["id"] != created["id"] for item in view.graphs)
         assert view.results["graph_id"] == default
 
@@ -134,7 +135,7 @@ def test_local_canvas_updates_in_place_and_preserves_exploration(knowledge_base)
         view.selected_object = b
         await view.load_graph(expand=True)
         assert len(view._graph_queries) == 2
-        chart = view.chart = fake_chart()
+        chart = view.chart = fake_chart(view)
         view.positions = {a: (12, 34), b: (56, 78)}
         view.viewport = {"zoom": 1.7, "center": [20, 30]}
         updated = apply(graph_service, objects=[{"id": b, "expected_revision": 1, "title": "已改名"},
@@ -170,14 +171,14 @@ def test_overview_updates_without_selection_or_camera_reset(knowledge_base):
         view.mode = "graph"
         view.overview = True
         await view.load_overview()
-        chart = view.chart = fake_chart()
+        chart = view.chart = fake_chart(view)
         added = apply(graph_service, objects=[{"ref": "b", "kind": "entity", "title": "新节点"}])
         await view.poll()
         assert view.detail is None and view.graph["total_nodes"] == 2
         assert view.chart is chart
         payload = chart.run_chart_method.call_args.args[1]
-        assert set(payload) == {"series"}
-        assert {node["id"] for series in payload["series"][1:] for node in series["data"]} == {
+        assert set(payload) == {"series", "legend"}
+        assert {node["id"] for series in payload["series"] for node in series["data"]} == {
             made["refs"]["a"]["id"], added["refs"]["b"]["id"]}
         view.refresh_graph_stats.assert_called_once()
 
@@ -244,6 +245,7 @@ def test_checks_and_references_update_without_selected_detail(knowledge_base, fe
         view.mode = "objects" if feature == "graph" else "review"
         if feature == "graph":
             await view.load_graphs()
+            view.mode = "objects"
             view.review_open = True
         await view.run_checks()
         await view.file_references(fid)

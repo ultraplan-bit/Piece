@@ -100,10 +100,12 @@ def test_switching_to_graph_tab_loads_graph_for_selected_object(knowledge_base, 
         await workbench.set_mode("graph")
         assert calls == []
 
-        # 换选乙后切回图谱标签，应改以乙为根。
+        # 读过乙的详情再回来，仍保留甲为探索中心；明确“以此为中心”才改变它。
         await workbench.set_mode("objects")
         await workbench.select("object", b)
         await workbench.set_mode("graph")
+        assert workbench.graph["root_id"] == a
+        await workbench.view_graph()
         assert workbench.graph["root_id"] == b
     asyncio.run(scenario())
 
@@ -231,6 +233,8 @@ def test_graph_zoom_dispatches_origin_and_filters_reload(knowledge_base, monkeyp
         # 测试环境没有事件循环，refreshable 的刷新无法调度；只验证状态流转。
         workbench.refresh_graph = lambda: None
         workbench.refresh_edge_table = lambda: None
+        workbench.refresh_graph_stats = lambda: None
+        workbench.refresh_graph_toolbar = lambda: None
 
         async def scenario():
             # 缩放派发必须同时给出 originX/originY，否则 center 会变成 NaN。
@@ -246,10 +250,12 @@ def test_graph_zoom_dispatches_origin_and_filters_reload(knowledge_base, monkeyp
 
             # 全局概览缩放通过调整 3D 球体的相机距离实现。
             workbench.graph = service.graph_overview()
+            workbench.layout = "sphere3d"
             scripts.clear()
             await workbench.zoom_graph(1.25)
             assert len(scripts) == 1 and "globe" in scripts[0] and "setOption" in scripts[0]
             assert "graphRoam" not in scripts[0]
+            workbench.layout = "auto"
             workbench.graph = service.graph(root_id=root, edge_types=["relation"])
 
             # 深度变化即重取子图：两跳多出「链端」。
@@ -337,14 +343,19 @@ def test_graph_global_overview_switching_and_node_drilldown(knowledge_base, monk
             assert workbench.chart is not None
             chart = workbench.chart
             options = chart._props["options"]
-            assert chart._props["enable_3d"] is True
-            assert options["globe"]["show"] is False
-            assert options["series"][0]["type"] == "lines3D"
+            assert chart._props["enable_3d"] is False
+            assert "globe" not in options
+            assert options["series"][0]["type"] == "graph"
         # render_graph installs a refreshable; this controller test has no NiceGUI server loop.
         workbench.refresh_graph = lambda: None
         assert workbench.overview and workbench.graph["overview"]
+        workbench.refresh_graph_stats = lambda: None
+        workbench.refresh_graph_toolbar = lambda: None
+        workbench.refresh_edge_table = lambda: None
         assert {node["id"] for node in workbench.graph["nodes"]} == {hub, leaf}
         await workbench.graph_click(SimpleNamespace(args={"dataType": "node", "data": {"id": hub}}))
+        assert workbench.overview and workbench.inspector_open
+        await workbench.view_graph()
         assert not workbench.overview and workbench.graph["root_id"] == hub
         await workbench.show_global_graph()
         await workbench.show_local_graph()

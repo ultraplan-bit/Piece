@@ -579,12 +579,15 @@ class WorkbenchBase:
             ui.label(self.text("location_" + evidence["location_status"])).classes("text-xs theme-text-muted")
             ui.label(evidence["quote"]).classes("text-sm whitespace-pre-wrap break-words theme-text-secondary")
             if evidence["source_kind"] == "piece":
-                ui.label(self.text("source_ids", library=evidence["source_library_id"], file=evidence["source_file_id"], chunk=evidence["source_chunk_id"])).classes("text-xs break-all theme-text-muted")
+                with ui.expansion(self.text("technical_info")).props("dense").classes("w-full text-xs theme-text-muted"):
+                    ui.label(self.text("source_ids", library=evidence["source_library_id"], file=evidence["source_file_id"], chunk=evidence["source_chunk_id"])).classes("text-xs break-all theme-text-muted")
                 if local_source(evidence, self.detail["library_id"]):
                     ui.button(self.text("compare_source"), on_click=partial(self.compare_source, deepcopy(evidence))).props("flat dense no-caps")
             elif evidence["source_kind"] == "external" and safe_external_url(evidence.get("source_url")):
                 ui.link(self.text("external_source"), evidence["source_url"], new_tab=True)
-            ui.button(self.text("delete_evidence"), on_click=partial(self.preview_delete, "evidence", deepcopy(evidence))).props("flat dense no-caps")
+            with ui.button(icon="more_horiz", color=None).props(f'flat dense aria-label="{self.text("more")}"').tooltip(self.text("more")):
+                with ui.menu():
+                    ui.menu_item(self.text("delete_evidence"), on_click=partial(self.preview_delete, "evidence", deepcopy(evidence))).props("role=menuitem").classes("theme-danger")
 
     async def compare_source(self, evidence):
         fresh = await self.call(self.service.get_record, kind="evidence", id=evidence["id"])

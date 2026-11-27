@@ -133,9 +133,10 @@ async def _retry_task(task: dict, file_handlers) -> None:
     ui.notify(t("files.reindex_started"), type="positive")
 
 
-def active_task_count(state: dict) -> int:
+def active_task_count(state: dict, ui_refs: dict | None = None) -> int:
     """计入后台任务与尚在接收/受理的文档，不额外查询。"""
-    return len(state.get("task_progress") or {}) + state.get("uploading_count", 0)
+    recall = (ui_refs or {}).get("recall_run_state") or {}
+    return len(state.get("task_progress") or {}) + state.get("uploading_count", 0) + int(bool(recall.get("is_running")))
 
 
 def update_activity_badge(state: dict, ui_refs: dict) -> None:
@@ -147,7 +148,7 @@ def update_activity_badge(state: dict, ui_refs: dict) -> None:
     badge = ui_refs.get("task_activity_badge")
     if badge is None or getattr(badge, "is_deleted", False):
         return
-    count = active_task_count(state)
+    count = active_task_count(state, ui_refs)
     if count == state.get("task_activity_badge_count"):
         return
     state["task_activity_badge_count"] = count
@@ -254,6 +255,24 @@ def render_task_activity(state: dict, ui_refs: dict, file_handlers=None) -> None
         with ui.column().classes("task-activity-panel w-80 max-w-full gap-0").style(
             "max-height: 60vh; overflow-y: auto"
         ):
+            recall = ui_refs.get("recall_run_state") or {}
+            if recall.get("is_running"):
+                with ui.row().classes("task-activity-row w-full items-center gap-2 px-3 py-2 flex-nowrap"):
+                    ui.spinner(size="xs")
+                    with ui.column().classes("flex-1 min-w-0 gap-0"):
+                        ui.label(t("recall_test.title")).classes("text-xs theme-text")
+                        ui.label(recall.get("running_query", recall.get("query", ""))).classes("text-xs theme-text-muted truncate w-full")
+                        ui.label(t(recall.get("stage", "recall_test.stage_search"))).classes("text-xs theme-text-muted")
+                    if ui_refs.get("open_recall_test"):
+                        async def open_recall():
+                            menu = ui_refs.get("task_activity_menu")
+                            if menu is not None and not menu.is_deleted:
+                                menu.close()
+                            result = ui_refs["open_recall_test"]()
+                            if inspect.isawaitable(result):
+                                await result
+                        ui.button(icon="open_in_new", on_click=open_recall).props(
+                            f'flat dense round size=xs aria-label="{t("recall_test.title")}"').tooltip(t("recall_test.title"))
             upload_count = state.get("uploading_count", 0)
             if upload_count:
                 _section_title(t("task_activity.importing"), upload_count)
@@ -268,7 +287,7 @@ def render_task_activity(state: dict, ui_refs: dict, file_handlers=None) -> None
                     with ui.row().classes("w-full items-center gap-2 px-3 py-1 flex-nowrap"):
                         ui.spinner(size="xs").classes("theme-text-accent")
                         ui.label(filename).classes("text-xs theme-text truncate flex-1").tooltip(filename)
-            if not active and not recent and not upload_count:
+            if not active and not recent and not upload_count and not recall.get("is_running"):
                 ui.label(t("task_activity.empty")).classes(
                     "text-xs theme-text-muted px-3 py-3"
                 )
@@ -298,7 +317,7 @@ def render_task_activity(state: dict, ui_refs: dict, file_handlers=None) -> None
         if reload is not None:
             await reload()
 
-    active_count = active_task_count(state)
+    active_count = active_task_count(state, ui_refs)
     state["task_activity_badge_count"] = active_count
     with ui.button(icon="task_alt", color=None).props(
         f'flat dense round size=sm aria-label="{t("task_activity.open")}"'
@@ -311,6 +330,7 @@ def render_task_activity(state: dict, ui_refs: dict, file_handlers=None) -> None
         badge.set_visibility(bool(active_count))
         menu = ui.menu().props("auto-close=false").classes("task-activity-menu")
         ui_refs["task_activity_menu"] = menu
+        ui_refs["open_task_activity"] = menu.open
         with menu:
             activity_panel()
         menu.on("show", on_show)

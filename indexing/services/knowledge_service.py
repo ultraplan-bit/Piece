@@ -767,12 +767,70 @@ def delete(data, *, actor="internal"):
         return result
 
 
+def _relation_filter(predicates, statuses):
+    filters, params = "", []
+    for field, values in (("predicate", predicates), ("status", statuses)):
+        if values is not None:
+            filters += f" AND {field} IN ({','.join('?' for _ in values)})" if values else " AND 0"
+            params.extend(values)
+    return filters, params
+
+
+def _graph_edge_details(cursor, graph_id, nodes, edges):
+    titles = {node["id"]: node["title"] for node in nodes}
+    counts = dict(cursor.execute(
+        f"SELECT relation_id,COUNT(*) FROM knowledge_evidence WHERE graph_id=? AND relation_id IN ({','.join('?' for _ in edges)}) GROUP BY relation_id",
+        [graph_id, *[edge["id"] for edge in edges]],
+    ).fetchall()) if edges else {}
+    for edge in edges:
+        edge["kind"] = "relation"
+        edge["symmetric"] = edge["predicate"] in SYMMETRIC
+        edge["evidence_count"] = counts.get(edge["id"], 0)
+        edge["display"] = _relation_display(edge, titles)
+
+
+def _neighbor_page(cursor, query, graph_id):
+    filters, params = _relation_filter(query.predicates, query.statuses)
+    sql = ("SELECT DISTINCT CASE WHEN source_id=? THEN target_id ELSE source_id END AS neighbor "
+           "FROM knowledge_relations WHERE graph_id=? AND (source_id=? OR target_id=?)" + filters)
+    args = [query.root_id, graph_id, query.root_id, query.root_id, *params]
+    total = cursor.execute("SELECT COUNT(*) FROM (" + sql + ")", args).fetchone()[0]
+    size = max(0, query.max_nodes - 1)
+    page = cursor.execute(sql + " ORDER BY neighbor LIMIT ? OFFSET ?", [*args, size, query.neighbor_offset]).fetchall()
+    ids = {query.root_id, *(row["neighbor"] for row in page)}
+    marks = ",".join("?" for _ in ids)
+    rows = cursor.execute(f"SELECT {SUMMARY_COLUMNS} FROM knowledge_objects WHERE graph_id=? AND id IN ({marks})",
+                          [graph_id, *sorted(ids)]).fetchall()
+    nodes = sorted((dict(row) for row in rows), key=lambda node: (node["id"] != query.root_id, node["id"]))
+    rows = cursor.execute("SELECT * FROM knowledge_relations WHERE graph_id=? AND (source_id=? OR target_id=?) "
+                          f"AND source_id IN ({marks}) AND target_id IN ({marks})" + filters + " ORDER BY id LIMIT ?",
+                          [graph_id, query.root_id, query.root_id, *sorted(ids), *sorted(ids), *params, query.max_edges + 1]).fetchall()
+    edges = [dict(row) for row in rows[:query.max_edges]]
+    _graph_edge_details(cursor, graph_id, nodes, edges)
+    for node in nodes:
+        node["neighbor_count"] = total if node["id"] == query.root_id else cursor.execute(
+            "SELECT COUNT(DISTINCT CASE WHEN source_id=? THEN target_id ELSE source_id END) "
+            "FROM knowledge_relations WHERE graph_id=? AND (source_id=? OR target_id=?)" + filters,
+            [node["id"], graph_id, node["id"], node["id"], *params]).fetchone()[0]
+    end = query.neighbor_offset + len(page)
+    return {"library_id": _library_id(cursor), "graph_id": graph_id, "root_id": query.root_id,
+            "nodes": nodes, "edges": edges, "truncated": total > len(page) or len(rows) > query.max_edges,
+            "depth": 1, "max_nodes": query.max_nodes, "max_edges": query.max_edges,
+            "neighbor_offset": query.neighbor_offset, "total_neighbors": total,
+            "next_neighbor_offset": end if size and end < total else None,
+            "hint": "仅返回当前相邻节点页；可继续加载下一页或从节点展开，关系受单次上限约束"}
+
+
 def graph(**kwargs):
     query = _validate(models.GraphInput, kwargs)
     with get_db_cursor() as cursor:
         cursor.execute("BEGIN")
         graph_id = _graph_id(cursor, query.graph_id)
         _record(cursor, "object", query.root_id, graph_id)
+        if query.depth == 1:
+            return _neighbor_page(cursor, query, graph_id)
+        if query.neighbor_offset:
+            raise BusinessError("INVALID_INPUT", "相邻节点分页只支持一跳图谱")
         node_ids, edges, seen_edges = {query.root_id}, [], set()
         frontier, truncated = [query.root_id], False
         for _ in range(query.depth):
@@ -830,13 +888,13 @@ def graph(**kwargs):
 
 
 def graph_overview(**kwargs):
-    """返回按关联度优先采样的全库图概览；节点与关系均有硬上限。"""
+    """Degree-ordered node pages and independent edge pages over the loaded node scope.
+
+    On a new node page callers reset edge_offset to zero. Relationship pages use
+    load_nodes=False and the complete known_node_ids; edge_scope identifies that scope.
+    """
     query = _validate(models.GraphOverviewInput, kwargs)
-    filters, params = "", []
-    for field, values in (("predicate", query.predicates), ("status", query.statuses)):
-        if values is not None:
-            filters += f" AND {field} IN ({','.join('?' for _ in values)})" if values else " AND 0"
-            params.extend(values)
+    filters, params = _relation_filter(query.predicates, query.statuses)
 
     with get_db_cursor() as cursor:
         cursor.execute("BEGIN")
@@ -844,48 +902,55 @@ def graph_overview(**kwargs):
         total_nodes = cursor.execute("SELECT COUNT(*) FROM knowledge_objects WHERE graph_id=?", (graph_id,)).fetchone()[0]
         total_edges = cursor.execute("SELECT COUNT(*) FROM knowledge_relations WHERE graph_id=?" + filters,
                                      [graph_id, *params]).fetchone()[0]
-        # 高关联节点优先，避免大库截断时只看到任意 UUID 子集；孤立节点仍补入剩余名额。
-        rows = cursor.execute(
-            "WITH selected_relations AS (SELECT source_id,target_id FROM knowledge_relations WHERE graph_id=?" + filters + "),"
-            " degrees AS (SELECT object_id,COUNT(*) AS degree FROM ("
-            "SELECT source_id AS object_id FROM selected_relations UNION ALL "
-            "SELECT target_id AS object_id FROM selected_relations) GROUP BY object_id),"
-            " selected_nodes AS (SELECT o.id,COALESCE(d.degree,0) AS degree FROM knowledge_objects o "
-            "LEFT JOIN degrees d ON d.object_id=o.id WHERE o.graph_id=? ORDER BY degree DESC,o.id LIMIT ?) "
-            "SELECT o." + SUMMARY_COLUMNS.replace(",", ",o.") + " FROM selected_nodes s "
-            "JOIN knowledge_objects o ON o.id=s.id AND o.graph_id=? ORDER BY s.degree DESC,o.id",
-            [graph_id, *params, graph_id, query.max_nodes + 1, graph_id],
-        ).fetchall()
-        truncated = total_nodes > query.max_nodes or total_edges > query.max_edges
-        nodes = [dict(row) for row in rows[:query.max_nodes]]
-        node_ids = {node["id"] for node in nodes}
+        degree_cte = ("WITH selected_relations AS (SELECT source_id,target_id FROM knowledge_relations WHERE graph_id=?" + filters + "),"
+                      " degrees AS (SELECT object_id,COUNT(*) AS degree FROM ("
+                      "SELECT source_id AS object_id,target_id AS neighbor FROM selected_relations UNION "
+                      "SELECT target_id AS object_id,source_id AS neighbor FROM selected_relations) GROUP BY object_id) ")
+        total_isolated = cursor.execute(degree_cte + "SELECT COUNT(*) FROM knowledge_objects o LEFT JOIN degrees d ON d.object_id=o.id "
+                                        "WHERE o.graph_id=? AND COALESCE(d.degree,0)=0", [graph_id, *params, graph_id]).fetchone()[0]
+        filtered_nodes = total_isolated if query.isolated_only else total_nodes
+        rows = cursor.execute(degree_cte + "SELECT o." + SUMMARY_COLUMNS.replace(",", ",o.") + ",COALESCE(d.degree,0) AS neighbor_count "
+                              "FROM knowledge_objects o LEFT JOIN degrees d ON d.object_id=o.id WHERE o.graph_id=? "
+                              + ("AND COALESCE(d.degree,0)=0 " if query.isolated_only else "")
+                              + "ORDER BY neighbor_count DESC,o.id LIMIT ? OFFSET ?",
+                              [graph_id, *params, graph_id, query.max_nodes, query.offset]).fetchall() if query.load_nodes else []
+        nodes = [dict(row) for row in rows]
+        node_ids = {node["id"] for node in nodes} | set(query.known_node_ids)
         edges = []
+        scope_edges = 0
+        scope_nodes = nodes
         if node_ids:
             ordered_ids = sorted(node_ids)
             placeholders = ",".join("?" for _ in ordered_ids)
+            scope_nodes = [dict(row) for row in cursor.execute(
+                f"SELECT {SUMMARY_COLUMNS} FROM knowledge_objects WHERE graph_id=? AND id IN ({placeholders})",
+                [graph_id, *ordered_ids]).fetchall()]
+            node_ids = {node["id"] for node in scope_nodes}
+            ordered_ids = sorted(node_ids)
+            placeholders = ",".join("?" for _ in ordered_ids)
+            scope_sql = (" FROM knowledge_relations WHERE graph_id=? AND source_id IN (" + placeholders
+                         + ") AND target_id IN (" + placeholders + ")" + filters)
+            scope_args = [graph_id, *ordered_ids, *ordered_ids, *params]
+            scope_edges = cursor.execute("SELECT COUNT(*)" + scope_sql, scope_args).fetchone()[0]
             rows = cursor.execute(
-                "SELECT * FROM knowledge_relations WHERE graph_id=? AND source_id IN (" + placeholders + ") AND target_id IN (" +
-                placeholders + ")" + filters + " ORDER BY id LIMIT ?",
-                [graph_id, *ordered_ids, *ordered_ids, *params, query.max_edges + 1],
+                "SELECT *" + scope_sql + " ORDER BY id LIMIT ? OFFSET ?",
+                [*scope_args, query.max_edges, query.edge_offset],
             ).fetchall()
-            if len(rows) > query.max_edges:
-                truncated = True
-            edges = [dict(row) for row in rows[:query.max_edges]]
-            titles = {node["id"]: node["title"] for node in nodes}
-            counts = dict(cursor.execute(
-                f"SELECT relation_id,COUNT(*) FROM knowledge_evidence WHERE graph_id=? AND relation_id IN ({','.join('?' for _ in edges)}) GROUP BY relation_id",
-                [graph_id, *[edge["id"] for edge in edges]],
-            ).fetchall()) if edges else {}
-            for edge in edges:
-                edge["kind"] = "relation"
-                edge["symmetric"] = edge["predicate"] in SYMMETRIC
-                edge["evidence_count"] = counts.get(edge["id"], 0)
-                edge["display"] = _relation_display(edge, titles)
+            edges = [dict(row) for row in rows]
+            _graph_edge_details(cursor, graph_id, scope_nodes, edges)
+        node_end, edge_end = query.offset + len(nodes), query.edge_offset + len(edges)
+        edge_scope = _digest({"graph_id": graph_id, "nodes": sorted(node_ids),
+                              "predicates": query.predicates, "statuses": query.statuses})
         return {"library_id": _library_id(cursor), "graph_id": graph_id, "root_id": nodes[0]["id"] if nodes else None, "nodes": nodes, "edges": edges,
-                "overview": True, "truncated": truncated, "depth": 0,
+                "overview": True, "truncated": len(node_ids) < filtered_nodes or scope_edges > len(edges), "depth": 0,
                 "max_nodes": query.max_nodes, "max_edges": query.max_edges,
                 "total_nodes": total_nodes, "total_edges": total_edges,
-                "hint": "全库概览按关联度优先展示，节点与关系均受上限约束；截断时需筛选或从节点进入局部图"}
+                "filtered_nodes": filtered_nodes, "total_isolated": total_isolated, "scope_edges": scope_edges,
+                "load_nodes": query.load_nodes, "isolated_only": query.isolated_only,
+                "offset": query.offset, "next_offset": node_end if node_end < filtered_nodes else None,
+                "edge_offset": query.edge_offset, "next_edge_offset": edge_end if edge_end < scope_edges else None,
+                "edge_scope": edge_scope,
+                "hint": "节点按关联度分页；关系按当前已载节点范围独立分页，追加节点后需从关系第一页继续读取"}
 
 
 def lint(**kwargs):

@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.ui.views.graph_presenter import KINDS, TYPE_MARKS, graph_options, merge_graph
+from app.ui.views.graph_presenter import KINDS, TYPE_MARKS, graph_options, graph_projection, merge_graph
 
 
 def sample_graph():
@@ -93,6 +93,11 @@ def test_collision_suppression_preserves_native_edge_labels_and_hover_reveals():
     assert series["emphasis"]["edgeLabel"]["show"] is True
     assert "labelLayout" not in series
 
+    # 全局关系文字默认收起，节点避让应从首次显示起生效，不依赖交互脚本的 show 变化。
+    graph["overview"] = True
+    overview = graph_options(graph)["series"][0]
+    assert overview["labelLayout"]["hideOverlap"] is True
+
 
 def test_overview_uses_three_dimensional_sphere_without_surface_shell():
     graph = {
@@ -104,7 +109,7 @@ def test_overview_uses_three_dimensional_sphere_without_surface_shell():
                   {"id": "ac", "source_id": "a", "target_id": "c"}],
     }
 
-    options = graph_options(graph, selected="a")
+    options = graph_options(graph, selected="a", layout="sphere3d")
     nodes = {node["id"]: node for series in options["series"][1:] for node in series["data"]}
     edges = options["series"][0]
 
@@ -134,3 +139,143 @@ def test_graph_expansion_obeys_combined_budget_and_keeps_positions():
     node = current["nodes"][0]["id"]
     output = graph_options(current, positions={node: (123, 456)})
     assert (output["series"][0]["data"][0]["x"], output["series"][0]["data"][0]["y"]) == (123, 456)
+
+
+def test_overview_defaults_to_stable_2d_and_packs_disconnected_nodes():
+    graph = sample_graph()
+    graph["overview"] = True
+    graph["nodes"].append({"id": "isolated", "title": "Isolated", "kind": "concept"})
+    first = graph_options(graph)
+    second = graph_options({**graph, "nodes": list(reversed(graph["nodes"])), "edges": list(reversed(graph["edges"]))})
+    positions = lambda options: {node["id"]: (node["x"], node["y"]) for node in options["series"][0]["data"]}
+    assert "globe" not in first
+    assert first["series"][0]["type"] == "graph"
+    assert positions(first) == positions(second)
+    assert len(set(positions(first).values())) == 3
+
+
+def test_structural_groups_preserve_every_relation_direction_and_isolated_member():
+    nodes = [{"id": f"n{i:03}", "title": f"Node {i}", "kind": "concept"} for i in range(100)]
+    edges = [{"id": f"e{i}", "source_id": "n000", "target_id": f"n{i:03}",
+              "predicate": "supports" if i % 2 else "contradicts", "symmetric": False}
+             for i in range(1, 90)]
+    edges.append({"id": "reverse", "source_id": "n089", "target_id": "n000", "predicate": "supports", "symmetric": False})
+    graph = {"root_id": "n000", "nodes": nodes, "edges": edges, "overview": True}
+    projection = graph_projection(graph)
+    assert len(projection["nodes"]) < 20
+    isolated = next(group for group in projection["groups"] if group["isolated"])
+    assert set(isolated["member_ids"]) == {f"n{i:03}" for i in range(90, 100)}
+    represented = [ident for group in projection["groups"] for ident in group["internal_edge_ids"]]
+    represented += [ident for edge in projection["edges"] for ident in edge.get("relation_ids", [edge["id"]])]
+    assert sorted(represented) == sorted(edge["id"] for edge in edges)
+    originals = {edge["id"]: edge for edge in edges}
+    for edge in projection["edges"]:
+        for ident in edge.get("relation_ids", [edge["id"]]):
+            original = originals[ident]
+            assert edge["source_id"] == projection["node_to_group"].get(original["source_id"], original["source_id"])
+            assert edge["target_id"] == projection["node_to_group"].get(original["target_id"], original["target_id"])
+            assert edge["predicate"] == original["predicate"]
+    expanded = graph_projection(graph, expanded_groups=[isolated["id"]])
+    assert set(isolated["member_ids"]) <= {node["id"] for node in expanded["nodes"]}
+    for group in projection["groups"]:
+        if group["id"] != isolated["id"]:
+            assert expanded["layout_positions"][group["id"]] == projection["layout_positions"][group["id"]]
+    full = graph_projection(graph, expanded_groups=[group["id"] for group in projection["groups"]])
+    assert {node["id"] for node in full["nodes"]} == {node["id"] for node in nodes}
+    assert {edge["id"] for edge in full["edges"]} == set(originals)
+
+
+def test_hierarchy_retains_cycles_multiple_parents_and_original_direction():
+    graph = {"root_id": "a", "nodes": [{"id": node, "title": node, "kind": "concept"} for node in "abcde"],
+             "edges": [{"id": source + target, "source_id": source, "target_id": target, "predicate": "is_a"}
+                       for source, target in [("a", "b"), ("b", "a"), ("c", "a"), ("c", "d"), ("d", "e")]]}
+    options = graph_options(graph, layout="hierarchy")
+    nodes = {node["id"]: node for node in options["series"][0]["data"]}
+    assert nodes["a"]["cycle_id"] == nodes["b"]["cycle_id"] and nodes["a"]["cycle_id"]
+    assert nodes["c"]["y"] > nodes["d"]["y"] > nodes["e"]["y"]
+    assert [(edge["source"], edge["target"]) for edge in options["series"][0]["links"]] == [
+        (edge["source_id"], edge["target_id"]) for edge in graph["edges"]]
+    assert set(options["piece_meta"]["cycles"][0]["relation_ids"]) == {"ab", "ba"}
+    graph["edges"][0]["predicate"] = "depends_on"
+    mixed = graph_options(graph, layout="hierarchy")
+    assert mixed["piece_meta"]["layout_warning"] == "hierarchy_requires_single_relation"
+    assert len(mixed["series"][0]["links"]) == len(graph["edges"])
+
+
+def test_expanded_group_identity_survives_new_nodes_and_bridge_edges():
+    graph = {"root_id": "n000", "overview": True,
+             "nodes": [{"id": f"n{i:03}", "title": str(i), "kind": "concept"} for i in range(90)],
+             "edges": [{"id": str(i), "source_id": f"n{i:03}", "target_id": f"n{i + 1:03}", "predicate": "depends_on"}
+                       for i in range(89)]}
+    first = graph_projection(graph)
+    graph["nodes"].append({"id": "new-hub", "title": "New hub", "kind": "concept"})
+    graph["edges"].extend({"id": f"new-{i}", "source_id": "new-hub", "target_id": f"n{i:03}", "predicate": "depends_on"}
+                           for i in range(90))
+    second = graph_projection(graph, grouping=first["groups"], expanded_groups=[first["groups"][0]["id"]])
+    assert {group["id"]: group["member_ids"] for group in first["groups"]} == {
+        group["id"]: group["member_ids"] for group in second["groups"] if group["id"] in {old["id"] for old in first["groups"]}}
+    assert set(first["groups"][0]["member_ids"]) <= {node["id"] for node in second["nodes"]}
+
+
+def test_hierarchy_only_projects_relation_endpoints_and_reports_excluded_nodes():
+    graph = {"root_id": "isolated", "overview": True,
+             "nodes": [{"id": node, "title": node, "kind": "concept"} for node in ("a", "b", "isolated")],
+             "edges": [{"id": "ab", "source_id": "a", "target_id": "b", "predicate": "is_a"}]}
+    hierarchy = graph_options(graph, layout="hierarchy")
+    assert {node["id"] for node in hierarchy["series"][0]["data"]} == {"a", "b"}
+    assert hierarchy["piece_meta"]["excluded_nodes"] == ["isolated"]
+    assert hierarchy["piece_meta"]["excluded_count"] == 1
+    assert {node["id"] for node in graph_options(graph)["series"][0]["data"]} == {"a", "b", "isolated"}
+    empty = graph_options({**graph, "edges": []}, layout="hierarchy")
+    assert empty["series"][0]["data"] == [] and empty["piece_meta"]["excluded_count"] == 3
+
+
+def test_broad_hierarchy_wraps_peers_and_keeps_parent_bands_separate():
+    graph = {"root_id": "root", "overview": True,
+             "nodes": [{"id": node, "title": "长中文名称用于阅读关系与来源证据" + node, "kind": "entity"}
+                       for node in ["root", *[f"n{i:02}" for i in range(33)]]],
+             "edges": [{"id": str(i), "source_id": f"n{i:02}", "target_id": "root", "predicate": "part_of"}
+                       for i in range(33)]}
+    for size in ((1100, 800), (580, 750), (350, 750)):
+        options = graph_options(graph, layout="hierarchy", canvas_size=size)
+        nodes = options["series"][0]["data"]
+        parent = next(node for node in nodes if node["id"] == "root")
+        children = [node for node in nodes if node["id"] != "root"]
+        assert len({node["y"] for node in children}) >= 3
+        assert min(node["y"] for node in children) > parent["y"]
+        assert {node["hierarchy_rank"] for node in children} == {1}
+        assert all(node["label"]["position"] == "inside" and node["label"]["show"] for node in nodes)
+        assert all(len(node["hierarchy_label"].splitlines()) <= 2 for node in nodes)
+        assert len(options["series"][0]["links"]) == 33
+        assert options["piece_meta"]["visible_nodes"] == 34
+        assert all(node["title"] in node["tooltip_text"] for node in nodes)
+
+
+def test_detail_labels_and_reduced_motion_preserve_selection_and_manual_positions():
+    graph = sample_graph()
+    node, edge = graph["nodes"][0]["id"], graph["edges"][0]["id"]
+    options = graph_options(graph, selected=node, selected_edge=edge, label_density="focus",
+                            reduced_motion=True, positions={node: (321, 456)})
+    assert options["animation"] is False
+    series = options["series"][0]
+    assert (series["data"][0]["x"], series["data"][0]["y"]) == (321, 456)
+    assert series["data"][0]["itemStyle"]["borderWidth"] > series["data"][1]["itemStyle"]["borderWidth"]
+    assert series["links"][0]["label"]["show"] is True
+
+
+def test_merge_refreshes_existing_metadata_and_tracks_neighbor_page_owner():
+    original = sample_graph()
+    incoming = deepcopy(original)
+    incoming["root_id"] = original["nodes"][1]["id"]
+    incoming["nodes"][0]["title"] = "Updated title"
+    incoming["edges"][0]["evidence_count"] = 7
+    incoming.update(depth=2, neighbor_offset=20, next_neighbor_offset=40, total_neighbors=60)
+    result = merge_graph(original, incoming)
+    assert result["root_id"] == original["root_id"]
+    assert result["neighbor_root_id"] == incoming["root_id"]
+    assert result["depth"] == 2 and result["next_neighbor_offset"] == 40
+    assert result["neighbor_pages"][incoming["root_id"]]["total_neighbors"] == 60
+    assert result["nodes"][0]["title"] == "Updated title"
+    assert result["edges"][0]["evidence_count"] == 7
+    result["nodes"][0]["title"] = "Another edit"
+    assert incoming["nodes"][0]["title"] == "Updated title"

@@ -109,6 +109,10 @@ def test_wiki_browser_independent_roundtrip(wiki_gui):
             apply(pages=[{"id": page1["id"], "expected_revision": current["revision"],
                           "expected_content_hash": current["content_hash"],
                           "body": f"## 原有正文\n\n[目标页](piece://wiki/{target})"}])
+            # 跨进程替换 Markdown 的短暂空缺可能让现有轮询清空详情；
+            # 写入完成后通过真实目录选择重新读取，不把缓存正文当成成功。
+            assert f"piece://wiki/{target}" in get_page(page1["id"])["record"]["body"]
+            page.get_by_role("button", name="Wiki 浏览页", exact=True).first.click()
             expect(prose).to_contain_text("目标页", timeout=15000)
 
             # 点击 MD 派生的 Wiki 内链，在本功能内跳转，不进入图谱。
@@ -138,6 +142,7 @@ def test_wiki_browser_independent_roundtrip(wiki_gui):
                   evidence=[{"page": {"id": page1["id"]}, "source_kind": "piece",
                              "source_library_id": library, "source_file_id": service["file_id"],
                              "source_chunk_id": chunk["id"], "quote": chunk["chunk_text"]}])
+            page.get_by_role("button", name="Wiki 浏览页", exact=True).first.click()
             page.get_by_role("button", name=wk("page_info"), exact=True).click()
             expect(page.get_by_text(k("location_current"), exact=True)).to_be_visible(timeout=15000)
             page.screenshot(path=str(service["path"] / "wiki-inspector.png"))
@@ -157,12 +162,14 @@ def test_wiki_browser_independent_roundtrip(wiki_gui):
             page.get_by_role("button", name=k("review"), exact=True).click()
             page.get_by_role("button", name=k("run_checks"), exact=True).click()
             page.get_by_role("button", name=wk("rebuild_index"), exact=True).click()
+            expect(page.get_by_text(wk("rebuild_done"), exact=True)).to_be_visible()
             # 重建不重写正文；按钮与页面保持可用。
             expect(page.get_by_role("button", name=wk("rebuild_index"), exact=True)).to_be_visible()
             page.get_by_role("button", name=k("pages"), exact=True).first.click()
 
             # 删除证据只清理证据；页面与历史保留（预览由服务声明）。
-            page.get_by_role("button", name=k("delete_evidence"), exact=True).first.click()
+            page.locator(".knowledge-evidence").first.get_by_role("button", name=k("more"), exact=True).click()
+            page.get_by_role("menuitem", name=k("delete_evidence"), exact=True).click()
             expect(page.get_by_text(k("delete_preview"), exact=True)).to_be_visible()
             expect(page.get_by_text(k("delete_retains_history"), exact=True)).to_be_visible()
             dialog.get_by_role("button", name=k("confirm_delete"), exact=True).click()

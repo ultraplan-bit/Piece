@@ -338,17 +338,30 @@ class FileHandlers:
             self.ui_refs["collection_filter"].refresh()
 
     async def toggle_collection(self, collection_id):
+        key = str(collection_id)
+        await self.set_collection_expanded(collection_id, key not in self.state["expanded_collection_ids"])
+
+    async def set_collection_expanded(self, collection_id, expanded):
         if self.state.get("collection_edit") or not is_tree_view(self.state):
             return
-        self.select_collection(collection_id)
+        if collection_id not in {item["id"] for item in self.state["collections"]}:
+            return
         key = str(collection_id)
-        expanded = set(self.state["expanded_collection_ids"])
-        expanded.symmetric_difference_update({key})
-        self.state["expanded_collection_ids"] = sorted(expanded)
+        expanded_ids = set(self.state["expanded_collection_ids"])
+        changed = (key in expanded_ids) != expanded
+        if changed:
+            if expanded:
+                expanded_ids.add(key)
+            else:
+                expanded_ids.remove(key)
+            self.state["expanded_collection_ids"] = sorted(expanded_ids)
+        self.select_collection(collection_id)
+        if not changed:
+            return
         row = self.ui_refs.get("catalog_rows", {}).get(f"c:{collection_id}")
         expander = self.ui_refs.get("collection_expanders", {}).get(collection_id)
         if row is not None and not row.is_deleted:
-            row.props(f'aria-expanded={str(key in expanded).lower()} aria-busy=true')
+            row.props(f'aria-expanded={str(expanded).lower()} aria-busy=true')
         if expander is not None and not expander.is_deleted:
             expander.props("loading")
         try:

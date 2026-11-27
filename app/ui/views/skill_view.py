@@ -8,6 +8,7 @@ Skill 导出视图
 """
 
 from functools import partial
+import json
 from pathlib import Path
 
 from nicegui import context, ui
@@ -159,6 +160,7 @@ def render_skill_right(
                 "exported": list(result["exported"]),
                 "exists": list(result["exists"]),
                 "missing": list(result["missing"]),
+                "resources": list(result.get("resources", [])),
             }
             # 覆盖确认不在此处弹出：await 后触发元素可能已被重建/删除，弹窗会挂到失效槽位。
             # 冻结本次目录与已存在清单，交由结果区的按钮在有效上下文中确认。
@@ -193,11 +195,30 @@ def render_skill_right(
             danger=True,
         )
 
+    async def choose_directory():
+        try:
+            value = await ui.run_javascript(
+                f'window.pywebview.api.choose_directory({json.dumps(export_state.get("export_dir", ""))})', timeout=600)
+            if value:
+                export_state["export_dir"] = value
+                _refresh_panel()
+        except Exception:
+            ui.notify(t("skills.directory_failed"), type="negative")
+
+    async def open_directory(result):
+        try:
+            skill_ids = [Path(filename).parent.name for filename in result["exported"]]
+            await ui.run_javascript(
+                f'window.pywebview.api.open_directory({json.dumps(result["dir"])}, {json.dumps(skill_ids)})', timeout=10)
+        except Exception:
+            ui.notify(t("skills.directory_failed"), type="negative")
+
     @ui.refreshable
     def export_panel():
         busy = bool(export_state.get("busy"))
         dir_text = export_state.get("export_dir") or _default_export_dir()
         target = skill["name"] if skill else t("skills.all_target")
+        native_buttons = []
 
         with ui.column().classes("w-full gap-4"):
             # 主操作与目标一目了然
@@ -212,6 +233,11 @@ def render_skill_right(
                     on_change=lambda e: export_state.update({"export_dir": e.value}),
                 ).props("dense outlined").classes("w-full")
                 dir_input.set_enabled(not busy)
+                picker = ui.button(t("skills.choose_directory"), icon="folder_open", on_click=choose_directory).props(
+                    "flat dense no-caps").classes("self-start")
+                picker.set_enabled(not busy)
+                picker.set_visibility(False)
+                native_buttons.append(picker)
                 ui.label(t("skills.export_dir_hint")).classes("text-xs theme-text-muted")
 
             # 主操作：busy 时禁用并显示加载，防止重复提交
@@ -260,6 +286,17 @@ def render_skill_right(
                             ui.label(t("skills.missing", names=", ".join(result["missing"]))).classes(
                                 "text-xs theme-text-muted"
                             )
+                        if result.get("exported"):
+                            for filename in result["exported"] + result.get("resources", []):
+                                with ui.row().classes("items-center gap-2"):
+                                    ui.icon("description", size="xs").classes("theme-text-muted")
+                                    path = Path(filename)
+                                    label = path.expanduser().resolve().relative_to(Path(result["dir"]).expanduser().resolve()).as_posix()
+                                    ui.label(label).classes("text-xs theme-text-secondary").tooltip(filename)
+                            opener = ui.button(t("skills.open_directory"), icon="folder_open",
+                                               on_click=lambda: open_directory(result)).props("flat dense no-caps").classes("self-start")
+                            opener.set_visibility(False)
+                            native_buttons.append(opener)
                     else:
                         ui.label(t("skills.export_failed", error=result.get("error", ""))).classes(
                             "text-sm theme-danger"
@@ -289,6 +326,20 @@ def render_skill_right(
             # 下一步说明
             ui.label(t("skills.export_note")).classes("text-xs theme-text-muted")
 
+        async def show_native_actions():
+            try:
+                available = await ui.run_javascript('''new Promise(resolve => {
+                    if (window.pywebview?.api?.choose_directory) return resolve(true);
+                    window.addEventListener('pywebviewready', () => resolve(true), {once:true});
+                    setTimeout(() => resolve(false), 1000);
+                })''', timeout=2)
+                for button in native_buttons:
+                    if not button.is_deleted:
+                        button.set_visibility(bool(available))
+            except (TimeoutError, RuntimeError):
+                pass
+        ui.timer(0.05, show_native_actions, once=True)
+
     # 记录当前 panel：任何一次渲染都会更新，供在途导出在完成时刷新“最新”面板
     export_state["_panel"] = export_panel
 
@@ -302,7 +353,11 @@ def render_skill_right(
                 ui.icon("extension", size="xs").classes("theme-text-accent")
                 ui.label(title).classes("text-sm font-medium theme-text truncate")
 
-        with ui.scroll_area().classes("flex-1"):
+        scrolls = export_state.setdefault("scrolls", {})
+        scroll_key = selected_skill.get("value") or ""
+        position = scrolls.get(scroll_key, 0)
+        area = ui.scroll_area(on_scroll=lambda event: scrolls.update({scroll_key: event.vertical_position})).classes("flex-1")
+        with area:
             with ui.column().classes("w-full p-5 gap-5"):
                 # 导出区（未选中 Skill 时也可全部导出）
                 export_panel()
@@ -327,3 +382,4 @@ def render_skill_right(
                         # 复用切片正文的渲染管线：chunk-content 紧凑排版
                         # （h1 1.2rem / 正文 0.875rem，主题变量适配暗色/粉色主题）
                         chunk_markdown(body)
+        ui.timer(0.05, lambda: area.scroll_to(pixels=position), once=True)

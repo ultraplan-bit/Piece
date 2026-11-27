@@ -119,6 +119,146 @@ class GraphWorkbench(WorkbenchBase):
         self._graph_queries = []
         self._space_picker: ui.select | None = None
         self.refresh_graph_stats = lambda: None
+        self.layout = "auto"
+        self.expanded_groups = set()
+        self.structure_groups = []
+        self.isolated_only = False
+        self.inspector_open = False
+        self.inspector = None
+        self.inspection = None
+        self.table_open = False
+        self.edge_page = 0
+        self._table_signature = None
+        self.exploration_history = []
+        self._overview_queries = []
+        self._hierarchy_return_state = None
+        self._projection = {}
+        self._endpoint_names = {}
+        self.refresh_graph_toolbar = lambda: None
+        self._graph_busy = False
+        self._graph_reads = 0
+        self._space_switching = False
+        self.canvas_size = (900, 650)
+        self._canvas_window_size = None
+        self._hierarchy_empty = None
+        self._stats_signature = None
+
+    async def remember_exploration(self):
+        """会话内的探索历史；与实体修订历史分开，不写入业务数据。"""
+        token = (self.graph_id, self._selection, self._graph_generation)
+        await self.remember_positions()
+        if token != (self.graph_id, self._selection, self._graph_generation):
+            return False
+        snapshot = {name: deepcopy(getattr(self, name)) for name in (
+            "graph", "overview", "layout", "selected_object", "detail", "local_relations",
+            "positions", "viewport", "canvas_size", "depth", "predicates", "relation_statuses", "isolated_only",
+            "expanded_groups", "structure_groups", "_graph_queries", "_overview_queries", "_graph_filters",
+            "_hierarchy_return_state",
+            "inspection", "inspector_open", "_endpoint_names",
+        )}
+        if not self.exploration_history or snapshot != self.exploration_history[-1]:
+            self.exploration_history.append(snapshot)
+            self.exploration_history = self.exploration_history[-30:]
+        return True
+
+    async def begin_exploration(self):
+        # 在首次 await 前记录操作次序，慢的位置读回不能覆盖后一次点击。
+        self._selection += 1
+        return await self.remember_exploration()
+
+    async def back_exploration(self):
+        if not self.exploration_history:
+            return
+        self._selection += 1
+        self._graph_generation += 1
+        for name, value in self.exploration_history.pop().items():
+            setattr(self, name, value)
+        self.error = None
+        self.refresh_workspace()
+        self.highlight_selection()
+
+    def graph_chart_options(self):
+        selected_edge = self.detail["record"]["id"] if self.detail and self.detail["kind"] == "relation" else None
+        options = graph_options(self.graph, dark=bool(self.dark()), selected=self.selected_object,
+                                selected_edge=selected_edge, positions=self.positions, label=self.text,
+                                layout=self.layout, expanded_groups=self.expanded_groups, grouping=self.structure_groups,
+                                zoom=self.viewport.get("zoom", 1.0), canvas_size=self.canvas_size)
+        self._projection = options.pop("piece_meta", {})
+        self.structure_groups = self._projection.get("groups", [])
+        if self.layout != "sphere3d":
+            options["series"][0].update({"zoom": options["series"][0].get("zoom", 1), "center": None, **self.viewport})
+            self.positions.update({n["id"]: (n["x"], n["y"]) for n in options["series"][0]["data"]})
+        return options
+
+    def update_chart(self):
+        """更新同一张画布，保留用户正在看的位置和焦点。"""
+        if not self.graph or not self.chart or self.chart.is_deleted:
+            self.refresh_graph()
+            return
+        options = self.graph_chart_options()
+        previous_series = self.chart.options.get("series", [{}])[0]
+        next_series = options["series"][0]
+        presentation = ("type", "pieceHierarchy", "pieceTopology")
+        if tuple(previous_series.get(key) for key in presentation) != tuple(next_series.get(key) for key in presentation):
+            # 展示模式改变时清除 ECharts 合并保留的旧标签/形状设置；点选与刷新仍复用画布。
+            self.refresh_graph()
+            return
+        if self._hierarchy_empty is not None and not self._hierarchy_empty.is_deleted:
+            self._hierarchy_empty.set_visibility(self.layout == "hierarchy" and not self._projection.get("visible_nodes"))
+        self.chart.run_chart_method("setOption", {"series": options["series"], "legend": options.get("legend", {})}, {"replaceMerge": ["series"]})
+        with self.chart._props.suspend_updates():
+            self.chart.options["series"] = options["series"]
+            self.chart.options["legend"] = options.get("legend", {})
+        signature = (self.overview, len(self.graph["nodes"]), len(self.graph["edges"]), self.graph.get("total_nodes"),
+                     self.graph.get("total_edges"), self.graph.get("truncated"), self.graph.get("next_offset"),
+                     self.graph.get("next_edge_offset"), self.graph.get("next_neighbor_offset"), self.graph.get("depth"),
+                     len(self._projection.get("groups", [])), bool(self._projection.get("cycles")),
+                     self._projection.get("excluded_count"), self._projection.get("layout_warning"),
+                     self._projection.get("visible_nodes"), self._projection.get("visible_edges"))
+        if signature != self._stats_signature:
+            self._stats_signature = signature
+            self.refresh_graph_stats()
+        table_signature = tuple((e["id"], e.get("revision"), e.get("evidence_count")) for e in self.graph["edges"])
+        if self.table_open and table_signature != self._table_signature:
+            self._table_signature = table_signature
+            self.refresh_edge_table()
+
+    def close_inspector(self):
+        self.inspector_open = False
+        if self.inspector is not None and not self.inspector.is_deleted:
+            self.inspector.set_visibility(False)
+
+    def show_inspector(self):
+        self.inspector_open = True
+        if self.inspector is not None and not self.inspector.is_deleted:
+            self.inspector.set_visibility(True)
+        self.refresh_detail()
+
+    def escape_graph(self):
+        if self.inspector_open:
+            self.close_inspector()
+        else:
+            self.detail = self.inspection = None
+            self.selected_object = None
+            if self.chart and not self.chart.is_deleted:
+                self.chart.run_chart_method("dispatchAction", {"type": "downplay", "seriesIndex": 0})
+
+    @staticmethod
+    def combine_overview(previous, incoming):
+        """分页结果按真实 ID 合并；分页游标使用最新响应，旧关系不丢失。"""
+        combined = dict(incoming)
+        for key in ("nodes", "edges"):
+            records = {item["id"]: item for item in (previous or {}).get(key, [])}
+            records.update({item["id"]: item for item in incoming[key]})
+            combined[key] = list(records.values())
+        if incoming.get("load_nodes") is False and previous:
+            combined["next_offset"] = previous.get("next_offset")
+        ids = {node["id"] for node in combined["nodes"]}
+        combined["edges"] = [edge for edge in combined["edges"] if edge["source_id"] in ids and edge["target_id"] in ids]
+        expected_edges = 0 if incoming.get("isolated_only") else combined["total_edges"]
+        combined["truncated"] = (len(combined["nodes"]) < combined.get("filtered_nodes", combined["total_nodes"])
+                                 or len(combined["edges"]) < expected_edges)
+        return combined
 
     def _scoped_call(self, function, *args, graph_id=None, **kwargs):
         """把当前（或调用方捕获的）图谱身份传到支持作用域的服务请求。"""
@@ -136,6 +276,15 @@ class GraphWorkbench(WorkbenchBase):
                 kwargs["graph_id"] = graph_id
         return self.call(function, *args, **kwargs)
 
+    async def read_graph(self, function, **kwargs):
+        self._graph_reads += 1
+        self._graph_busy = True
+        try:
+            return await self._scoped_call(function, **kwargs)
+        finally:
+            self._graph_reads -= 1
+            self._graph_busy = bool(self._graph_reads)
+
     async def load_graphs(self):
         if self._graphs_loaded or self._graphs_loading:
             return
@@ -148,6 +297,8 @@ class GraphWorkbench(WorkbenchBase):
             await self.adopt_graphs(data["graphs"], select_default=True)
         finally:
             self._graphs_loading = False
+            if self._space_picker is not None and not self._space_picker.is_deleted:
+                self._space_picker.set_enabled(self._graphs_loaded)
 
     async def adopt_graphs(self, graphs, *, select_default=False):
         changed = graphs != self.graphs
@@ -284,7 +435,9 @@ class GraphWorkbench(WorkbenchBase):
     async def select_graph(self, graph_id):
         if graph_id == self.graph_id:
             return
+        self._space_switching = True
         self.graph_generation += 1
+        generation = self.graph_generation
         self.graph_id = graph_id
         self._selection += 1
         self._search_generation += 1
@@ -309,6 +462,15 @@ class GraphWorkbench(WorkbenchBase):
         self._graph_filters = None
         self._graph_queries = []
         self._references_params = None
+        self._overview_queries = []
+        self._hierarchy_return_state = None
+        self.exploration_history = []
+        self.expanded_groups.clear()
+        self.structure_groups = []
+        self.inspection = None
+        self.inspector_open = False
+        self.isolated_only = False
+        self.layout = "auto"
         self._checks_generation += 1
         self.checks = None
         self.lint_scope = "all"
@@ -326,7 +488,16 @@ class GraphWorkbench(WorkbenchBase):
         self.refresh_modes()
         self.refresh_list()
         await self.search()
+        if generation != self.graph_generation or graph_id != self.graph_id:
+            return
+        self.mode = "graph"
+        self.overview = True
+        await self.load_overview(center=True)
+        if generation != self.graph_generation or graph_id != self.graph_id:
+            return
+        self.refresh_modes()
         self.refresh_workspace()
+        self._space_switching = False
 
     async def export_graph(self, format):
         graph_id = self.graph_id
@@ -558,8 +729,16 @@ class GraphWorkbench(WorkbenchBase):
                     and generation == self._graph_generation and previous is self.graph)
 
         if overview:
-            incoming = await run.io_bound(service.graph_overview, graph_id=self.graph_id,
-                                          predicates=self.predicates, statuses=self.relation_statuses)
+            incoming = None
+            for params in deepcopy(self._overview_queries or [{"predicates": self.predicates,
+                         "statuses": self.relation_statuses, "isolated_only": self.isolated_only}]):
+                # 只在页面仍停留于同一探索状态时应用后台更新。
+                if not unchanged():
+                    return
+                if "known_node_ids" in params:
+                    params["known_node_ids"] = [node["id"] for node in (incoming or {}).get("nodes", [])]
+                part = await run.io_bound(service.graph_overview, graph_id=self.graph_id, **params)
+                incoming = self.combine_overview(incoming, part)
         else:
             # 重读每次探索的范围后重新合并，既保留展开范围，也去掉已被外部删除的记录。
             queries = self._graph_queries or [{"root_id": previous["root_id"], "depth": self.depth,
@@ -577,7 +756,12 @@ class GraphWorkbench(WorkbenchBase):
                     continue
                 if not unchanged():
                     return
-                incoming = merge_graph(incoming, part) if incoming else part
+                if incoming:
+                    incoming["max_nodes"] = previous["max_nodes"]
+                    incoming["max_edges"] = previous["max_edges"]
+                    incoming = merge_graph(incoming, part)
+                else:
+                    incoming = part
         if not unchanged() or incoming == previous:
             return
         await self.remember_positions()
@@ -587,25 +771,13 @@ class GraphWorkbench(WorkbenchBase):
         if incoming is None or not incoming["nodes"] or self.chart is None or self.chart.is_deleted:
             self.refresh_graph()
             return
-        options = graph_options(incoming, dark=bool(self.dark()), selected=self.selected_object,
-                                positions=self.positions, label=self.text)
-        if not overview:
-            options["series"][0].update(self.viewport)
-            self.positions.update({node["id"]: (node["x"], node["y"]) for node in options["series"][0]["data"]})
-        # 只更新 series，保留同一个画布和 3D 相机；已有 tooltip/图例不需要重建。
-        self.chart.run_chart_method("setOption", {"series": options["series"]})
-        # options 是可观察字典；同步服务端快照时禁止再次推送整份配置并重置相机。
-        with self.chart._props.suspend_updates():
-            self.chart.options["series"] = options["series"]
-        self.refresh_graph_stats()
-        self.refresh_edge_table()
+        self.update_chart()
 
     async def select(self, kind, ident, *, offset=0, reveal=False):
-        """读取并选中一条记录。
-
-        reveal 只用于画布点击：图谱标签下点画布节点或边时切到「实体」标签读详情。
-        从左栏目录选中实体（reveal=False）时留在图谱标签，并把图谱以该实体为根刷新。
-        """
+        """点选只检查详情；改变探索中心必须由明确操作触发。"""
+        if self.mode == "graph" and (not self.detail or self.detail["record"]["id"] != ident):
+            if not await self.begin_exploration():
+                return
         self._selection += 1
         generation = self._selection
         graph_id = self.graph_id
@@ -619,6 +791,9 @@ class GraphWorkbench(WorkbenchBase):
             return
         self.error = None
         self.detail = data
+        self.inspection = None
+        if kind != "object":
+            self.local_relations = None
         self.highlight_selection()
         if kind == "object":
             self.selected_object = ident
@@ -627,25 +802,35 @@ class GraphWorkbench(WorkbenchBase):
             if generation != self._selection or graph_id != self.graph_id:
                 return
             self.local_relations = local_relations
+        elif kind == "relation":
+            names = {node["id"]: node["title"] for node in (self.graph or {}).get("nodes", [])}
+            for endpoint in ("source_id", "target_id"):
+                endpoint_id = data["record"][endpoint]
+                if endpoint_id not in names:
+                    record = await self._scoped_call(service.get_record, kind="object", id=endpoint_id, graph_id=graph_id)
+                    if generation != self._selection or graph_id != self.graph_id:
+                        return
+                    if record:
+                        names[endpoint_id] = record["record"]["title"]
+            self._endpoint_names = names
         if self.mode == "graph":
-            if kind == "object" and (not reveal or self.overview):
-                # 从目录或全局概览选中实体：切回局部探索并以它为根刷新图谱。
-                self.overview = False
-                await self.load_graph(center=True)
-                self.refresh_workspace()
-            else:
-                # 画布点选节点或边：图不动，切到「实体」标签读详情。
-                await self.set_mode("objects")
-            return data
-        self.refresh_detail()
+            await self.remember_positions()
+            group = self._projection.get("node_to_group", {}).get(ident) if kind == "object" else None
+            if group:
+                self.expanded_groups.add(group)
+            self.update_chart()
+            self.show_inspector()
+        else:
+            self.refresh_detail()
         self.refresh_edge_table()
-        if self.chart and not self.chart.is_deleted and self.graph:
-            ids = [n["id"] for n in self.graph["nodes"]]
+        if self.chart and not self.chart.is_deleted and self.graph and self.layout != "sphere3d":
+            series = self.chart.options["series"][0]
+            ids = [n["id"] for n in series.get("data", [])]
             self.chart.run_chart_method("dispatchAction", {"type": "downplay", "seriesIndex": 0})
             if kind == "object" and ident in ids:
                 self.chart.run_chart_method("dispatchAction", {"type": "highlight", "seriesIndex": 0, "dataIndex": ids.index(ident)})
             elif kind == "relation":
-                edges = [edge["id"] for edge in self.graph["edges"]]
+                edges = [edge["id"] for edge in series.get("links", series.get("edges", []))]
                 if ident in edges:
                     self.chart.run_chart_method("dispatchAction", {"type": "highlight", "seriesIndex": 0,
                                                                   "dataType": "edge", "dataIndex": edges.index(ident)})
@@ -663,20 +848,25 @@ class GraphWorkbench(WorkbenchBase):
     def render_right(self, controls=None):
         if not self._graphs_loaded and not self._graphs_loading:
             ui.timer(0.1, self.load_graphs, once=True)
-        with ui.column().classes("graph-workbench w-full h-full flex-1 min-h-0 min-w-0 theme-content gap-0"):
+        with ui.column().classes("graph-workbench w-full h-full flex-1 min-h-0 min-w-0 theme-content gap-0") as workbench:
+            workbench.on("graph-escape", self.escape_graph, args=[])
+            workbench.on("graph-back", self.back_exploration, args=[])
             @ui.refreshable
             def modes():
                 with ui.row().classes("graph-header w-full items-center library-heading workspace-toolbar"):
                     if controls:
                         controls()
                     async def choose_graph(event):
-                        await self.load_graphs()
-                        await self.select_graph(event.value)
+                        if event.sender is not self._space_picker or self._graphs_loading:
+                            return
+                        if any(item["id"] == event.value for item in self.graphs):
+                            await self.select_graph(event.value)
 
                     self._space_picker = ui.select({item["id"]: item["name"] for item in self.graphs}, value=self.graph_id,
                                                    on_change=choose_graph)\
                         .props(f'dense outlined options-dense aria-label="{self.text("graph_space")}"')\
                         .classes("graph-space-picker").tooltip(self.text("graph_space"))
+                    self._space_picker.set_enabled(self._graphs_loaded and not self._graphs_loading)
                     with ui.button(icon="more_horiz", color=None).props(
                             f'flat dense aria-label="{self.text("space_actions")}"').classes("graph-space-actions").tooltip(self.text("space_actions")):
                         with ui.menu():
@@ -706,14 +896,31 @@ class GraphWorkbench(WorkbenchBase):
             def workspace():
                 self.chart = None
                 if self.mode == "graph":
-                    # 图谱标签不放进滚动区：画布要吃掉整栏剩余高度，套在滚动区里
-                    # 高度会被内容撑成固定值，下方就留出大片空白。
-                    self.render_graph()
+                    with ui.row().classes("graph-exploration w-full flex-1 min-h-0 min-w-0 gap-0 flex-nowrap"):
+                        with ui.column().classes("graph-map flex-1 h-full min-w-0 min-h-0 gap-0"):
+                            self.render_graph()
+                        with ui.column().classes("graph-inspector h-full gap-0").props(
+                                f'role=complementary aria-label="{self.text("inspector")}"') as self.inspector:
+                            self.inspector.set_visibility(self.inspector_open)
+                            with ui.row().classes("workspace-toolbar w-full items-center"):
+                                ui.label(self.text("inspector")).classes("text-sm theme-text-secondary")
+                                ui.space()
+                                ui.button(icon="close", on_click=self.close_inspector, color=None).props(
+                                    f'flat dense round aria-label="{self.text("close")}"').tooltip(self.text("close"))
+                            with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(detail=e.vertical_position)).classes(
+                                    "w-full flex-1 min-h-0 scroll-flush") as area:
+                                self._scroll_areas["detail"] = area
+                                with ui.column().classes("graph-inspector-content w-full min-w-0"):
+                                    @ui.refreshable
+                                    def inspector_detail():
+                                        self.render_inspection()
+                                    self.refresh_detail = inspector_detail.refresh
+                                    inspector_detail()
+                                if self._scroll_positions.get("detail"):
+                                    area.scroll_to(pixels=self._scroll_positions["detail"])
                     if self.references_data is not None:
                         with ui.column().classes("graph-references w-full max-h-[220px] overflow-y-auto px-3 py-2 gap-1"):
                             self.render_references()
-                    # 图谱标签只显示图与关系表：实体详情在「实体」标签读，不在图下方再叠一份。
-                    self.refresh_detail = lambda: None
                     return
                 with ui.scroll_area(on_scroll=lambda e: self._scroll_positions.update(detail=e.vertical_position)).classes("w-full flex-1 scroll-flush") as area:
                     self._scroll_areas["detail"] = area
@@ -744,25 +951,32 @@ class GraphWorkbench(WorkbenchBase):
             if self.overview:
                 if center or self.graph is None or not self.graph.get("overview"):
                     await self.load_overview(center=True)
-            elif self.selected_object and (
-                    center or self.graph is None or self.graph["root_id"] != self.selected_object):
+            elif self.selected_object and (center or self.graph is None):
                 await self.load_graph(center=True)
+            elif self.graph is None:
+                self.overview = True
+                await self.load_overview(center=True)
         self.refresh_workspace()
 
     # ---- 局部图探索 ----
     async def remember_positions(self):
-        if not self.chart or self.chart.is_deleted or (self.graph and self.graph.get("overview")):
+        if not self.chart or self.chart.is_deleted or self.layout == "sphere3d":
             return
+        chart, graph_id, generation, layout = self.chart, self.graph_id, self._graph_generation, self.layout
         try:
             # 唯一插值为 NiceGUI 分配的整数元素 ID，绝不插入模型文本。
             view = await ui.run_javascript(f"""(() => {{
-                const chart = getElement({self.chart.id}).chart;
+                const chart = getElement({self.chart.id})?.chart;
+                if (!chart || chart.isDisposed()) return null;
                 const data = chart.getModel().getSeriesByIndex(0).getData();
                 const points = {{}};
                 for (let i = 0; i < data.count(); i++) points[data.getId(i)] = data.getItemLayout(i);
                 const series = chart.getOption().series[0];
                 return {{points, zoom: series.zoom, center: series.center}};
             }})()""")
+            if (self.chart is not chart or graph_id != self.graph_id or generation != self._graph_generation
+                    or layout != self.layout):
+                return
             if isinstance(view, dict):
                 self.positions.update({key: tuple(value) for key, value in view.get("points", {}).items()
                                        if finite_pair(value)})
@@ -776,8 +990,10 @@ class GraphWorkbench(WorkbenchBase):
             # 断线时保留上次位置；布局从不触发业务写入。
             pass
 
-    async def load_graph(self, *, center=False, expand=False):
-        self.overview = False
+    async def load_graph(self, *, center=False, expand=False, predicate=None, neighbor_offset=0, expand_root=None):
+        if expand and self.graph and (len(self.graph["nodes"]) >= 2000 or len(self.graph["edges"]) >= 6000):
+            self.notify(self.text("canvas_capacity"), type="info")
+            return
         self._graph_generation += 1
         generation = self._graph_generation
         graph_id = self.graph_id
@@ -788,15 +1004,22 @@ class GraphWorkbench(WorkbenchBase):
         if not root:
             self.notify(self.text("choose_root"), type="info")
             return
+        self.overview = False
+        if self.layout == "sphere3d":
+            self.layout = "auto"
         filters = (tuple(self.edge_types), tuple(self.predicates or ()), tuple(self.relation_statuses or ()))
-        params = {"root_id": self.selected_object if expand else root, "depth": 1 if expand else self.depth,
-                  "edge_types": self.edge_types, "predicates": self.predicates, "statuses": self.relation_statuses,
+        params = {"root_id": (expand_root or self.selected_object) if expand else root, "depth": 1 if expand else self.depth,
+                  "edge_types": self.edge_types, "predicates": [predicate] if predicate else self.predicates, "statuses": self.relation_statuses,
                   "max_nodes": 100, "max_edges": 300}
-        incoming = await self._scoped_call(service.graph, **params, graph_id=graph_id)
+        if neighbor_offset:
+            params["neighbor_offset"] = neighbor_offset
+        incoming = await self.read_graph(service.graph, **params, graph_id=graph_id)
         if incoming and generation == self._graph_generation and graph_id == self.graph_id:
             if expand and self.graph and filters == self._graph_filters:
+                self.graph["max_nodes"] = min(2000, len(self.graph["nodes"]) + incoming["max_nodes"])
+                self.graph["max_edges"] = min(6000, len(self.graph["edges"]) + incoming["max_edges"])
                 self.graph = merge_graph(self.graph, incoming)
-                if not any(query["root_id"] == params["root_id"] for query in self._graph_queries):
+                if params not in self._graph_queries:
                     self._graph_queries.append(deepcopy(params))
             else:
                 self.graph = incoming
@@ -805,64 +1028,130 @@ class GraphWorkbench(WorkbenchBase):
             if center:
                 self.positions = {}
                 self.viewport = {}
-            self.refresh_graph()
+            self.update_chart()
 
-    async def load_overview(self, *, center=False):
+    async def load_overview(self, *, center=False, more=False, more_edges=False):
         self._graph_generation += 1
         generation = self._graph_generation
         graph_id = self.graph_id
         await self.remember_positions()
         if graph_id != self.graph_id or generation != self._graph_generation:
             return
-        incoming = await self._scoped_call(service.graph_overview, predicates=self.predicates,
-                                           statuses=self.relation_statuses, graph_id=graph_id)
+        params = {"predicates": self.predicates, "statuses": self.relation_statuses,
+                  "isolated_only": self.isolated_only}
+        if (more or more_edges) and self.graph:
+            params["known_node_ids"] = [node["id"] for node in self.graph["nodes"]]
+            if not more_edges:
+                params["max_nodes"] = min(400, max(1, 10000 - len(params["known_node_ids"])))
+            if more_edges:
+                params.update(load_nodes=False, edge_offset=self.graph.get("next_edge_offset") or 0)
+            else:
+                params["offset"] = self.graph.get("next_offset") or 0
+        incoming = await self.read_graph(service.graph_overview, **params, graph_id=graph_id)
         if incoming and generation == self._graph_generation and graph_id == self.graph_id:
-            self.graph = incoming
+            self.overview = True
+            if more or more_edges:
+                if more_edges and self.graph:
+                    incoming["next_offset"] = self.graph.get("next_offset")
+                self.graph = self.combine_overview(self.graph, incoming)
+                self._overview_queries.append(deepcopy(params))
+            else:
+                self.graph = incoming
+                self._overview_queries = [deepcopy(params)]
             self._graph_filters = (tuple(self.predicates or ()), tuple(self.relation_statuses or ()))
             if center:
                 self.positions = {}
                 self.viewport = {}
-            self.refresh_graph()
+            self.update_chart()
 
     async def graph_click(self, event):
         data = event.args.get("data")
         if not isinstance(data, dict) or not self.graph:
             return
-        if event.args.get("dataType") == "edge":
+        if data.get("kind") == "group" or data.get("aggregated"):
+            if not await self.begin_exploration():
+                return
+            self.inspection = deepcopy(data)
+            self.show_inspector()
+            self.refresh_graph_toolbar()
+        elif event.args.get("dataType") == "edge":
             edge = next((edge for edge in self.graph["edges"] if edge["id"] == data.get("id")), None)
             if edge:
                 await self.select("relation", edge["id"])
         elif any(n["id"] == data.get("id") for n in self.graph["nodes"]):
-            # 全局概览点选节点直接切入以该节点为根的局部图。
-            if self.overview:
-                await self.select("object", data["id"])
-            else:
-                # 画布点击是探索意图：切到「实体」标签看详情，不重排当前这张图。
-                await self.select("object", data["id"], reveal=True)
+            await self.select("object", data["id"], reveal=True)
 
     def render_graph(self):
-        # 筛选决定显示什么；画布操作独立成组，窄栏自然换行。
-        with ui.row().classes("graph-toolbar w-full items-center"):
-            ui.button(self.text("local_graph" if self.overview else "global_graph"), icon="public" if not self.overview else "hub",
-                      color=None, on_click=self.show_local_graph if self.overview else self.show_global_graph)\
-                .props("flat dense no-caps").classes("graph-scope-action")
-            with ui.row().classes("graph-filters items-center"):
-                if not self.overview:
-                    ui.select({1: self.text("one_hop"), 2: self.text("two_hops")}, value=self.depth, label=self.text("depth"),
-                              on_change=lambda e: self.reload_on_change("depth", e.value)).props("dense outlined options-dense").classes("graph-control")
-                ui.select(self.choices(PREDICATES), label=self.text("predicate"), value=self.predicates, multiple=True, clearable=True,
-                          on_change=lambda e: self.reload_on_change("predicates", e.value or None)).props("dense outlined options-dense").classes("graph-control")
-                ui.select(self.choices(STATUSES), label=self.text("status"), value=self.relation_statuses, multiple=True, clearable=True,
-                          on_change=lambda e: self.reload_on_change("relation_statuses", e.value or None)).props("dense outlined options-dense").classes("graph-control")
-            with ui.row().classes("graph-view-actions items-center"):
-                actions = [("refresh", "refresh", self.load_overview if self.overview else self.load_graph)]
-                if not self.overview:
-                    actions.extend((("center", "my_location", partial(self.load_graph, center=True)),
-                                    ("expand", "open_in_full", partial(self.load_graph, expand=True))))
-                for name, icon, action in actions:
-                    ui.button(icon=icon, color=None, on_click=action).props(
-                        f'flat dense aria-label="{self.text(name)}"').tooltip(self.text(name))
-                help_hint(self.text("overview_scope" if self.overview else "graph_scope"))
+        def toolbar():
+            buttons = {}
+            with ui.row().classes("graph-toolbar w-full items-center"):
+                ui.button(icon="arrow_back", on_click=self.back_exploration, color=None).props(
+                    f'flat dense aria-label="{self.text("exploration_back")}"').tooltip(self.text("exploration_back")).bind_enabled_from(self, "exploration_history", backward=bool)
+                scope = "hierarchy" if self.layout == "hierarchy" else "global" if self.overview else "local"
+                with ui.row().classes("graph-scope-switch gap-1").props(f'role=group aria-label="{self.text("view_mode")}"'):
+                    for value, name, callback in (("global", "global_graph", self.show_global_graph),
+                                                  ("local", "local_graph", self.show_local_graph),
+                                                  ("hierarchy", "hierarchy", self.show_hierarchy)):
+                        buttons[value] = ui.button(self.text(name), color=None, on_click=callback).props(
+                            f'flat dense no-caps aria-pressed={str(scope == value).lower()}').classes("mode-active" if scope == value else "").bind_enabled_from(self, "_space_switching", backward=lambda value: not value)
+                ui.space()
+                with ui.element("div").classes("graph-loading-slot"):
+                    ui.spinner(size="sm").props(f'role=status aria-label="{self.text("loading_graph")}"').bind_visibility_from(self, "_graph_busy")
+                with ui.button(self.text("filters"), icon="filter_list", color=None).props("flat dense no-caps").bind_enabled_from(self, "_space_switching", backward=lambda value: not value):
+                    with ui.menu().classes("graph-filter-menu"):
+                        ui.label(self.text("relation_filters")).classes("text-sm font-medium")
+                        depth_control = ui.select({1: self.text("one_hop"), 2: self.text("two_hops")}, value=self.depth, label=self.text("depth"),
+                                      on_change=lambda e: self.reload_on_change("depth", e.value)).props("dense outlined").classes("w-full")
+                        depth_control.bind_visibility_from(self, "overview", backward=lambda value: not value)
+                        predicate_control = ui.select(self.choices(PREDICATES), label=self.text("predicate"), value=self.predicates,
+                                  multiple=True, clearable=True, on_change=lambda e: self.reload_on_change("predicates", e.value or None)).props("dense outlined").classes("w-full")
+                        predicate_control.bind_visibility_from(self, "layout", backward=lambda value: value != "hierarchy")
+                        status_control = ui.select(self.choices(STATUSES), label=self.text("relation_status"), value=self.relation_statuses,
+                                  multiple=True, clearable=True, on_change=lambda e: self.reload_on_change("relation_statuses", e.value or None)).props("dense outlined").classes("w-full")
+                        isolated_control = ui.switch(self.text("isolated_only"), value=self.isolated_only,
+                                      on_change=lambda e: self.reload_on_change("isolated_only", e.value)).bind_visibility_from(self, "overview")
+                        ui.button(self.text("clear_filters"), on_click=self.clear_graph_filters).props("flat dense no-caps")
+                ui.button(icon="refresh", color=None, on_click=lambda: self.load_overview() if self.overview else self.refresh_local()).props(
+                    f'flat dense aria-label="{self.text("refresh")}"').tooltip(self.text("refresh")).bind_enabled_from(self, "_space_switching", backward=lambda value: not value)
+                ui.button(icon="view_sidebar", color=None, on_click=lambda: self.close_inspector() if self.inspector_open else self.show_inspector()).props(
+                    f'flat dense aria-label="{self.text("inspector")}"').tooltip(self.text("inspector"))
+                with ui.button(icon="more_horiz", color=None).props(f'flat dense aria-label="{self.text("more")}"'):
+                    with ui.menu():
+                        ui.menu_item(self.text("layout_2d"), on_click=partial(self.change_layout, "auto")).bind_enabled_from(self, "overview")
+                        ui.menu_item(self.text("layout_3d"), on_click=partial(self.change_layout, "sphere3d")).bind_enabled_from(self, "overview")
+                help_hint(self.text("exploration_help"))
+            with ui.row().classes("graph-filter-summary w-full items-center").bind_visibility_from(self, "layout", backward=lambda value: value == "hierarchy"):
+                hierarchy_control = ui.select(self.choices(("is_a", "part_of", "depends_on")), label=self.text("hierarchy_relation"),
+                          value=self.predicates[0] if self.predicates and self.predicates[0] in ("is_a", "part_of", "depends_on") else "is_a",
+                          on_change=lambda e: self.reload_on_change("predicates", [e.value])).props("dense outlined").classes("graph-hierarchy-select")
+                ui.label(self.text("hierarchy_direction")).classes("text-xs theme-text-muted")
+            with ui.row().classes("graph-filter-summary w-full items-center") as summary_row:
+                summary_label = ui.label().classes("text-xs theme-text-secondary")
+                ui.button(self.text("clear_filters"), color=None, on_click=self.clear_graph_filters).props("flat dense no-caps")
+
+            def refresh_toolbar():
+                scope = "hierarchy" if self.layout == "hierarchy" else "global" if self.overview else "local"
+                for value, button in buttons.items():
+                    if button.is_deleted:
+                        return
+                    active = scope == value
+                    button.props(f'aria-pressed={str(active).lower()}')
+                    button.classes(add="mode-active" if active else "", remove="mode-active" if not active else "")
+                depth_control.set_value(self.depth)
+                predicate_control.set_value(self.predicates)
+                status_control.set_value(self.relation_statuses)
+                isolated_control.set_value(self.isolated_only)
+                if self.layout == "hierarchy" and self.predicates:
+                    hierarchy_control.set_value(self.predicates[0])
+                summary_row.set_visibility(self.layout != "hierarchy" and bool(self.predicates or self.relation_statuses or self.isolated_only))
+                if summary_row.visible:
+                    summary = [self.text(v) for v in [*(self.predicates or []), *(self.relation_statuses or [])]]
+                    if self.isolated_only:
+                        summary.append(self.text("isolated_only"))
+                    summary_label.set_text(" · ".join(summary))
+            self.refresh_graph_toolbar = refresh_toolbar
+            refresh_toolbar()
+        toolbar()
         with ui.element("div").classes("graph-stage w-full flex-1 min-h-0"):
             @ui.refreshable
             def graph_body():
@@ -873,6 +1162,7 @@ class GraphWorkbench(WorkbenchBase):
                         ui.label(self.text("empty" if self.overview else "choose_root")).classes("graph-empty-hint")
                     return
                 data = self.graph
+                options = self.graph_chart_options()
                 with ui.column().classes("graph-stats items-end gap-0"):
                     @ui.refreshable
                     def stats():
@@ -880,25 +1170,54 @@ class GraphWorkbench(WorkbenchBase):
                         if data is None:
                             return
                         if data.get("overview"):
-                            ui.label(self.text("overview_count", nodes=len(data["nodes"]), edges=len(data["edges"]),
+                            ui.label(self.text("hierarchy_loaded" if self.layout == "hierarchy" else "overview_count", nodes=len(data["nodes"]), edges=len(data["edges"]),
                                               total_nodes=data["total_nodes"], total_edges=data["total_edges"])).classes("text-xs theme-text-muted")
                             if data["truncated"]:
                                 ui.label(self.text("overview_truncated")).classes("text-xs font-semibold theme-text")
+                            if len(data["nodes"]) >= 10000 and data.get("next_offset") is not None:
+                                ui.label(self.text("canvas_capacity")).classes("text-xs theme-text-secondary")
+                            with ui.row().classes("graph-load-actions gap-1"):
+                                if data.get("next_offset") is not None and len(data["nodes"]) < 10000:
+                                    ui.button(self.text("load_more_nodes"), on_click=partial(self.load_overview, more=True), color=None).props("flat dense no-caps")
+                                if data.get("next_edge_offset") is not None:
+                                    ui.button(self.text("load_more_edges"), on_click=partial(self.load_overview, more_edges=True), color=None).props("flat dense no-caps")
+                            if data.get("total_isolated") and self.layout != "hierarchy":
+                                ui.label(self.text("isolated_count", count=data["total_isolated"])).classes("text-xs theme-text-muted")
                         else:
                             ui.label(self.text("graph_count", nodes=len(data["nodes"]), edges=len(data["edges"]),
                                               depth=data["depth"])).classes("text-xs theme-text-muted")
                             if data["truncated"]:
                                 ui.label(self.text("truncated")).classes("text-xs font-semibold theme-text")
+                            if data.get("next_neighbor_offset") is not None:
+                                ui.button(self.text("load_more_neighbors"), color=None,
+                                          on_click=partial(self.load_graph, expand=True, neighbor_offset=data["next_neighbor_offset"],
+                                                           expand_root=data.get("neighbor_root_id", data["root_id"]))).props("flat dense no-caps").set_enabled(len(data["nodes"]) < 2000 and len(data["edges"]) < 6000)
+                            if len(data["nodes"]) >= 2000 or len(data["edges"]) >= 6000:
+                                ui.label(self.text("canvas_capacity")).classes("text-xs theme-text-secondary")
+                        if self._projection.get("groups"):
+                            ui.label(self.text("group_count", count=len(self._projection["groups"]))).classes("text-xs theme-text-muted")
+                        if self._projection.get("cycles"):
+                            ui.label(self.text("cycle_detected")).classes("text-xs theme-text-secondary")
+                        if self._projection.get("layout_warning"):
+                            ui.label(self.text(self._projection["layout_warning"])).classes("text-xs theme-text-secondary")
+                        if self._projection.get("excluded_count"):
+                            ui.label(self.text("hierarchy_excluded", count=self._projection["excluded_count"])).classes("text-xs theme-text-secondary")
+                        if self.layout == "hierarchy":
+                            ui.label(self.text("hierarchy_visible", count=self._projection.get("visible_nodes", 0))).classes("text-xs theme-text-secondary")
+                            if self._projection.get("hierarchy_overflow"):
+                                ui.label(self.text("hierarchy_pan_hint")).classes("text-xs theme-text-muted")
                     self.refresh_graph_stats = stats.refresh
                     stats()
-                options = graph_options(data, dark=bool(self.dark()), selected=self.selected_object,
-                                        positions=self.positions, label=self.text)
-                if not data.get("overview"):
-                    options["series"][0].update(self.viewport)
-                    self.positions.update({n["id"]: (n["x"], n["y"]) for n in options["series"][0]["data"]})
                 # 3.3.1 的 on_point_click 强制读取 value；无数值的图节点/边须用原生事件。
-                self.chart = ui.echart(options, enable_3d=bool(data.get("overview"))).classes("graph-canvas min-w-0")
-                self.chart.on("chart:click", self.graph_click, ["data", "dataType"])
+                self.chart = ui.echart(options, enable_3d=self.layout == "sphere3d").classes("graph-canvas min-w-0")
+                self.chart.on("chart:click", self.graph_click, js_handler="(event) => { if (window.pieceGraphDraggedUntil > performance.now()) return; emit({data: event.data, dataType: event.dataType}); }")
+                self.chart.on("hierarchy-size", self.resize_hierarchy, ["detail"])
+                with ui.column().classes("graph-empty absolute inset-0 items-center justify-center pointer-events-none") as self._hierarchy_empty:
+                    self._hierarchy_empty.set_visibility(self.layout == "hierarchy" and not options["series"][0]["data"])
+                    ui.label(self.text("hierarchy_empty")).classes("graph-empty-title")
+                chart = self.chart
+                with chart.client.content:
+                    ui.timer(0.05, lambda: self.install_chart_interactions(chart) if not chart.is_deleted else None, once=True)
             graph_body_refresh = graph_body.refresh
             graph_body()
             with ui.row().classes("graph-canvas-tools items-center").props(f'role=group aria-label="{self.text("view_mode")}"'):
@@ -908,12 +1227,20 @@ class GraphWorkbench(WorkbenchBase):
                     ui.button(icon=icon, color=None, on_click=action).props(
                         f'flat dense aria-label="{self.text(name)}"').tooltip(self.text(name))
         # 关系表格默认收起，展开时才占用画布高度。
-        with ui.expansion(self.text("table"), icon="table_rows").classes("graph-drawer w-full"):
+        def toggle_table(event):
+            self.table_open = event.value
+            self.refresh_edge_table()
+
+        with ui.expansion(self.text("table"), icon="table_rows", value=self.table_open,
+                          on_value_change=toggle_table).classes("graph-drawer w-full"):
             with ui.column().classes("w-full max-h-[240px] overflow-y-auto px-3 pb-2"):
                 @ui.refreshable
                 def table():
-                    if self.graph:
-                        self.edge_table(self.graph)
+                    if self.graph and self.table_open:
+                        total = len(self.graph["edges"])
+                        self.edge_page = min(self.edge_page, max(0, (total - 1) // 25))
+                        self.edge_table(self.graph, self.graph["edges"][self.edge_page * 25:(self.edge_page + 1) * 25])
+                        self.pager(self.edge_page * 25, 25, total, self.change_edge_page)
                 self.refresh_edge_table = table.refresh
                 table()
 
@@ -923,26 +1250,211 @@ class GraphWorkbench(WorkbenchBase):
             self.refresh_edge_table()
         self.refresh_graph = refresh_all
 
+    def change_edge_page(self, delta):
+        self.edge_page = max(0, self.edge_page + delta)
+        self.refresh_edge_table()
+
     async def show_global_graph(self):
+        rebuild = self.mode != "graph" or self.layout == "sphere3d"
+        if not await self.begin_exploration():
+            return
+        self.restore_hierarchy_filters()
         self.overview = True
+        self.layout = "auto"
+        self.expanded_groups.clear()
         await self.load_overview(center=True)
-        self.refresh_workspace()
+        self.mode = "graph"
+        self.refresh_workspace() if rebuild else self.refresh_graph_toolbar()
 
     async def show_local_graph(self):
+        rebuild = self.mode != "graph" or self.layout == "sphere3d"
+        if not await self.begin_exploration():
+            return
+        self.restore_hierarchy_filters()
         self.overview = False
+        self.layout = "auto"
+        self.isolated_only = False
         if self.selected_object:
             await self.load_graph(center=True)
         else:
             self.graph = None
-        self.refresh_workspace()
+            self.refresh_graph()
+        self.mode = "graph"
+        self.refresh_workspace() if rebuild else self.refresh_graph_toolbar()
 
     async def reload_on_change(self, name, value):
         """筛选变化即重取当前全局概览或局部邻域。"""
+        if getattr(self, name) == value:
+            return
+        if not await self.begin_exploration():
+            return
         setattr(self, name, value)
+        self.structure_groups = []
+        self.expanded_groups.clear()
         if self.overview:
-            await self.load_overview()
+            await self.load_overview(center=self.layout == "hierarchy" and name == "predicates")
+            if self.layout == "hierarchy" and name == "predicates":
+                self.refresh_graph()
         else:
             await self.load_graph()
+        self.refresh_graph_toolbar()
+
+    async def clear_graph_filters(self):
+        if not await self.begin_exploration():
+            return
+        self.predicates = self.relation_statuses = None
+        self.isolated_only = False
+        self._hierarchy_return_state = None
+        self.structure_groups = []
+        self.expanded_groups.clear()
+        reset_layout = self.layout == "hierarchy"
+        if reset_layout:
+            self.layout = "auto"
+        if self.overview:
+            await self.load_overview(center=reset_layout)
+        else:
+            await self.load_graph(center=reset_layout)
+        self.refresh_graph_toolbar()
+
+    async def change_layout(self, layout):
+        if not await self.begin_exploration():
+            return
+        left_hierarchy = self.restore_hierarchy_filters()
+        self.layout = layout
+        self.positions, self.viewport = {}, {}
+        if left_hierarchy and self.overview:
+            await self.load_overview(center=True)
+        self.refresh_workspace()
+
+    async def show_hierarchy(self):
+        if self.layout == "hierarchy":
+            return
+        rebuild = self.mode != "graph" or self.layout == "sphere3d"
+        if not await self.begin_exploration():
+            return
+        self._hierarchy_return_state = {
+            "predicates": deepcopy(self.predicates),
+            "relation_statuses": deepcopy(self.relation_statuses),
+            "isolated_only": self.isolated_only,
+        }
+        self.layout = "hierarchy"
+        self.positions, self.viewport = {}, {}
+        self.predicates = [self.predicates[0]] if self.predicates and len(self.predicates) == 1 and self.predicates[0] in (
+            "is_a", "part_of", "depends_on") else ["is_a"]
+        self.isolated_only = False
+        await self.load_overview(center=True)
+        self.mode = "graph"
+        self.refresh_workspace() if rebuild else self.refresh_graph_toolbar()
+
+    def restore_hierarchy_filters(self):
+        """Leave the hierarchy-only relation filter at the scope boundary."""
+        if self.layout != "hierarchy" or self._hierarchy_return_state is None:
+            return False
+        for name, value in self._hierarchy_return_state.items():
+            setattr(self, name, deepcopy(value))
+        self._hierarchy_return_state = None
+        return True
+
+    async def expand_selected(self, predicate=None):
+        if not await self.begin_exploration():
+            return
+        if self.overview:
+            rebuild = self.layout == "sphere3d"
+            self.restore_hierarchy_filters()
+            self.layout = "auto"
+            await self.load_graph(center=True, predicate=predicate)
+            self.refresh_workspace() if rebuild else self.refresh_graph_toolbar()
+        else:
+            await self.load_graph(expand=True, predicate=predicate)
+        self.refresh_detail()
+
+    async def collapse_selected(self):
+        if not await self.begin_exploration():
+            return
+        self._graph_queries = [query for index, query in enumerate(self._graph_queries)
+                               if index == 0 or query["root_id"] != self.selected_object]
+        await self.refresh_local()
+        self.refresh_detail()
+
+    async def refresh_local(self):
+        if not self._graph_queries:
+            return await self.load_graph()
+        self._graph_generation += 1
+        generation, graph_id = self._graph_generation, self.graph_id
+        await self.remember_positions()
+        incoming = None
+        for params in deepcopy(self._graph_queries):
+            part = await self._scoped_call(service.graph, **params, graph_id=graph_id)
+            if graph_id != self.graph_id or generation != self._graph_generation:
+                return
+            if part:
+                if incoming:
+                    incoming["max_nodes"] = (self.graph or incoming)["max_nodes"]
+                    incoming["max_edges"] = (self.graph or incoming)["max_edges"]
+                    incoming = merge_graph(incoming, part)
+                else:
+                    incoming = part
+        self.graph = incoming
+        self.update_chart()
+
+    async def toggle_group(self, ident):
+        if not await self.begin_exploration():
+            return
+        if ident in self.expanded_groups:
+            self.expanded_groups.remove(ident)
+        else:
+            self.expanded_groups.add(ident)
+        self.update_chart()
+        self.refresh_detail()
+
+    def render_inspection(self):
+        if not self.inspection:
+            self.render_detail()
+            return
+        data = self.inspection
+        if data.get("kind") == "group":
+            ui.label(data.get("name") or data.get("title") or self.text("structure_group")).classes("graph-detail-title")
+            ui.label(self.text("structure_group_hint")).classes("text-sm theme-text-secondary")
+            ui.label(self.text("group_members", count=data.get("member_count", len(data.get("member_ids", []))))).classes("text-sm")
+            ui.button(self.text("collapse_group" if data["id"] in self.expanded_groups else "expand_group"),
+                      on_click=partial(self.toggle_group, data["id"])).props("flat no-caps")
+            members = set(data.get("member_ids", []))
+            for node in (self.graph or {}).get("nodes", []):
+                if node["id"] in members:
+                    ui.button(node["title"], on_click=partial(self.select, "object", node["id"]), color=None).props("flat dense no-caps").classes("w-full justify-start")
+            internal_ids = set(data.get("internal_edge_ids", []))
+            if internal_ids:
+                with ui.expansion(self.text("internal_relations", count=len(internal_ids))).classes("w-full"):
+                    self.edge_table(self.graph, [edge for edge in self.graph["edges"] if edge["id"] in internal_ids])
+        elif data.get("aggregated"):
+            ids = set(data.get("relation_ids", []))
+            ui.label(self.text("aggregated_relations", count=len(ids))).classes("graph-detail-title")
+            self.edge_table(self.graph, [edge for edge in self.graph["edges"] if edge["id"] in ids])
+
+    def install_chart_interactions(self, chart):
+        """真实画布尺寸下的标签避让及拖动保护，交互不触发业务写入。"""
+        from pathlib import Path
+        script = Path(__file__).with_name("graph_interactions.js").read_text(encoding="utf-8")
+        chart.client.run_javascript(script.replace("__CHART_ID__", str(chart.id)))
+
+    def resize_hierarchy(self, event):
+        if event.sender is not self.chart or self.layout != "hierarchy":
+            return
+        size = event.args.get("detail", {})
+        window_size = (size.get("windowWidth"), size.get("windowHeight"))
+        resized_window = self._canvas_window_size is not None and window_size != self._canvas_window_size
+        self._canvas_window_size = window_size
+        if self.inspector_open and not resized_window:
+            return
+        width, height = size.get("width"), size.get("height")
+        if not all(isinstance(value, (int, float)) and math.isfinite(value) and value >= 100 for value in (width, height)):
+            return
+        dimensions = (min(8000, int(width)), min(8000, int(height)))
+        if dimensions == self.canvas_size:
+            return
+        self.canvas_size = dimensions
+        self.positions, self.viewport = {}, {}
+        self.update_chart()
 
     async def zoom_graph(self, factor):
         """按倍率缩放 2D 图或调整 3D 球体相机距离。"""
@@ -950,7 +1462,7 @@ class GraphWorkbench(WorkbenchBase):
             return
         ratio = float(factor)
         try:
-            if self.graph and self.graph.get("overview"):
+            if self.layout == "sphere3d":
                 await ui.run_javascript(f"""(() => {{
                     const chart = getElement({self.chart.id}).chart;
                     const current = chart.getOption().globe[0].viewControl.distance || 170;
@@ -970,9 +1482,8 @@ class GraphWorkbench(WorkbenchBase):
             pass
 
     def reset_graph_view(self):
-        self.positions = {}
         self.viewport = {}
-        if self.graph and self.graph.get("overview") and self.chart and not self.chart.is_deleted:
+        if self.layout == "sphere3d" and self.chart and not self.chart.is_deleted:
             try:
                 ui.run_javascript(f"""(() => {{
                     const chart = getElement({self.chart.id}).chart;
@@ -981,7 +1492,7 @@ class GraphWorkbench(WorkbenchBase):
                 }})()""")
             except (TimeoutError, RuntimeError):
                 pass
-        self.refresh_graph()
+        self.update_chart()
 
     def edge_table(self, graph, edges=None):
         names = {node["id"]: node["title"] for node in graph["nodes"]}
@@ -1034,7 +1545,20 @@ class GraphWorkbench(WorkbenchBase):
                 if data["summary"]:
                     ui.label(data["summary"]).classes("graph-summary")
                 with ui.row().classes("graph-detail-primary w-full items-center gap-2"):
-                    ui.button(self.text("view_graph"), icon="hub", color=None, on_click=self.view_graph).props("unelevated no-caps").classes("graph-primary-action")
+                    ui.button(self.text("center" if self.mode == "graph" else "view_graph"), icon="my_location", color=None, on_click=self.view_graph).props("unelevated no-caps").classes("graph-primary-action")
+                    if self.mode == "graph":
+                        with ui.button(self.text("expand"), icon="open_in_full", color=None).props("flat no-caps"):
+                            with ui.menu():
+                                ui.menu_item(self.text("expand_all_neighbors"), on_click=self.expand_selected)
+                                counts = {}
+                                for edge in (self.local_relations or {}).get("edges", []):
+                                    counts[edge["predicate"]] = counts.get(edge["predicate"], 0) + 1
+                                for predicate, count in counts.items():
+                                    ui.menu_item(f"{self.text(predicate)} · {count}", on_click=partial(self.expand_selected, predicate))
+                                if (self.local_relations or {}).get("truncated"):
+                                    ui.label(self.text("neighbor_counts_partial")).classes("text-xs px-4 theme-text-muted")
+                        if any(query["root_id"] == data["id"] for query in self._graph_queries[1:]):
+                            ui.button(self.text("collapse_neighbors"), icon="close_fullscreen", on_click=self.collapse_selected, color=None).props("flat dense no-caps")
                     ui.button(self.text("create_relation"), icon="add_link", color=None, on_click=partial(self.edit_edge, data["id"])).props("flat no-caps")
                 with ui.expansion(self.text("relations"), icon="share").classes("graph-section graph-relations w-full"):
                     if self.local_relations:
@@ -1043,9 +1567,9 @@ class GraphWorkbench(WorkbenchBase):
                         self.edge_table(self.local_relations)
             elif kind == "relation":
                 with ui.row().classes("graph-relation-path w-full items-center gap-2"):
-                    ui.button(self.text("source_object"), color=None, on_click=partial(self.select, "object", data["source_id"])).props("flat no-caps")
+                    ui.button(self._endpoint_names.get(data["source_id"], self.text("source_object")), color=None, on_click=partial(self.select, "object", data["source_id"])).props("flat no-caps")
                     ui.label("↔" if data.get("symmetric") else "→")
-                    ui.button(self.text("target_object"), color=None, on_click=partial(self.select, "object", data["target_id"])).props("flat no-caps")
+                    ui.button(self._endpoint_names.get(data["target_id"], self.text("target_object")), color=None, on_click=partial(self.select, "object", data["target_id"])).props("flat no-caps")
                 for key in ("predicate", "description", "qualifier", "basis"):
                     value = self.text(data[key]) if key in ("basis", "predicate") else data[key]
                     ui.label(self.text(key) + " · " + value).classes("text-sm break-words theme-text-secondary")
@@ -1069,8 +1593,16 @@ class GraphWorkbench(WorkbenchBase):
         self.refresh_detail()
 
     async def view_graph(self):
-        # 详情里的「查看关联」总是以当前对象为根重排，即使图谱标签已有同根的图。
-        await self.set_mode("graph", center=True)
+        rebuild = self.mode != "graph" or self.layout == "sphere3d"
+        if not await self.begin_exploration():
+            return
+        self.restore_hierarchy_filters()
+        self.mode = "graph"
+        self.overview = False
+        self.layout = "auto"
+        await self.load_graph(center=True)
+        self.refresh_modes()
+        self.refresh_workspace() if rebuild else self.refresh_graph_toolbar()
 
     # ---- 写入 ----
     def edit_current(self):

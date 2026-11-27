@@ -114,10 +114,15 @@ def test_contextual_help_supports_focus_and_escape(knowledge_base):
 
 def test_settings_help_does_not_hide_upload_warning(knowledge_base):
     from nicegui import ui
+    from app.ui.handlers.settings_handlers import SettingsHandlers
     from app.ui.views.settings_view import _render_ocr_mineru_fields
 
+    form = {}
+    handlers = SettingsHandlers(form)
+    handlers.init_settings_form()
+    handlers.active_group = "ocr"
     with ui.column() as container:
-        _render_ocr_mineru_fields({})
+        _render_ocr_mineru_fields(form, handlers)
     labels = [element.text for element in container.descendants() if isinstance(element, ui.label)]
     assert t("settings_ocr.third_party_warning") in labels
     assert t("settings_ocr.mineru_hint") not in labels

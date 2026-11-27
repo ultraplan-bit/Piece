@@ -37,7 +37,11 @@ CATALOG_KEY_HANDLER = """(event) => {
         next.focus({preventScroll: true}); next.scrollIntoView({block: 'nearest'});
         if (!event.ctrlKey && !event.metaKey &&
             (catalog.dataset.multiselect !== 'true' || event.shiftKey)) {
-            next.dispatchEvent(new MouseEvent('click', {bubbles: true, shiftKey: event.shiftKey}));
+            if (next.dataset.collectionId) {
+                catalog.dispatchEvent(new CustomEvent('select-collection', {detail: Number(next.dataset.collectionId)}));
+            } else {
+                next.dispatchEvent(new MouseEvent('click', {bubbles: true, shiftKey: event.shiftKey}));
+            }
         }
     };
     if (catalog.dataset.tree === 'true' && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
@@ -45,7 +49,9 @@ CATALOG_KEY_HANDLER = """(event) => {
         const expanded = row.getAttribute('aria-expanded') === 'true';
         if (row.dataset.collectionId && ((event.key === 'ArrowRight' && !expanded) ||
             (event.key === 'ArrowLeft' && expanded))) {
-            row.dispatchEvent(new MouseEvent('dblclick', {bubbles: true}));
+            catalog.dispatchEvent(new CustomEvent('set-collection-expanded', {
+                detail: {id: Number(row.dataset.collectionId), expanded: event.key === 'ArrowRight'}
+            }));
         } else {
             focus(rows.find(item => event.key === 'ArrowRight'
                 ? item.dataset.parentRow === row.dataset.catalogRow
@@ -66,7 +72,8 @@ CATALOG_KEY_HANDLER = """(event) => {
     } else if ((event.key === 'Enter' || event.key === ' ') && !event.repeat &&
                !event.ctrlKey && !event.metaKey) {
         event.preventDefault(); event.stopPropagation();
-        const type = row.dataset.collectionId || (event.key === 'Enter' && row.dataset.openOnEnter === 'true') ? 'dblclick' : 'click';
+        const type = !row.dataset.collectionId && event.key === 'Enter' && row.dataset.openOnEnter === 'true'
+            ? 'dblclick' : 'click';
         row.dispatchEvent(new MouseEvent(type, {bubbles: true, shiftKey: event.shiftKey}));
     } else if (event.key === 'Escape' && catalog.dataset.multiselect === 'true') {
         event.preventDefault(); event.stopPropagation();

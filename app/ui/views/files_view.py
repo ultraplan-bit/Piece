@@ -194,6 +194,18 @@ def render_files_middle(
 
         catalog.on("catalog-cancel", file_handlers.exit_batch_mode, args=[])
         catalog.on("catalog-select-all", file_handlers.select_all_visible, args=[])
+        catalog.on("select-collection", in_catalog(lambda e: file_handlers.select_collection(e.args)),
+                   js_handler="event => emit(event.detail)")
+        catalog.on("set-collection-expanded", in_catalog(lambda e: file_handlers.set_collection_expanded(
+            e.args["id"], e.args["expanded"])), js_handler="event => emit(event.detail)")
+        # 目录在列表刷新时仍然存在，点击刚被重绘的集合行也能送达。
+        catalog.on("click.capture", in_catalog(lambda e: file_handlers.toggle_collection(e.args)), js_handler="""event => {
+            const row = event.target.closest('.resource-collection-row');
+            if (!row) return;
+            if (!event.target.closest('.tree-expander') && event.target.closest('%s')) return;
+            emit(Number(row.dataset.collectionId));
+        }""" % _ROW_INTERACTIVE)
+
         def export_items(file_ids=None, *, has_original=True):
             ui.menu_item(t("files.export_working"), on_click=in_catalog(
                 lambda: file_handlers.handle_export_files("markdown", file_ids))).props("role=menuitem")
@@ -582,8 +594,6 @@ def render_files_middle(
                 row._props["data-import-label"] = collection_path_label(item)
                 row._props["data-parent-row"] = f'c:{entry["scope"]}' if entry["scope"] is not None else ""
                 ui_refs["catalog_rows"][key] = row
-                row.on("click", in_catalog(lambda: file_handlers.select_collection(cid)), args=[])
-                row.on("dblclick", in_catalog(lambda: file_handlers.toggle_collection(cid)), js_handler=_ROW_DBLCLICK_HANDLER)
                 row.on("keydown", js_handler=CATALOG_KEY_HANDLER)
                 row.on("rename-collection", in_catalog(lambda: file_handlers.begin_collection_edit(cid)), args=[])
                 edit = state.get("collection_edit")
@@ -595,7 +605,6 @@ def render_files_middle(
                 toggle = ui.button(icon="expand_more" if expanded else "chevron_right", color=None).props("flat dense round size=xs").classes("tree-expander theme-text-muted")
                 ui_refs["collection_expanders"][cid] = toggle
                 toggle._props["aria-label"] = t("collections.collapse" if expanded else "collections.expand", name=item["name"])
-                toggle.on("click.stop", in_catalog(lambda: file_handlers.toggle_collection(cid)))
                 ui.icon("folder_open" if expanded else "folder", size="18px").classes("collection-tree-icon theme-text-muted").props("aria-hidden=true")
                 ui.label(item["name"]).classes("collection-tree-name text-sm theme-text").tooltip(collection_path_label(item))
                 ui.label(str(item["file_count"])).classes("collection-tree-count").tooltip(t("collections.counts",

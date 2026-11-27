@@ -14,6 +14,7 @@ import inspect
 from nicegui import ui
 
 from app.i18n import t
+from app.ui.components import write_clipboard
 
 
 def render_cloud_sync_middle(
@@ -187,14 +188,45 @@ def render_cloud_sync_right(
             ).classes("theme-text-muted").tooltip(t("cloud_sync.clear_logs"))
 
         # 日志内容区
+        @ui.refreshable
+        def result_summary():
+            result = sync_state.get("last_result") or {}
+            errors = result.get("error_details") or []
+            if errors:
+                with ui.column().classes("sync-failure-summary w-full gap-2 px-4 py-3"):
+                    ui.label(t("cloud_sync.failed_items", count=len(errors))).classes("text-sm font-medium theme-danger")
+                    for message in errors:
+                        ui.label(message).classes("text-xs theme-text break-words")
+                    with ui.row().classes("items-center gap-2"):
+                        async def copy_failures():
+                            ok = await write_clipboard("\n".join(errors))
+                            ui.notify(t("logs.copied", count=len(errors)) if ok else t("logs.copy_failed"),
+                                      type="positive" if ok else "negative")
+                        ui.button(t("cloud_sync.copy_failures"), icon="content_copy", on_click=copy_failures).props("flat dense no-caps")
+                        if ui_refs.get("open_webdav_settings"):
+                            ui.button(t("cloud_sync.go_settings"), icon="settings",
+                                      on_click=lambda: _open_webdav_settings(ui_refs)).props("flat dense no-caps")
+                    ui.label(t("cloud_sync.failure_next_step")).classes("text-xs theme-text-muted")
+
+        ui_refs["sync_result_summary"] = result_summary
+        result_summary()
+        with ui.row().classes("w-full items-center justify-between px-4 py-1"):
+            ui.label(t("cloud_sync.newest_first")).classes("text-xs theme-text-muted")
+            def filter_errors(event):
+                sync_state["errors_only"] = event.value
+                sync_logs.refresh()
+            ui.switch(t("cloud_sync.errors_only"), value=sync_state.get("errors_only", False),
+                      on_change=filter_errors).props("dense").classes("text-xs")
         with ui.scroll_area().classes("cloud-sync-log-scroll flex-1 min-h-0 scroll-flush"):
             @ui.refreshable
             def sync_logs():
                 logs = sync_state.get("logs", [])
+                if sync_state.get("errors_only"):
+                    logs = [log for log in logs if log.get("type") == "error"]
                 if not logs:
                     with ui.column().classes("cloud-sync-empty w-full h-full items-center justify-center"):
                         ui.icon("event_note", size="lg").classes("theme-text-muted")
-                        ui.label(t("cloud_sync.no_logs")).classes("text-sm mt-2 theme-text-muted")
+                        ui.label(t("cloud_sync.no_errors" if sync_state.get("errors_only") else "cloud_sync.no_logs")).classes("text-sm mt-2 theme-text-muted")
                 else:
                     with ui.column().classes("cloud-sync-log-list w-full gap-0"):
                         for log in reversed(logs):  # 最新的在上面

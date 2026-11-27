@@ -1,7 +1,9 @@
 """设置草稿、分组保存与连接测试。"""
 
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from nicegui import ui
 from pydantic import ValidationError
@@ -98,6 +100,76 @@ class SettingsHandlers:
         self.test_results = {}
         self.testing_groups = set()
         self.language_changed = False
+        self.saving = False
+        self.search_query = ""
+        self.focus_field = None
+        self.scroll_positions = {}
+        self.expanded = {}
+        self.field_labels = {}
+        self.refresh_settings = None
+
+    def resume_settings_form(self):
+        """保留本会话的未保存输入，同时刷新其他字段的已保存值。"""
+        self.init_settings_form(keep_fields=self.changed_fields() if self._form_settings else ())
+
+    def restore_field(self, key):
+        if self.saving or key not in self._baseline_form:
+            return
+        self.settings_form[key] = deepcopy(self._baseline_form[key])
+        self.errors.pop(self.active_group, None)
+
+    @property
+    def changed_count(self):
+        return len(self.changed_fields(self.active_group))
+
+    @property
+    def inactive_fields(self):
+        effective = _form_values(get_settings())
+        return tuple(key for key, value in self._baseline_form.items() if effective.get(key) != value)
+
+    def change_summary(self, group=None):
+        """差异只用于当前会话展示；凭据永不进入预览文本。"""
+        def display(key, value):
+            if key.endswith(("api_key", "password", "token")):
+                return t("settings.secret_set") if value else t("settings.empty_value")
+            if isinstance(value, bool):
+                return t("settings.enabled") if value else t("settings.disabled")
+            return str(value) if value not in (None, "") else t("settings.empty_value")
+
+        return [{"key": key, "label": self.field_labels.get(key, key),
+                 "before": display(key, self._baseline_form.get(key)),
+                 "after": (t("settings.secret_changed") if key.endswith(("api_key", "password", "token"))
+                           and self.settings_form.get(key) else display(key, self.settings_form.get(key)))}
+                for key in sorted(self.changed_fields(group or self.active_group))]
+
+    async def save_group_async(self, group):
+        if self.saving:
+            return False
+        submitted = deepcopy(self.settings_form)
+        # 线程只操作提交快照，UI 表单和状态始终在事件循环中发布。
+        worker = SettingsHandlers(deepcopy(submitted))
+        worker._form_settings = self._form_settings.model_copy(deep=True) if self._form_settings else None
+        worker._baseline_form = deepcopy(self._baseline_form)
+        self.saving = True
+        try:
+            return await run_sync(worker.save_settings_form, group, notify=False)
+        finally:
+            # run_sync 取消时也会排空线程；已落盘的结果仍要发布。
+            if group in worker.saved_groups:
+                late_edits = {key: deepcopy(value) for key, value in self.settings_form.items()
+                              if value != submitted.get(key)}
+                self._form_settings = worker._form_settings
+                self._baseline_form = worker._baseline_form
+                self.settings_form.clear()
+                self.settings_form.update(worker.settings_form)
+                self.settings_form.update(late_edits)
+                self.reindex_groups.update(worker.reindex_groups)
+                self.saved_groups.add(group)
+                self.errors.pop(group, None)
+                self.language_changed = self.language_changed or worker.language_changed
+            elif group in worker.errors:
+                self.errors[group] = worker.errors[group]
+            self.saving = False
 
     def init_settings_form(self, *, keep_fields=()):
         """刷新已保存基线；分组保存时仅保留其他分组确实改过的字段。"""
@@ -154,7 +226,7 @@ class SettingsHandlers:
     @property
     def can_save(self):
         retry = self.active_group in {"mcp", "zotero"} and config_effects(self._form_settings or get_settings())["apply_error"]
-        return bool(self.changed_fields(self.active_group) or retry)
+        return not self.saving and bool(self.changed_fields(self.active_group) or retry)
 
     @property
     def error_message(self):
@@ -162,8 +234,10 @@ class SettingsHandlers:
 
     @property
     def status_message(self):
+        if self.saving:
+            return t("settings.saving")
         if self.changed_fields(self.active_group):
-            return t("settings.unsaved_group")
+            return t("settings.unsaved_count", count=self.changed_count)
         if self.active_group in self.saved_groups:
             return t("settings.saved_group")
         return t("settings.no_changes")
@@ -203,6 +277,39 @@ class SettingsHandlers:
         result = self.test_results.get(self.active_group)
         return bool(result and not result["ok"] and self.active_group not in self.testing_groups
                     and result["values"] == self.group_values(self.active_group))
+
+    @property
+    def test_context(self):
+        result = self.test_results.get(self.active_group)
+        if not result:
+            return ""
+        return t("settings.test_context", time=result["time"], target=result["target"])
+
+    @staticmethod
+    def test_target(group, form):
+        if group == "embedding":
+            address, name = form.get("base_url"), form.get("model")
+        elif group == "webdav":
+            address, name = form.get("webdav_hostname"), "WebDAV"
+        elif group == "office":
+            return str(form.get("office_converter", "auto"))
+        else:
+            provider = form.get("ocr_provider", "paddle")
+            prefix = "ocr_vlm_" if provider == "vlm" else "ocr_"
+            address = form.get(prefix + "base_url") if provider != "mineru" else None
+            name = form.get(prefix + "model") if provider != "mineru" else "MinerU"
+        try:
+            parsed = urlsplit(str(address or ""))
+            # 不展示 URL 内嵌认证、查询参数或片段。
+            host = parsed.hostname or ""
+            if ":" in host:
+                host = f"[{host}]"
+            if parsed.port:
+                host += f":{parsed.port}"
+            address = urlunsplit((parsed.scheme, host, parsed.path, "", "")) if host else ""
+        except ValueError:
+            address = ""
+        return " · ".join(str(value) for value in (name, address) if value)
 
     @property
     def testing(self):
@@ -302,7 +409,9 @@ class SettingsHandlers:
             ok, message = False, t("settings.test_failed", error=_safe_test_error(error, form))
         finally:
             self.testing_groups.discard(group)
-        self.test_results[group] = {"values": values, "ok": ok, "text": message}
+        self.test_results[group] = {"values": values, "ok": ok, "text": message,
+                                    "time": datetime.now().astimezone().strftime("%H:%M:%S"),
+                                    "target": self.test_target(group, form)}
         if not label.is_deleted:
             unchanged = values == self.group_values(group)
             label.set_text(message if unchanged else t("settings.test_stale"))

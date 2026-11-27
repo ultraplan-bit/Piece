@@ -107,6 +107,23 @@ Wiki and graph are separate features: Wiki stores topic pages, while graph store
 
 Importing documents does not automatically compile pages or generate relationships. When asking AI to organize knowledge, specify what should be saved; ordinary lookups and answers do not need writes.
 
+### Exploring the graph
+
+- The default overview is a stable 2D relationship map. Dense areas collapse into structural groups. These are temporary display groups, not new entities or inferred knowledge topics. Select a group to inspect its members and internal relationships, then expand or collapse it.
+- Clicking a node or relationship opens details and evidence beside the canvas. Use explicit centering or neighbor expansion to change the exploration scope. Neighbor expansion can be limited to a relationship type.
+- Local exploration starts at one hop. Collapse individual expansions or use Back / `Alt+Left` to restore the previous selection, filters, positions, and zoom. `Esc` closes details before clearing selection.
+- Nodes and relationships load in separate pages. Continue loading or narrow the scope when content remains hidden. An isolated-node filter exposes unconnected content. Zoom changes label density without automatically expanding groups.
+- Hierarchy shows one classification, composition, or dependency relationship at a time, retaining multiple parents and cycles. Dashed edges identify cycles. Other nodes remain accessible in Overview; optional 3D presentation is available from its more menu.
+- Node size represents connections in the displayed scope, not confidence. Open source evidence and return from the library to continue exploring.
+
+### Settings and tool workspaces
+
+- Search settings by names and technical aliases, jump to fields, restore individual changes, and inspect group changes before saving. Connection tests show the tested target and time and become stale when inputs change.
+- Keep unsaved drafts while visiting other tools and resume them in the same session. Save before closing the application. Settings opened from a tool provide a return action.
+- Run Recall Test with `Ctrl/Cmd+Enter`; task activity shows its actual stage and elapsed time. Changing conditions retains the previous results with a stale-result notice. Returning from source reading restores expanded results, scroll position, and focus.
+- Filter logs by content or module and copy individual entries with secrets masked. Reading older entries pauses following; new-entry counts let you return to the latest logs. Zotero imports share the existing progress, cancel, and retry controls.
+- MCP configuration separates client selection, capabilities, and connection steps. Copying configuration does not claim a client is connected. Skill exports retain output-file results; the native Windows window supports directory picking and opening completed export directories, while browsers retain manual paths and copying.
+
 ### Wiki storage and external editing
 
 Wiki text and metadata are stored as Markdown files under `wiki/` in the configured `data_path`. SQLite holds a rebuildable page index and a separate audit trail. In-page links use `[Title](piece://wiki/PAGE_UUID)`, so changing the title or filename does not change identity.

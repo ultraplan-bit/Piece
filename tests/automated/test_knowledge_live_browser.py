@@ -68,7 +68,10 @@ def test_graph_spaces_and_canvas_refresh_without_reload(live_gui):
             page.get_by_role("button", name=t("sidebar.graph"), exact=True).click()
             picker = page.locator(".graph-space-picker")
             expect(picker).to_contain_text(default["name"], timeout=15000)
-            picker.click()
+            select = picker.get_by_role("combobox")
+            expect(select).to_be_enabled()
+            select.click()
+            expect(page.get_by_role("option", name=default["name"], exact=True)).to_be_visible()
             created = graph_service.create_graph("外部实时空间")
             option = page.get_by_role("option", name="外部实时空间", exact=True)
             expect(option).to_be_visible(timeout=15000)
@@ -79,7 +82,7 @@ def test_graph_spaces_and_canvas_refresh_without_reload(live_gui):
             graph_service.delete_graph(created["id"], confirmed=True, impact_token=preview["impact_token"])
             expect(picker).to_contain_text(default["name"], timeout=15000)
             page.locator(f'[data-catalog-row="{root}"]').click()
-            page.get_by_role("button", name=text("graph", "view_graph"), exact=True).click()
+            page.locator(".graph-inspector").get_by_role("button", name=text("graph", "center"), exact=True).click()
             wait_chart(page, 1, 0)
             canvas_id = page.locator(".nicegui-echart").get_attribute("id")
             page.locator(".nicegui-echart").evaluate("""el => {
@@ -97,6 +100,12 @@ def test_graph_spaces_and_canvas_refresh_without_reload(live_gui):
             wait_chart(page, 1, 0)
             page.get_by_role("button", name=text("graph", "global_graph"), exact=True).click()
             wait_chart(page, 2, 0)
+            page.locator(".graph-toolbar").get_by_role("button", name=text("graph", "more"), exact=True).click()
+            page.get_by_text(text("graph", "layout_3d"), exact=True).click()
+            page.wait_for_function("""() => {
+                const el = document.querySelector('.nicegui-echart');
+                return el && getElement(el.id.slice(1))?.chart?.getOption()?.series?.[0]?.type === 'lines3D';
+            }""")
             canvas_id = page.locator(".nicegui-echart").get_attribute("id")
             page.locator(".nicegui-echart").evaluate("""el => {
                 getElement(el.id.slice(1)).chart.setOption({globe: {viewControl: {alpha: 36, beta: 51, distance: 195}}});
@@ -154,6 +163,7 @@ def test_reference_checks_and_open_history_refresh(live_gui, feature):
             if feature == "wiki":
                 page.get_by_role("button", name=text(feature, "review"), exact=True).click()
             else:
+                page.get_by_role("button", name=text(feature, "objects"), exact=True).click()
                 page.get_by_role("button", name='Expand "' + text(feature, "review") + '"').click()
             page.get_by_role("button", name=text(feature, "run_checks"), exact=True).click()
             expect(page.get_by_text(text(feature, "checked_count", count=1), exact=True)).to_be_visible()
@@ -162,7 +172,8 @@ def test_reference_checks_and_open_history_refresh(live_gui, feature):
             if feature == "wiki":
                 page.get_by_role("button", name=text(feature, "pages"), exact=True).click()
             page.locator(f'[data-catalog-row="{second}"]').click()
-            page.locator(".knowledge-detail").get_by_role("button", name=text(feature, "more"), exact=True).click()
+            actions = page.locator(".graph-detail-actions" if feature == "graph" else ".knowledge-detail")
+            actions.get_by_role("button", name=text(feature, "more"), exact=True).click()
             page.locator(".q-menu").get_by_text(text(feature, "history"), exact=True).click()
             dialog = page.get_by_role("dialog")
             expect(dialog.locator(".q-expansion-item")).to_have_count(1)

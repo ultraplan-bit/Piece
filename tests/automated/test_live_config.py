@@ -2,7 +2,7 @@
 
 import asyncio
 import socket
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 
 import pytest
 from fastmcp import Client, FastMCP
@@ -249,33 +249,20 @@ def test_management_api_applies_real_zotero_service_without_core_restart(knowled
 
     monkeypatch.setattr(ZoteroClient, "__init__", reject_zotero_connection)
     monkeypatch.setattr(server, "MCP_HOST", "127.0.0.1")
-    for name in ("PIECE_INDEX_MCP_PORT", "PIECE_GRAPH_MCP_PORT", "PIECE_WIKI_MCP_PORT"):
-        monkeypatch.delenv(name, raising=False)
-    for _ in range(20):
-        base = _port()
-        if base > 65530:
-            continue
-        reserved = []
-        try:
-            for offset in (0, 1, 4, 5):
-                sock = socket.socket()
-                reserved.append(sock)
-                sock.bind(("127.0.0.1", base + offset))
-            break
-        except OSError:
-            continue
-        finally:
-            for sock in reserved:
-                sock.close()
-    else:
-        pytest.fail("没有找到可用的临时 MCP 端口组")
-    config = settings.get_settings()
-    config.mcp.port = base
-    config.mcp.zotero_port = _port()
-    while config.mcp.zotero_port in {base, base + 1, base + 4, base + 5}:
-        config.mcp.zotero_port = _port()
-    assert settings.save_settings(config)
-    runtime = Runtime(config, port=_port(), with_gui=False, with_mcp=True)
+    # 所有监听分别申请端口，避免派生端口被后续临时连接占用。
+    with ExitStack() as reserved:
+        ports = {}
+        for name in ("admin", "retrieval", "zotero", *settings.MCP_PORT_ENV):
+            sock = reserved.enter_context(socket.socket())
+            sock.bind(("127.0.0.1", 0))
+            ports[name] = sock.getsockname()[1]
+        for name, variable in settings.MCP_PORT_ENV.items():
+            monkeypatch.setenv(variable, str(ports[name]))
+        config = settings.get_settings()
+        config.mcp.port = ports["retrieval"]
+        config.mcp.zotero_port = ports["zotero"]
+        assert settings.save_settings(config)
+    runtime = Runtime(config, port=ports["admin"], with_gui=False, with_mcp=True)
     manager = MCPServerManager()
     application = server.build_application(runtime, manager=manager)
 

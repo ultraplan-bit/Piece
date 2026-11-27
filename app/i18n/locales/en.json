@@ -124,7 +124,9 @@
     "source_title": "Zotero source",
     "source_keys": "Item {item} · Attachment {attachment}",
     "source_versions": "Item version {item} · Attachment version {attachment}",
-    "sources_read_only": "Zotero source identities are maintained by imports and preserved read-only, not through ordinary property editing."
+    "sources_read_only": "Zotero source identities are maintained by imports and preserved read-only, not through ordinary property editing.",
+    "show_activity": "View in task activity",
+    "background_hint": "Submitted imports continue after this window closes. Track them in task activity at the top."
   },
   "library": {
     "view_reading": "Read",
@@ -366,7 +368,8 @@
     "index_current": "Index up to date",
     "index_failed": "Index update failed",
     "affected_backlinks": "Affected backlinks",
-    "delete_local_recovery": "The replaced Markdown is kept as a local recovery copy (.wiki-recovery-*.bak); this is not complete erasure."
+    "delete_local_recovery": "The replaced Markdown is kept as a local recovery copy (.wiki-recovery-*.bak); this is not complete erasure.",
+    "technical_info": "Technical details"
   },
   "sidebar": {
     "zotero": "Zotero Library",
@@ -718,7 +721,38 @@
     "discard_title": "Leave settings?",
     "discard_message": "You still have unsaved changes. Leaving and discarding will lose them; already saved settings are unaffected.",
     "discard": "Discard and leave",
-    "keep_editing": "Keep editing"
+    "keep_editing": "Keep editing",
+    "search": "Search settings…",
+    "search_count": "{count} settings found",
+    "search_empty": "No matches. Try “embedding”, “sync”, or “port”.",
+    "modified": "Modified",
+    "restore_field": "Revert item",
+    "view_changes": "View changes",
+    "changes_title": "Unsaved changes in this group",
+    "saving": "Saving…",
+    "unsaved_count": "{count} unsaved changes in this group",
+    "secret_set": "Credential set",
+    "secret_changed": "Credential changed",
+    "empty_value": "Not set",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "test_context": "{time} · Tested: {target}",
+    "return_tool": "Back to tool",
+    "inactive_field": "“{field}” belongs to an inactive option. Select its provider or enable the feature below.",
+    "service_overview": "Services and credentials",
+    "service_overview_hint": "Expand a service to view credentials. Preview addresses follow current input; status reflects the running service.",
+    "active_address": "Effective configuration address: {address}",
+    "service_unknown": "Not running or unknown",
+    "service_ready": "Running",
+    "service_starting": "Starting",
+    "service_stopping": "Stopping",
+    "service_failed": "Failed",
+    "service_disabled": "Disabled",
+    "connection_disabled_hint": "Sync is disabled. Connection details are retained; you can test them before enabling sync.",
+    "saved_not_active": "Saved; waiting to apply to the current process",
+    "keep_draft_leave": "Keep draft and leave",
+    "draft_leave_hint": "Keep unsaved changes in this session and continue editing when you return. Save before closing the application.",
+    "return_to": "Return to {view}"
   },
   "settings_appearance": {
     "title": "Appearance Settings",
@@ -917,7 +951,13 @@
     "last_result": "Last result",
     "result_counts": "Uploaded {uploaded} · Downloaded {downloaded} · Skipped {skipped} · Errors {errors}",
     "strategy": "Sync strategy",
-    "clear_logs": "Clear sync log"
+    "clear_logs": "Clear sync log",
+    "failed_items": "{count} items failed in the last sync",
+    "copy_failures": "Copy failure details",
+    "failure_next_step": "Check the connection and failure details, then run sync again.",
+    "newest_first": "Newest logs first",
+    "errors_only": "Errors only",
+    "no_errors": "There are no error logs"
   },
   "mcp_config": {
     "service_zotero": "Zotero collaboration",
@@ -960,7 +1000,15 @@
     "listener_stopping": "Stopping",
     "listener_unavailable": "MCP entry not loaded",
     "settings_restart_hint": "Configuration uses effective settings and keeps the previous ports until changes are applied. Reopen this page and copy the updated client config afterwards. Service status does not mean a client is connected.",
-    "notice": "This page only generates config and shows local service endpoints; it does not check the client connection. Copy success, service status and client connection are three different things."
+    "notice": "This page only generates config and shows local service endpoints; it does not check the client connection. Copy success, service status and client connection are three different things.",
+    "pin": "Pin client",
+    "unpin": "Unpin client",
+    "step_client": "Choose client",
+    "step_services": "Choose services",
+    "step_copy": "Copy configuration",
+    "step_connect": "Connect in client",
+    "after_copy": "Configuration copied. Follow the instructions above to paste it into your client, then check the connection there.",
+    "connection_note": "These are Piece service states. Check your client for its connection result."
   },
   "skills": {
     "title": "Skill Export",
@@ -995,7 +1043,10 @@
     "overwrite_confirm_message": "\"{names}\" already exists under \"{dir}\" and overwriting will replace its SKILL.md. Continue?",
     "preview_heading": "Preview",
     "prefix_expand": "Command prefix (advanced)",
-    "export_note": "Next: enable or reload the skill in your target client."
+    "export_note": "Next: enable or reload the skill in your target client.",
+    "choose_directory": "Choose folder",
+    "open_directory": "Open export folder",
+    "directory_failed": "Could not open the folder. Check that it still exists."
   },
   "logs": {
     "title": "Logs",
@@ -1019,7 +1070,14 @@
     "clear_message": "Clears the shared in-memory log buffer (visible to all sessions and views). On-disk logs under data/logs are not affected.",
     "view_exception": "View details",
     "detail_title": "Log details",
-    "masked_hint": "Sensitive content masked"
+    "masked_hint": "Sensitive content masked",
+    "search": "Search log messages",
+    "module_filter": "Filter modules",
+    "new_entries": "{count} new entries · Jump to latest",
+    "buffer_hint": "Newest at bottom; filtering the latest {count} buffered entries",
+    "no_match": "No logs match these filters",
+    "match_count": "Showing {shown} / {matches} matches / {total} total",
+    "copy_entry": "Copy this entry"
   },
   "recall_test": {
     "title": "Recall Test",
@@ -1053,7 +1111,12 @@
     "last_run_at": "Ran at {time}",
     "stale": "Conditions changed; results below are from the last run",
     "locate": "Locate in Library",
-    "locate_unavailable": "Cannot open in Library right now"
+    "locate_unavailable": "Cannot open in Library right now",
+    "run_again": "Run again",
+    "run_shortcut": "Ctrl / ⌘ + Enter to run",
+    "running_status": "{stage} · {seconds}s elapsed",
+    "stage_search": "Searching",
+    "stage_read": "Reading matched content"
   },
   "wiki": {
     "page_info": "Page info",
@@ -1133,6 +1196,49 @@
     "import_target": "Target space: {name}",
     "import_done": "Imported {entities} entities, {relations} relations, and {evidence} evidence items.",
     "overview_count": "Showing {nodes}/{total_nodes} entities · {edges}/{total_edges} matching relations",
-    "overview_truncated": "Large graph: highly connected entities are prioritized. Filter or select an entity to explore locally."
+    "overview_truncated": "Some content is not displayed. Load more or narrow the scope.",
+    "inspector": "Details and evidence",
+    "exploration_back": "Back to previous exploration",
+    "hierarchy": "Hierarchy",
+    "filters": "Filters",
+    "relation_filters": "Relationships on the canvas",
+    "relation_status": "Relationship status",
+    "isolated_only": "Isolated nodes only",
+    "clear_filters": "Clear filters",
+    "layout_2d": "2D relationship layout",
+    "layout_3d": "3D overview (presentation)",
+    "hierarchy_relation": "Hierarchy relationship",
+    "hierarchy_direction": "Arrows point to the whole, broader concept, or dependency. Peers may wrap across rows; multiple parents and cycles are preserved.",
+    "exploration_help": "Click a node or relationship for details. Recenter and expand neighbors are separate actions. Drag to pan or position nodes; scroll to zoom. Esc closes details; Alt + Left goes back. Circles are concepts, squares are entities. Size represents connections in the displayed scope, not confidence.",
+    "load_more_nodes": "Load more nodes",
+    "load_more_edges": "Load more relationships",
+    "load_more_neighbors": "Load more neighbors",
+    "isolated_count": "{count} isolated nodes in this filter",
+    "group_count": "{count} structural groups; select to expand",
+    "structure_group": "Structural group",
+    "isolated_nodes": "Isolated nodes",
+    "group": "Structural group",
+    "cycle_detected": "Directed cycles are preserved with dashed edges",
+    "hierarchy_requires_single_relation": "Choose one classification, composition, or dependency relation",
+    "structure_group_hint": "A temporary grouping based on connections, not a knowledge category. Expanding and collapsing do not change data.",
+    "group_members": "{count} member nodes",
+    "expand_group": "Expand group",
+    "collapse_group": "Collapse group",
+    "internal_relations": "Internal relationships · {count}",
+    "aggregated_relations": "Aggregated relationships · {count}",
+    "expand_all_neighbors": "Expand one-hop neighbors",
+    "neighbor_counts_partial": "Counts cover loaded relationships. Load more neighbors to continue.",
+    "collapse_neighbors": "Collapse this expansion",
+    "center": "Center on this node",
+    "refresh": "Refresh data",
+    "reset_view": "Fit to canvas",
+    "technical_info": "Technical details",
+    "hierarchy_excluded": "{count} other nodes do not participate in this relationship type; see Overview.",
+    "canvas_capacity": "Canvas capacity reached. Narrow filters or center on a target node to continue.",
+    "loading_graph": "Loading graph",
+    "hierarchy_loaded": "Loaded {nodes}/{total_nodes} entities · {edges}/{total_edges} relationships",
+    "hierarchy_visible": "{count} entities in this hierarchy · wrapped rows remain peers",
+    "hierarchy_empty": "No relationships of this type in the loaded scope. Choose another type or return to Overview.",
+    "hierarchy_pan_hint": "Readable text size is preserved. Pan or zoom to inspect the remaining nodes."
   }
 }

@@ -190,6 +190,141 @@ def test_test_errors_redact_credentials(editor):
     assert form["api_key"] not in redacted and "password with spaces" not in redacted
 
 
+def test_resume_preserves_drafts_and_field_restore_is_independent(editor):
+    handler, form = editor
+    original_model = form["model"]
+    form["model"] = "unsaved-model"
+    form["webdav_username"] = "unsaved-user"
+    config_service.update_config({"appearance": {"theme": "dark"}})
+    handler.resume_settings_form()
+    assert form["model"] == "unsaved-model" and form["theme"] == "dark"
+    handler.active_group = "embedding"
+    handler.restore_field("model")
+    assert form["model"] == original_model
+    assert form["webdav_username"] == "unsaved-user"
+    assert handler.dirty_groups == ("webdav",)
+
+
+def test_change_summary_and_test_context_do_not_expose_credentials(editor):
+    handler, form = editor
+    handler.active_group = "embedding"
+    old_key = form["api_key"]
+    form["api_key"] = "replacement-secret"
+    form["model"] = "another-model"
+    changes = handler.change_summary()
+    assert {item["key"] for item in changes} == {"api_key", "model"}
+    assert old_key not in str(changes) and "replacement-secret" not in str(changes)
+    form["base_url"] = "https://user:password@host.example:443/v1?token=private#fragment"
+    assert handler.test_target("embedding", form) == "another-model · https://host.example:443/v1"
+
+
+def test_async_save_has_busy_state_and_rejects_duplicate_submit(editor, monkeypatch):
+    from app.ui.handlers import settings_handlers
+    handler, form = editor
+    handler.active_group = "office"
+    form["office_converter"] = "off"
+
+    async def scenario():
+        started, release = asyncio.Event(), asyncio.Event()
+        async def slow_save(function, *args, **kwargs):
+            started.set()
+            await release.wait()
+            return function(*args, **kwargs)
+        monkeypatch.setattr(settings_handlers, "run_sync", slow_save)
+        task = asyncio.create_task(handler.save_group_async("office"))
+        await started.wait()
+        assert handler.saving and not handler.can_save
+        assert not await handler.save_group_async("office")
+        handler.restore_field("office_converter")
+        assert form["office_converter"] == "off"
+        release.set()
+        assert await task
+        assert not handler.saving and not handler.dirty
+    asyncio.run(scenario())
+
+
+def test_async_save_submits_snapshot_and_preserves_late_input(editor, monkeypatch):
+    from app.ui.handlers import settings_handlers
+    handler, form = editor
+    handler.active_group = "office"
+    form["office_converter"] = "off"
+    form["webdav_username"] = "other-group-draft"
+
+    async def scenario():
+        started, release = asyncio.Event(), asyncio.Event()
+        async def delayed_save(function, *args, **kwargs):
+            started.set()
+            await release.wait()
+            return function(*args, **kwargs)
+        monkeypatch.setattr(settings_handlers, "run_sync", delayed_save)
+        task = asyncio.create_task(handler.save_group_async("office"))
+        await started.wait()
+        # 模拟 disable 更新送达前已在网络队列中的输入事件。
+        form["office_converter"] = "libreoffice"
+        form["webdav_username"] = "later-other-group-draft"
+        release.set()
+        assert await task
+        assert config_service.get_saved_settings().office.converter == "off"
+        assert form["office_converter"] == "libreoffice"
+        assert form["webdav_username"] == "later-other-group-draft"
+        assert handler._baseline_form["office_converter"] == "off"
+        assert handler.dirty_groups == ("office", "webdav")
+    asyncio.run(scenario())
+
+
+def test_cancelled_async_save_waits_for_commit_and_publishes_result(editor, monkeypatch):
+    from threading import Event
+    from app.ui.handlers import settings_handlers
+    handler, form = editor
+    handler.active_group = "office"
+    form["office_converter"] = "off"
+    started, release = Event(), Event()
+    update = settings_handlers.update_config
+    def delayed_update(patch):
+        started.set()
+        assert release.wait(5)
+        return update(patch)
+    monkeypatch.setattr(settings_handlers, "update_config", delayed_update)
+
+    async def scenario():
+        task = asyncio.create_task(handler.save_group_async("office"))
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        form["office_converter"] = "com"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert config_service.get_saved_settings().office.converter == "off"
+        assert handler._baseline_form["office_converter"] == "off"
+        assert form["office_converter"] == "com"
+        assert not handler.saving and handler.dirty
+    asyncio.run(scenario())
+
+
+def test_setting_search_matches_aliases_and_configuration_keys():
+    from app.ui.views.settings_view import search_settings
+    assert {item["group"] for item in search_settings("向量")} == {"embedding"}
+    assert {item["group"] for item in search_settings("同步")} == {"webdav"}
+    assert any(item["key"] == "mcp_port" for item in search_settings("mcp port"))
+    assert [item["key"] for item in search_settings("embedding_concurrency")] == ["embedding_concurrency"]
+    assert search_settings("there-is-no-such-setting") == []
+
+
+def test_every_settings_category_renders_with_search_targets(editor, monkeypatch):
+    from nicegui import ui
+    from app.ui.views.settings_view import SETTING_ITEMS, render_settings_middle, render_settings_right
+    handler, form = editor
+    monkeypatch.setattr(ui, "timer", lambda *args, **kwargs: None)
+    for group, _ in SETTING_ITEMS:
+        with ui.column() as container:
+            render_settings_middle({"value": group}, {}, lambda _: None, handler)
+            render_settings_right({"value": group}, form, handler, lambda _: None)
+        try:
+            assert any(element._props.get("data-setting-key") for element in container.descendants())
+        finally:
+            container.delete()
+
+
 @pytest.mark.parametrize("value,valid", [(None, False), (0, False), (1, True), (2.5, False), (8, True), (9, False)])
 def test_number_validation(value, valid):
     from app.ui.views.settings_view import _integer_error

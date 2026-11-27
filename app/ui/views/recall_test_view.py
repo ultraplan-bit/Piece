@@ -13,6 +13,7 @@
 
 from indexing.utils import run_sync
 import inspect
+import json
 import time
 
 from nicegui import ui
@@ -56,17 +57,31 @@ def is_stale(recall_state: dict) -> bool:
     return _run_conditions(recall_state) != last
 
 
+def _conditions_changed(state: dict, refs: dict, **changes) -> None:
+    state.update(changes)
+    _refresh(refs, "recall_condition_status")
+
+
+def _run_status_text(state: dict) -> str:
+    if not state.get("is_running"):
+        return ""
+    elapsed = max(0, int(time.perf_counter() - state.get("started_at", time.perf_counter())))
+    return t("recall_test.running_status", stage=t(state.get("stage", "recall_test.stage_search")), seconds=elapsed)
+
+
 async def _maybe_await(result):
     """兼容同步/异步回调：返回协程时等待它。"""
     if inspect.isawaitable(result):
         await result
 
 
-def _locate_handler(ui_refs: dict, item: dict):
+def _locate_handler(ui_refs: dict, item: dict, state: dict | None = None):
     """结果行的「在资料库中定位」：优先注入的精确回调，其次只打开文件。"""
 
     async def locate():
         doc = item.get("doc") or {}
+        if state is not None:
+            state.update(selected_result=str(item.get("chunk_id") or doc.get("chunk_id") or ""), restore_focus=True)
         callback = ui_refs.get("open_recall_result")
         if callback:
             await _maybe_await(callback(doc.get("file_id"), doc.get("chunk_id")))
@@ -88,6 +103,7 @@ def render_recall_test_middle(recall_state: dict, ui_refs: dict):
         recall_state: 召回测试状态（查询、过滤条件、结果、统计）
         ui_refs: UI 组件引用字典
     """
+    ui_refs["recall_run_state"] = recall_state
     with ui.column().classes(
         "w-64 h-full flex flex-col overflow-hidden theme-panel gap-0"
     ).style("border-right: 1px solid var(--border-color)"):
@@ -101,20 +117,26 @@ def render_recall_test_middle(recall_state: dict, ui_refs: dict):
         with ui.column().classes("w-full px-3 py-3 gap-3").style(
             "border-bottom: 1px solid var(--border-color)"
         ):
-            ui.textarea(
+            query_input = ui.textarea(
                 label=t("recall_test.query"),
                 placeholder=t("recall_test.query_placeholder"),
                 value=recall_state.get("query", ""),
-                on_change=lambda e: recall_state.update(query=e.value),
+                on_change=lambda e: _conditions_changed(recall_state, ui_refs, query=e.value),
             ).props("dense outlined autogrow input-class=text-sm").classes(
                 "w-full theme-card theme-border-soft"
             )
+            query_input.on("keydown", lambda: _run_search(recall_state, ui_refs), js_handler='''(event) => {
+                if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing && !event.repeat) {
+                    event.preventDefault(); emit(event);
+                }
+            }''')
+            query_input.props('aria-keyshortcuts="Control+Enter Meta+Enter"')
 
             ui.input(
                 label=t("recall_test.filenames"),
                 placeholder=t("recall_test.filenames_placeholder"),
                 value=recall_state.get("filenames", ""),
-                on_change=lambda e: recall_state.update(filenames=e.value),
+                on_change=lambda e: _conditions_changed(recall_state, ui_refs, filenames=e.value),
             ).props("dense outlined input-class=text-sm").classes(
                 "w-full theme-card theme-border-soft"
             )
@@ -125,18 +147,18 @@ def render_recall_test_middle(recall_state: dict, ui_refs: dict):
                 value=list(recall_state.get("collection_names") or []),
                 multiple=True,
                 label=t("recall_test.collections"),
-                on_change=lambda e: recall_state.update(collection_names=e.value),
+                on_change=lambda e: _conditions_changed(recall_state, ui_refs, collection_names=e.value),
             ).props("dense outlined options-dense use-chips").classes(
                 "w-full text-sm theme-card theme-border-soft"
             )
 
             ui.switch(t("collections.include_descendants"), value=recall_state.get("include_descendants", True),
-                      on_change=lambda e: recall_state.update(include_descendants=e.value)).props("dense").classes("text-xs")
+                      on_change=lambda e: _conditions_changed(recall_state, ui_refs, include_descendants=e.value)).props("dense").classes("text-xs")
 
             @ui.refreshable
             def run_button():
                 button = ui.button(
-                    t("recall_test.run"),
+                    t("recall_test.run_again" if recall_state.get("has_run") else "recall_test.run"),
                     icon="search",
                     on_click=lambda: _run_search(recall_state, ui_refs),
                 ).props("color=primary").classes("w-full")
@@ -145,6 +167,10 @@ def render_recall_test_middle(recall_state: dict, ui_refs: dict):
 
             ui_refs["recall_run_button"] = run_button
             run_button()
+            ui.label(t("recall_test.run_shortcut")).classes("text-xs theme-text-muted")
+            running = ui.label(_run_status_text(recall_state)).classes("text-xs theme-text-secondary").props('aria-live=off')
+            ui_refs["recall_running_label"] = running
+            ui.timer(1.0, lambda: running.set_text(_run_status_text(recall_state)))
 
             @ui.refreshable
             def recall_last_run():
@@ -191,36 +217,28 @@ def render_recall_test_middle(recall_state: dict, ui_refs: dict):
                 stats = recall_state.get("stats")
                 if not stats:
                     return
-                with ui.column().classes("w-full px-3 py-3 gap-2"):
-                    ui.label(t("recall_test.stats")).classes(
-                        "text-xs font-medium theme-text-muted"
-                    )
-                    _stat_row(
-                        t("recall_test.route_exact"), str(stats["exact"])
-                    )
-                    _stat_row(t("recall_test.route_bm25"), str(stats["bm25"]))
-                    _stat_row(t("recall_test.route_vector"), str(stats["vector"]))
-                    _stat_row(t("recall_test.fused"), str(stats["fused"]))
-                    _stat_row(
-                        t("recall_test.elapsed"), f"{stats['elapsed_ms']} ms"
-                    )
-
-                    file_ids = stats.get("file_ids_filter")
-                    if file_ids:
+                with ui.expansion(t("recall_test.stats"), value=recall_state.get("stats_open", False),
+                                  on_value_change=lambda event: recall_state.update(stats_open=event.value)).props(
+                                      "dense").classes("w-full text-xs theme-text-muted"):
+                    with ui.column().classes("w-full px-3 pb-3 gap-2"):
+                        _stat_row(t("recall_test.route_exact"), str(stats["exact"]))
+                        _stat_row(t("recall_test.route_bm25"), str(stats["bm25"]))
+                        _stat_row(t("recall_test.route_vector"), str(stats["vector"]))
+                        _stat_row(t("recall_test.fused"), str(stats["fused"]))
                         _stat_row(
-                            t("recall_test.file_filter"), str(len(file_ids))
+                            t("recall_test.elapsed"), f"{stats['elapsed_ms']} ms"
                         )
 
-                    tokens = stats.get("tokens") or []
-                    if tokens:
-                        ui.label(t("recall_test.tokens")).classes(
-                            "text-xs theme-text-muted mt-1"
-                        )
-                        with ui.row().classes("w-full gap-1 flex-wrap"):
-                            for token in tokens:
-                                ui.badge(token).props("dense outline").classes(
-                                    "text-xs"
-                                )
+                        file_ids = stats.get("file_ids_filter")
+                        if file_ids:
+                            _stat_row(t("recall_test.file_filter"), str(len(file_ids)))
+
+                        tokens = stats.get("tokens") or []
+                        if tokens:
+                            ui.label(t("recall_test.tokens")).classes("text-xs theme-text-muted mt-1")
+                            with ui.row().classes("w-full gap-1 flex-wrap"):
+                                for token in tokens:
+                                    ui.badge(token).props("dense outline").classes("text-xs")
 
             ui_refs["recall_stats"] = recall_stats
             recall_stats()
@@ -254,10 +272,23 @@ def render_recall_test_right(recall_state: dict, ui_refs: dict):
             ui_refs["recall_count"] = recall_count
             recall_count()
 
-        # 结果区
-        with ui.scroll_area().classes("flex-1 min-w-0"):
+        @ui.refreshable
+        def condition_status():
+            if is_stale(recall_state):
+                _stale_banner(recall_state, ui_refs)
+
+        ui_refs["recall_condition_status"] = condition_status
+        condition_status()
+
+        # 独立保存位置；输入变化只重画提示，不打断阅读。
+        position = recall_state.get("results_scroll", 0)
+        area = ui.scroll_area(on_scroll=lambda e: recall_state.update(results_scroll=e.vertical_position)).classes(
+            "flex-1 min-w-0")
+        ui_refs["recall_results_scroll"] = area
+        with area:
             @ui.refreshable
             def recall_results():
+                ui_refs["recall_result_elements"] = {}
                 error = recall_state.get("error")
                 results = recall_state.get("results") or []
 
@@ -277,16 +308,19 @@ def render_recall_test_right(recall_state: dict, ui_refs: dict):
                     )
                 else:
                     with ui.column().classes("w-full gap-1 px-4 py-3"):
-                        if is_stale(recall_state):
-                            _stale_banner(recall_state)
                         ui.label(
                             t("recall_test.top_hint", limit=_GET_DOCS_LIMIT)
                         ).classes("text-xs theme-text-muted pb-1")
                         for index, item in enumerate(results, start=1):
-                            _render_result(index, item, ui_refs)
+                            _render_result(index, item, ui_refs, recall_state)
 
             ui_refs["recall_results"] = recall_results
             recall_results()
+        ui.timer(0.05, lambda: area.scroll_to(pixels=position), once=True)
+        if recall_state.pop("restore_focus", False):
+            selected = json.dumps(str(recall_state.get("selected_result", "")))
+            ui.timer(0.1, lambda: ui.run_javascript(
+                f'''document.querySelector('[data-recall-result=' + CSS.escape({selected}) + '] .q-item')?.focus({{preventScroll:true}})'''), once=True)
 
 
 def _stat_row(label: str, value: str):
@@ -306,7 +340,7 @@ def _placeholder(icon: str, title: str, hint: str):
         ui.label(hint).classes("text-xs theme-text-muted text-center")
 
 
-def _stale_banner(recall_state: dict):
+def _stale_banner(recall_state: dict, ui_refs: dict | None = None):
     """旧结果与当前输入不一致时的提示：明确结果来自哪次条件。"""
     last = (recall_state.get("last_run") or {}).get("conditions") or {}
     query = last.get("query", "")
@@ -319,9 +353,12 @@ def _stale_banner(recall_state: dict):
             ui.label(query).classes(
                 "text-xs theme-text-muted truncate max-w-[12rem]"
             ).tooltip(f'{t("recall_test.last_run")}: {query}')
+        if ui_refs is not None:
+            ui.button(t("recall_test.run_again"), on_click=lambda: _run_search(recall_state, ui_refs)).props(
+                "flat dense no-caps").set_enabled(not recall_state.get("is_running"))
 
 
-def _render_result(index: int, item: dict, ui_refs: dict = None):
+def _render_result(index: int, item: dict, ui_refs: dict = None, state: dict | None = None):
     """
     渲染一条召回结果
 
@@ -331,10 +368,27 @@ def _render_result(index: int, item: dict, ui_refs: dict = None):
         ui_refs: UI 组件引用字典（提供「在资料库中定位」回调）
     """
     doc = item.get("doc") or {}
+    state = state if state is not None else {}
+    key = str(item.get("chunk_id") or doc.get("chunk_id") or index)
+    expanded = state.setdefault("expanded_results", {})
+    raw_views = state.setdefault("raw_results", {})
 
-    with ui.expansion().props("dense dense-toggle expand-separator").classes(
-        "w-full rounded-md theme-card"
+    def remember_expansion(event):
+        expanded[key] = bool(event.value)
+        if event.value:
+            state["selected_result"] = key
+            if ui_refs is not None:
+                for item_key, element in ui_refs.get("recall_result_elements", {}).items():
+                    if not element.is_deleted:
+                        element.classes(add="recall-result-selected" if item_key == key else "",
+                                        remove="recall-result-selected" if item_key != key else "")
+
+    with ui.expansion(value=expanded.get(key, False), on_value_change=remember_expansion).props(
+        f'dense dense-toggle expand-separator data-recall-result="{key}"').classes(
+        "w-full rounded-md theme-card recall-result" + (" recall-result-selected" if state.get("selected_result") == key else "")
     ) as expansion:
+        if ui_refs is not None:
+            ui_refs.setdefault("recall_result_elements", {})[key] = expansion
         with expansion.add_slot("header"):
             with ui.row().classes("w-full items-center gap-2 min-w-0"):
                 # 前 3 条高亮：AI 单次 get-docs 最多翻开这么多张
@@ -382,14 +436,14 @@ def _render_result(index: int, item: dict, ui_refs: dict = None):
                 if doc.get("file_id") and ui_refs is not None:
                     ui.button(
                         icon="my_location",
-                        on_click=_locate_handler(ui_refs, item),
+                        on_click=_locate_handler(ui_refs, item, state),
                     ).props(
                         f'flat dense round size=xs aria-label="{t("recall_test.locate")}"'
                     ).classes("theme-text-muted shrink-0").tooltip(
                         t("recall_test.locate")
                     )
                 toggle_button = ui.button(icon="code").props(
-                    "flat dense round size=xs"
+                    f'flat dense round size=xs aria-label="{t("recall_test.toggle_view")}"'
                 ).classes("theme-text-muted shrink-0").tooltip(
                     t("recall_test.toggle_view")
                 )
@@ -405,12 +459,15 @@ def _render_result(index: int, item: dict, ui_refs: dict = None):
             raw = ui.label(chunk_text).classes(
                 "text-xs theme-text whitespace-pre-wrap"
             ).style("word-break: break-word")
-            raw.set_visibility(False)
+            raw.set_visibility(bool(raw_views.get(key)))
+            rendered.set_visibility(not raw_views.get(key))
 
-            view = {"raw": False}
+            view = {"raw": bool(raw_views.get(key))}
+            toggle_button.props(f"icon={'article' if view['raw'] else 'code'}")
 
             def toggle_view():
                 view["raw"] = not view["raw"]
+                raw_views[key] = view["raw"]
                 rendered.set_visibility(not view["raw"])
                 raw.set_visibility(view["raw"])
                 toggle_button.props(f"icon={'article' if view['raw'] else 'code'}")
@@ -433,7 +490,11 @@ async def _run_search(recall_state: dict, ui_refs: dict):
         return
 
     recall_state["is_running"] = True
+    recall_state["running_query"] = query
+    recall_state["started_at"] = time.perf_counter()
+    recall_state["stage"] = "recall_test.stage_search"
     _refresh(ui_refs, "recall_run_button")
+    _update_running(recall_state, ui_refs)
 
     conditions = _run_conditions(recall_state)
     try:
@@ -448,6 +509,8 @@ async def _run_search(recall_state: dict, ui_refs: dict):
             include_descendants=conditions["include_descendants"],
         )
         candidates = result.get("candidates", [])
+        recall_state["stage"] = "recall_test.stage_read"
+        _update_running(recall_state, ui_refs)
         # MCP 工具层限制每次 3 张；面板按精确 ID 批量预取全部 top-k。
         docs = (
             await run_sync(get_docs, chunk_ids=[item["chunk_id"] for item in candidates]) if candidates else {}
@@ -482,6 +545,7 @@ async def _run_search(recall_state: dict, ui_refs: dict):
             "elapsed_ms": elapsed_ms,
         }
         recall_state["error"] = None
+        recall_state.update(expanded_results={}, raw_results={}, selected_result=None, results_scroll=0)
 
     except Exception as e:
         message = str(e)
@@ -495,6 +559,7 @@ async def _run_search(recall_state: dict, ui_refs: dict):
 
     finally:
         recall_state["is_running"] = False
+        _update_running(recall_state, ui_refs)
         recall_state["has_run"] = True
         # 记录本次运行的条件快照：输入改动后据此把旧结果标注为「非当前条件」
         recall_state["last_run"] = {
@@ -508,12 +573,25 @@ async def _run_search(recall_state: dict, ui_refs: dict):
             "recall_stats",
             "recall_count",
             "recall_results",
+            "recall_condition_status",
         )
+        area = ui_refs.get("recall_results_scroll")
+        if area is not None and not area.is_deleted:
+            area.scroll_to(pixels=0)
+
+
+def _update_running(state: dict, refs: dict) -> None:
+    label = refs.get("recall_running_label")
+    if label is not None and not label.is_deleted:
+        label.set_text(_run_status_text(state))
+    callback = refs.get("refresh_upload_activity")
+    if callback:
+        callback()
 
 
 def _refresh(ui_refs: dict, *keys: str):
     """刷新指定的可刷新组件（未渲染时跳过）"""
     for key in keys:
         component = ui_refs.get(key)
-        if component:
+        if component and any(not target.container.is_deleted for target in getattr(component, "targets", [])):
             component.refresh()

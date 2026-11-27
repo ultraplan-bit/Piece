@@ -18,6 +18,7 @@
 """
 
 import re
+from collections import Counter
 
 from nicegui import context, ui
 
@@ -29,6 +30,7 @@ from app.logging_config import clear_log_buffer, count_log_buffer, get_log_buffe
 _AUTO_REFRESH_SECONDS = 5.0
 # 单次渲染上限
 _DISPLAY_LIMIT = 300
+_BUFFER_LIMIT = 500
 # 判定「已贴底」的像素容差：在此范围内继续跟随最新日志
 _TAIL_TOLERANCE_PX = 24
 # 行内摘要长度上限；完整内容进详情对话框
@@ -109,6 +111,19 @@ def format_copy_text(logs: list, reveal: bool = False) -> str:
     return "\n".join(lines)
 
 
+def filter_logs(logs: list, query: str = "", module: str = "") -> list:
+    """只检索可见的脱敏文本，避免借搜索猜出隐藏凭据。"""
+    query, module = query.strip().casefold(), module.strip().casefold()
+    return [log for log in logs if module in str(log.get("module", "")).casefold()
+            and query in display_message(str(log.get("message", ""))).casefold()]
+
+
+def new_log_count(previous: list, current: list) -> int:
+    def signatures(rows):
+        return Counter(tuple(str(row.get(key, "")) for key in ("timestamp", "level", "module", "message")) for row in rows)
+    return sum((signatures(current) - signatures(previous)).values())
+
+
 def render_logs_middle(ui_refs: dict):
     """兼容空实现：日志已合并为单栏（``render_logs_right``），页面可不再渲染中栏。"""
     return None
@@ -144,6 +159,12 @@ def render_logs_right(ui_refs: dict):
                 value=log_filter.get("level") or "ALL",
                 on_change=lambda e: _on_level_change(e.value, ui_refs),
             ).props("dense outlined options-dense").classes("w-28 shrink-0 text-xs")
+            ui.input(value=ui_refs.get("log_query", ""), placeholder=t("logs.search"),
+                     on_change=lambda e: _on_text_filter("log_query", e.value, ui_refs)).props(
+                f'dense outlined clearable aria-label="{t("logs.search")}"').classes("w-48 workspace-search")
+            ui.input(value=ui_refs.get("log_module", ""), placeholder=t("logs.module_filter"),
+                     on_change=lambda e: _on_text_filter("log_module", e.value, ui_refs)).props(
+                f'dense outlined clearable aria-label="{t("logs.module_filter")}"').classes("w-36 workspace-search")
 
             ui.switch(
                 t("logs.auto_refresh"),
@@ -179,13 +200,20 @@ def render_logs_right(ui_refs: dict):
                 ).props(f'flat dense round color=negative aria-label="{t("logs.clear")}"'
                         ).tooltip(t("logs.clear"))
 
+        @ui.refreshable
+        def new_logs_notice():
+            count = ui_refs.get("logs_unread", 0)
+            if count:
+                ui.button(t("logs.new_entries", count=count), icon="arrow_downward",
+                          on_click=lambda: _jump_latest(ui_refs)).props("flat dense no-caps").classes("self-center")
+
+        ui_refs["logs_new_notice"] = new_logs_notice
+        new_logs_notice()
+        ui.label(t("logs.buffer_hint", count=_BUFFER_LIMIT)).classes("text-xs theme-text-muted px-4 py-1")
+
         # 内容区：全宽、等宽字体、可滚动
         logs_scroll = ui.scroll_area(
-            on_scroll=lambda e: scroll.update(
-                position=e.vertical_position,
-                size=e.vertical_size,
-                container=e.vertical_container_size,
-            )
+            on_scroll=lambda e: _remember_scroll(e, ui_refs)
         ).classes("w-full flex-1 min-w-0 scroll-flush")
         ui_refs["logs_scroll_area"] = logs_scroll
         with logs_scroll:
@@ -198,7 +226,7 @@ def render_logs_right(ui_refs: dict):
                         "w-full h-full items-center justify-center"
                     ):
                         ui.icon("description", size="xl").classes("theme-text-muted")
-                        ui.label(t("logs.empty")).classes("text-sm theme-text-muted")
+                        ui.label(t("logs.no_match" if ui_refs.get("log_query") or ui_refs.get("log_module") else "logs.empty")).classes("text-sm theme-text-muted")
                 else:
                     with ui.column().classes("w-full gap-0 py-1"):
                         for log in logs:
@@ -239,6 +267,9 @@ def _render_log_entry(log: dict):
         ui.label(summary_message(log.get("message", ""))).classes(
             "theme-text flex-1 min-w-0"
         ).style("white-space: pre-wrap; word-break: break-word")
+        ui.button(icon="content_copy", on_click=lambda: _copy_entry(log)).props(
+            f'flat dense round size=xs aria-label="{t("logs.copy_entry")}"').classes(
+                "log-row-copy theme-text-muted shrink-0").tooltip(t("logs.copy_entry"))
 
         if is_expandable(log):
             ui.button(
@@ -260,6 +291,8 @@ def _show_detail(log: dict):
         ):
             ui.label(t("logs.detail_title")).classes("text-base font-semibold theme-text")
             ui.space()
+            ui.button(icon="content_copy", on_click=lambda: _copy_entry(log)).props(
+                f'flat dense round aria-label="{t("logs.copy_entry")}"').tooltip(t("logs.copy_entry"))
             ui.button(icon="close", on_click=dialog.close).props(
                 f'flat dense round aria-label="{t("confirm_dialog.btn_cancel")}"'
             ).classes("theme-text-muted")
@@ -276,7 +309,36 @@ def _show_detail(log: dict):
 def _on_level_change(level: str, ui_refs: dict):
     """级别过滤变更"""
     ui_refs["log_filter"]["level"] = None if level == "ALL" else level
+    ui_refs["logs_unread"] = 0
+    ui_refs["log_scroll"]["position"] = None
     _refresh_logs(ui_refs)
+
+
+def _on_text_filter(key: str, value: str, refs: dict):
+    refs[key] = value or ""
+    refs["logs_unread"] = 0
+    refs["log_scroll"]["position"] = None
+    _refresh_logs(refs)
+
+
+def _remember_scroll(event, refs: dict):
+    scroll = refs["log_scroll"]
+    scroll.update(position=event.vertical_position, size=event.vertical_size, container=event.vertical_container_size)
+    if should_tail(scroll) and refs.get("logs_unread"):
+        _jump_latest(refs)
+
+
+def _jump_latest(refs: dict):
+    refs["logs_unread"] = 0
+    refs["log_scroll"]["position"] = None
+    latest = refs.get("logs_filtered", [])[-_DISPLAY_LIMIT:]
+    if latest != refs.get("logs_data"):
+        refs["logs_data"] = latest
+        content = refs.get("logs_content")
+        if content is not None:
+            content.refresh()
+    refs["logs_scroll_area"].scroll_to(percent=1.0)
+    refs["logs_new_notice"].refresh()
 
 
 def _refresh_logs(ui_refs: dict, *, restore: bool = False):
@@ -286,20 +348,33 @@ def _refresh_logs(ui_refs: dict, *, restore: bool = False):
         stats = ui_refs["stats"]
         level = log_filter.get("level")
         # 缓冲区返回最新在前，这里反转为正序（最新在底部）
-        logs = list(reversed(get_log_buffer(level=level, limit=_DISPLAY_LIMIT)))
+        source = list(reversed(get_log_buffer(level=level, limit=_BUFFER_LIMIT)))
+        filtered = filter_logs(source, ui_refs.get("log_query", ""), ui_refs.get("log_module", ""))
+        logs = filtered[-_DISPLAY_LIMIT:]
         total = count_log_buffer(level=level)
+        if not restore and not should_tail(ui_refs["log_scroll"]) and "logs_filtered" in ui_refs:
+            ui_refs["logs_unread"] = ui_refs.get("logs_unread", 0) + new_log_count(ui_refs["logs_filtered"], filtered)
+        elif should_tail(ui_refs["log_scroll"]):
+            ui_refs["logs_unread"] = 0
+        ui_refs["logs_filtered"] = filtered
+        # 向上阅读时冻结可见行，缓冲区滚动淘汰旧日志也不会把眼前内容挤走。
+        if not restore and not should_tail(ui_refs["log_scroll"]) and ui_refs.get("logs_data"):
+            logs = ui_refs["logs_data"]
 
-        if logs != ui_refs.get("logs_data", []) or total != stats.get("total", 0):
+        if logs != ui_refs.get("logs_data", []):
             ui_refs["logs_data"] = logs
-            stats["total"] = total
-            label = ui_refs.get("logs_stats_label")
-            if label is not None and not label.is_deleted:
-                label.set_text(str(total))
             content = ui_refs.get("logs_content")
             if content is not None:
                 content.refresh()
+        stats["total"] = total
+        label = ui_refs.get("logs_stats_label")
+        if label is not None and not label.is_deleted:
+            label.set_text(t("logs.match_count", shown=len(logs), matches=len(filtered), total=total))
 
         _scroll_logs(ui_refs, restore=restore)
+        notice = ui_refs.get("logs_new_notice")
+        if notice is not None:
+            notice.refresh()
     except Exception as e:
         ui.notify(f"{t('logs.refresh_failed')}: {e}", type="negative")
 
@@ -335,6 +410,11 @@ async def _copy_logs(ui_refs: dict):
         ui.notify(t("logs.copy_failed"), type="negative")
 
 
+async def _copy_entry(log: dict):
+    ok = await write_clipboard(format_copy_text([log]))
+    ui.notify(t("logs.copied", count=1) if ok else t("logs.copy_failed"), type="positive" if ok else "negative")
+
+
 def _confirm_clear(ui_refs: dict):
     """清空前确认：清空的是进程内共享的内存日志缓冲区，磁盘日志不动。"""
     from app.ui.components import confirm_dialog
@@ -352,6 +432,11 @@ def _clear_logs(ui_refs: dict):
     """清空进程内共享的内存日志缓冲区（磁盘日志不动），随后刷新列表。"""
     try:
         clear_log_buffer()
+        ui_refs["logs_data"] = []
+        ui_refs["logs_unread"] = 0
+        ui_refs["log_scroll"]["position"] = None
+        if content := ui_refs.get("logs_content"):
+            content.refresh()
         ui.notify(t("logs.cleared"), type="positive")
     except Exception as e:
         ui.notify(f"{t('logs.clear_failed')}: {e}", type="negative")

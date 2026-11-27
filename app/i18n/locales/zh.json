@@ -124,7 +124,9 @@
     "source_title": "Zotero 来源",
     "source_keys": "文献 {item} · 附件 {attachment}",
     "source_versions": "文献版本 {item} · 附件版本 {attachment}",
-    "sources_read_only": "Zotero 来源身份由导入维护，只读保留，不通过普通属性编辑修改。"
+    "sources_read_only": "Zotero 来源身份由导入维护，只读保留，不通过普通属性编辑修改。",
+    "show_activity": "在任务活动中查看",
+    "background_hint": "关闭此窗口后，已提交的导入任务继续运行，可从顶部任务活动查看。"
   },
   "library": {
     "view_reading": "阅读",
@@ -366,7 +368,8 @@
     "index_current": "索引已同步",
     "index_failed": "索引更新失败",
     "affected_backlinks": "受影响的反向链接",
-    "delete_local_recovery": "被替换的 Markdown 会留作本地恢复副本（.wiki-recovery-*.bak），不是彻底擦除。"
+    "delete_local_recovery": "被替换的 Markdown 会留作本地恢复副本（.wiki-recovery-*.bak），不是彻底擦除。",
+    "technical_info": "技术信息"
   },
   "sidebar": {
     "zotero": "Zotero 文献库",
@@ -718,7 +721,38 @@
     "discard_title": "离开设置？",
     "discard_message": "仍有未保存的更改。离开并放弃后，这些更改将丢失；已保存的设置不受影响。",
     "discard": "放弃更改并离开",
-    "keep_editing": "继续编辑"
+    "keep_editing": "继续编辑",
+    "search": "搜索设置…",
+    "search_count": "找到 {count} 个设置项",
+    "search_empty": "没有匹配项。可尝试“向量”“同步”或“端口”。",
+    "modified": "已修改",
+    "restore_field": "恢复此项",
+    "view_changes": "查看修改",
+    "changes_title": "本组未保存的修改",
+    "saving": "正在保存…",
+    "unsaved_count": "本组有 {count} 项未保存修改",
+    "secret_set": "已设置凭据",
+    "secret_changed": "已修改凭据",
+    "empty_value": "未设置",
+    "enabled": "开启",
+    "disabled": "关闭",
+    "test_context": "{time} · 测试对象：{target}",
+    "return_tool": "返回工具",
+    "inactive_field": "“{field}”属于当前未启用的选项；请先在下方选择对应服务或启用功能。",
+    "service_overview": "服务与凭据",
+    "service_overview_hint": "展开服务查看凭据。摘要地址跟随当前输入；运行状态来自实际服务。",
+    "active_address": "当前生效配置地址：{address}",
+    "service_unknown": "未运行或状态未知",
+    "service_ready": "正在运行",
+    "service_starting": "正在启动",
+    "service_stopping": "正在停止",
+    "service_failed": "启动失败",
+    "service_disabled": "已停用",
+    "connection_disabled_hint": "同步已关闭，连接信息会保留；可先测试连接，再启用同步。",
+    "saved_not_active": "已保存，等待应用到当前进程",
+    "keep_draft_leave": "保留草稿并离开",
+    "draft_leave_hint": "未保存的修改可以保留在当前会话，回来后继续编辑。关闭应用前仍需保存。",
+    "return_to": "返回{view}"
   },
   "settings_appearance": {
     "title": "基础设置",
@@ -917,7 +951,13 @@
     "last_result": "上次结果",
     "result_counts": "上传 {uploaded} · 下载 {downloaded} · 跳过 {skipped} · 错误 {errors}",
     "strategy": "同步策略",
-    "clear_logs": "清空同步日志"
+    "clear_logs": "清空同步日志",
+    "failed_items": "本次同步有 {count} 项失败",
+    "copy_failures": "复制失败详情",
+    "failure_next_step": "检查连接与失败原因后，可重新执行同步。",
+    "newest_first": "最新日志在顶部",
+    "errors_only": "只看错误",
+    "no_errors": "当前没有错误日志"
   },
   "mcp_config": {
     "service_zotero": "Zotero 协作",
@@ -960,7 +1000,15 @@
     "listener_stopping": "正在停止",
     "listener_unavailable": "MCP 入口未加载",
     "settings_restart_hint": "配置来自当前有效设置；端口应用期间仍显示原配置。变更生效后请重新打开本页并复制客户端配置。服务状态不代表客户端已连接。",
-    "notice": "本页只生成配置并显示本机服务端点，不检测客户端连接。复制成功、服务状态、客户端连接是三件不同的事。"
+    "notice": "本页只生成配置并显示本机服务端点，不检测客户端连接。复制成功、服务状态、客户端连接是三件不同的事。",
+    "pin": "置顶客户端",
+    "unpin": "取消置顶",
+    "step_client": "选择客户端",
+    "step_services": "选择服务",
+    "step_copy": "复制配置",
+    "step_connect": "在客户端连接",
+    "after_copy": "配置已复制。请按上方说明粘贴到客户端，并在客户端检查连接结果。",
+    "connection_note": "这里显示 Piece 服务状态；客户端的连接结果请在客户端中查看。"
   },
   "skills": {
     "title": "Skill 导出",
@@ -995,7 +1043,10 @@
     "overwrite_confirm_message": "目标目录「{dir}」已存在「{names}」的 SKILL.md，覆盖后将替换原有内容。是否继续？",
     "preview_heading": "内容预览",
     "prefix_expand": "命令行前缀（高级）",
-    "export_note": "下一步：在目标客户端中启用或重新加载该 Skill。"
+    "export_note": "下一步：在目标客户端中启用或重新加载该 Skill。",
+    "choose_directory": "选择文件夹",
+    "open_directory": "打开导出文件夹",
+    "directory_failed": "无法打开文件夹，请检查目录是否仍然存在"
   },
   "logs": {
     "title": "日志",
@@ -1019,7 +1070,14 @@
     "clear_message": "将清空进程内共享的内存日志缓冲区（所有会话和视图都可见），磁盘日志文件（data/logs）不受影响。",
     "view_exception": "查看详情",
     "detail_title": "日志详情",
-    "masked_hint": "已脱敏敏感内容"
+    "masked_hint": "已脱敏敏感内容",
+    "search": "搜索日志内容",
+    "module_filter": "筛选模块",
+    "new_entries": "新增 {count} 条 · 查看最新",
+    "buffer_hint": "最新日志在底部；筛选最近 {count} 条缓冲日志",
+    "no_match": "没有符合筛选条件的日志",
+    "match_count": "显示 {shown} 条 / 匹配 {matches} 条 / 共 {total} 条",
+    "copy_entry": "复制此条日志"
   },
   "recall_test": {
     "title": "召回测试",
@@ -1053,7 +1111,12 @@
     "last_run_at": "运行于 {time}",
     "stale": "查询条件已修改，以下为上次运行的结果",
     "locate": "在资料库中定位",
-    "locate_unavailable": "当前无法定位到资料库"
+    "locate_unavailable": "当前无法定位到资料库",
+    "run_again": "重新测试",
+    "run_shortcut": "Ctrl / ⌘ + Enter 运行",
+    "running_status": "{stage} · 已用 {seconds} 秒",
+    "stage_search": "正在检索",
+    "stage_read": "正在读取命中内容"
   },
   "wiki": {
     "page_info": "页面信息",
@@ -1133,6 +1196,49 @@
     "import_target": "目标空间：{name}",
     "import_done": "导入完成：{entities} 个实体、{relations} 条关系和 {evidence} 条证据。",
     "overview_count": "已展示 {nodes}/{total_nodes} 个实体 · {edges}/{total_edges} 条符合筛选的关系",
-    "overview_truncated": "全库较大：当前优先展示关联较多的实体；可筛选或点选实体进入局部图。"
+    "overview_truncated": "部分内容尚未展示，可继续加载或缩小范围。",
+    "inspector": "详情与证据",
+    "exploration_back": "返回上次探索",
+    "hierarchy": "关系层级",
+    "filters": "筛选",
+    "relation_filters": "画布中的关系",
+    "relation_status": "关系状态",
+    "isolated_only": "只看孤立节点",
+    "clear_filters": "清除筛选",
+    "layout_2d": "二维关系布局",
+    "layout_3d": "三维概览（展示）",
+    "hierarchy_relation": "层级关系类型",
+    "hierarchy_direction": "箭头指向整体、上位概念或被依赖项。同层节点可换行排列；保留多父与循环。",
+    "exploration_help": "单击节点或关系查看详情。以此为中心与展开邻居是独立操作。拖动画布平移，滚轮缩放；拖过的节点位置会保留。Esc 关闭详情，Alt + ← 返回探索。圆点表示概念，方点表示实体；大小表示当前显示范围的连接数量，不表示可信度。",
+    "load_more_nodes": "继续加载节点",
+    "load_more_edges": "继续加载关系",
+    "load_more_neighbors": "继续展开邻居",
+    "isolated_count": "当前筛选中有 {count} 个孤立节点",
+    "group_count": "按结构分为 {count} 组；可点选展开",
+    "structure_group": "结构分组",
+    "isolated_nodes": "孤立节点",
+    "group": "结构分组",
+    "cycle_detected": "包含有向环；虚线保留循环关系",
+    "hierarchy_requires_single_relation": "层级视图请选择一种分类、组成或依赖关系",
+    "structure_group_hint": "按连接结构整理的临时分组，不代表知识分类。展开或收起不会修改节点与关系。",
+    "group_members": "包含 {count} 个节点",
+    "expand_group": "展开此分组",
+    "collapse_group": "收起此分组",
+    "internal_relations": "组内关系 · {count}",
+    "aggregated_relations": "汇总关系 · {count}",
+    "expand_all_neighbors": "展开一跳邻居",
+    "neighbor_counts_partial": "数量仅涵盖已读取关系；可继续加载邻居。",
+    "collapse_neighbors": "收回此处展开",
+    "center": "以此为中心",
+    "refresh": "刷新数据",
+    "reset_view": "适配画布",
+    "technical_info": "技术信息",
+    "hierarchy_excluded": "另有 {count} 个节点未参与此类关系，可在总览中查看。",
+    "canvas_capacity": "已达到当前画布容量，请缩小筛选范围或以目标节点为中心继续探索。",
+    "loading_graph": "正在加载图谱",
+    "hierarchy_loaded": "已载入 {nodes}/{total_nodes} 个实体 · {edges}/{total_edges} 条关系",
+    "hierarchy_visible": "当前层级显示 {count} 个实体 · 同层换行不代表上下级",
+    "hierarchy_empty": "当前已加载范围内没有此类关系，请切换关系类型或返回总览。",
+    "hierarchy_pan_hint": "节点较多，已保留可读字号。拖动画布或缩放可查看其余节点。"
   }
 }

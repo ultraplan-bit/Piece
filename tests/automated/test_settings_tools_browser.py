@@ -34,7 +34,11 @@ def app_page(gui_service):
 
 
 def _setting(page, label):
-    page.locator(".settings-nav-item").filter(has_text=label).click()
+    button = page.locator(".settings-nav-item").filter(has_text=label)
+    group = button.get_attribute("data-settings-category")
+    button.click()
+    playwright.expect(page.locator(".settings-nav-active")).to_contain_text(label)
+    playwright.expect(page.locator(".settings-workspace")).to_have_attribute("data-settings-group", group)
 
 
 def _tool(page, view):
@@ -68,6 +72,10 @@ def test_settings_drafts_group_save_restart_and_keyboard(app_page):
 
     # 另一页保存只提交它自己的字段，既不校验也不保存嵌入页的半成品。
     _setting(page, t("settings.mcp"))
+    expect(page.locator(".settings-service")).to_have_count(4)
+    service_details = page.locator('[data-settings-expansion="mcp-index"]')
+    service_details.locator(".q-item").first.click()
+    expect(service_details.get_by_role("textbox", name=t("settings_mcp.index_api_key"), exact=True)).to_be_visible()
     page.get_by_role("switch", name=t("settings_mcp.include_images"), exact=True).click()
     page.keyboard.press("Control+s")
     expect(page.locator(".settings-save-bar").get_by_text(t("settings.saved_group"), exact=True)).to_be_visible()
@@ -103,6 +111,7 @@ def test_settings_drafts_group_save_restart_and_keyboard(app_page):
     dialog.get_by_role("button", name=t("settings.save_group"), exact=True).click()
     expect(page.locator(".settings-effect-note")).to_contain_text(t("settings.effect_mcp"))
     expect(page.locator("[data-settings-save]")).to_be_disabled()
+    expect(dialog).not_to_be_visible()
     page.screenshot(path=str(service["path"] / "settings-dark-mcp.png"))
 
     _tool(page, "logs")
@@ -231,3 +240,104 @@ def test_english_settings_are_saved_and_render_after_refresh(app_page):
     expect(page.get_by_role("textbox", name="API Base URL", exact=True)).to_be_visible()
     assert not re.search(r"\bsettings[._]\w+", page.locator(".settings-workspace").inner_text())
     page.screenshot(path=str(service["path"] / "settings-english-embedding.png"))
+    search = page.get_by_role("textbox", name="Search settings…", exact=True)
+    search.fill("向量")
+    expect(page.locator(".settings-search-result").first).to_be_visible()
+    search.fill("embedding_concurrency")
+    search.press("Enter")
+    expect(page.locator('[data-setting-key="embedding_concurrency"] input')).to_be_focused()
+    page.screenshot(path=str(service["path"] / "settings-english-search.png"))
+
+
+def test_settings_search_restore_and_expansion_memory(app_page):
+    page, service = app_page
+    expect = playwright.expect
+    original = _saved(service)
+    page.keyboard.press("Control+,")
+    search = page.get_by_role("textbox", name=t("settings.search"), exact=True)
+    search.fill("embedding_concurrency")
+    expect(page.locator(".settings-search-result")).to_have_count(1)
+    search.press("Enter")
+    concurrency = page.locator('[data-setting-key="embedding_concurrency"] input')
+    expect(concurrency).to_be_focused()
+    expect(page.locator('[data-settings-expansion="embedding-performance"] .q-expansion-item__content')).to_be_visible()
+    baseline = original["performance"]["embedding_concurrency"]
+    concurrency.fill(str(2 if baseline != 2 else 3))
+    expect(page.locator('[data-setting-key="embedding_concurrency"]')).to_contain_text(t("settings.modified"))
+    page.get_by_role("button", name=t("settings.view_changes"), exact=True).click()
+    dialog = page.get_by_role("dialog")
+    expect(dialog).to_contain_text(t("settings_performance.concurrency"))
+    dialog.get_by_role("button", name=t("settings.restore_field"), exact=True).click()
+    expect(concurrency).to_have_value(str(baseline))
+    expect(concurrency).to_be_focused()
+    expect(page.locator("[data-settings-save]")).to_be_disabled()
+
+    # 分类切换保留高级区展开和当前滚动位置。
+    search.fill("")
+    _setting(page, t("settings_office.title"))
+    converter = page.get_by_role("combobox", name=t("settings_office.converter"), exact=True)
+    expect(converter).to_be_visible()
+    converter.click()
+    page.get_by_role("option", name=t("settings_office.converter_off"), exact=True).click()
+    expect(page.locator('[data-setting-key="office_libreoffice_path"]')).not_to_be_visible()
+    page.locator('[data-setting-key="office_converter"]').get_by_role(
+        "button", name=t("settings.restore_field"), exact=True).click()
+    _setting(page, t("settings.embedding"))
+    expect(concurrency).to_be_visible()
+    expect(page.locator('[data-settings-expansion="embedding-performance"] .q-expansion-item__content')).to_be_visible()
+
+    # 错误藏在折叠区内时，保存会展开并把焦点交给错误字段。
+    concurrency.fill("1.5")
+    page.locator('[data-settings-expansion="embedding-performance"] .q-item').first.click()
+    page.locator("[data-settings-save]").click()
+    expect(concurrency).to_be_focused()
+    expect(page.get_by_text(t("settings.integer_range", minimum=1, maximum=32), exact=True)).to_be_visible()
+    page.locator('[data-setting-key="embedding_concurrency"]').get_by_role(
+        "button", name=t("settings.restore_field"), exact=True).click()
+    expect(concurrency).to_have_value(str(baseline))
+
+    # 定位服务凭据会展开对应服务，差异清单始终隐藏凭据值。
+    search.fill("mcp_index_api_key")
+    search.press("Enter")
+    details = page.locator('[data-settings-expansion="mcp-index"]')
+    key = details.get_by_role("textbox", name=t("settings_mcp.index_api_key"), exact=True)
+    expect(key).to_be_visible()
+    before = key.input_value()
+    details.get_by_role("button", name=t("settings_mcp.regenerate_key"), exact=True).click()
+    expect(key).not_to_have_value(before)
+    after = key.input_value()
+    page.get_by_role("button", name=t("settings.view_changes"), exact=True).click()
+    expect(dialog).to_contain_text(t("settings_mcp.index_api_key"))
+    assert before not in dialog.inner_text() and after not in dialog.inner_text()
+    dialog.get_by_role("button", name=t("settings.restore_field"), exact=True).click()
+    expect(key).to_have_value(before)
+    page.screenshot(path=str(service["path"] / "settings-search-service.png"))
+
+
+def test_settings_session_drafts_and_return_to_tool(app_page):
+    page, service = app_page
+    expect = playwright.expect
+    original = _saved(service)
+    _tool(page, "mcp_config")
+    page.get_by_role("button", name="Cursor", exact=True).click()
+    expect(page.locator(".mcp-config-code")).to_be_visible()
+    page.get_by_role("button", name=t("mcp_config.open_settings"), exact=True).click()
+    expect(page.locator('[data-settings-return]')).to_be_visible()
+    page.locator('[data-settings-return]').click()
+    expect(page.locator(".mcp-config-code")).to_be_visible()
+
+    page.keyboard.press("Control+,")
+    _setting(page, t("settings.embedding"))
+    address = page.get_by_role("textbox", name=t("settings_embedding.base_url"), exact=True)
+    address.fill("unsaved-session-address")
+    page.locator(".workspace-primary").get_by_role("button", name=t("sidebar.files"), exact=True).click()
+    page.get_by_role("dialog").locator('[data-settings-keep-draft]').click()
+    expect(page.locator(".settings-workspace")).to_have_count(0)
+    assert _saved(service)["embedding"] == original["embedding"]
+    page.keyboard.press("Control+,")
+    _setting(page, t("settings.embedding"))
+    expect(address).to_have_value("unsaved-session-address")
+    page.locator('[data-setting-key="base_url"]').get_by_role("button", name=t("settings.restore_field"), exact=True).click()
+    expect(address).to_have_value(original["embedding"]["base_url"])
+    expect(page.locator("[data-settings-save]")).to_be_disabled()
+    page.screenshot(path=str(service["path"] / "settings-resumed-draft.png"))

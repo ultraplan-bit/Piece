@@ -171,21 +171,22 @@ def _find_elements(element, type_name):
     return found
 
 
-def test_ocr_provider_toggle_keeps_label_case():
+def test_ocr_provider_toggle_keeps_label_case(knowledge_base):
     """Quasar 按钮默认 text-transform: uppercase（PaddleOCR 会显示成 PADDLEOCR）。
 
     解析后端选项是产品名，必须保持原样，故带上 no-caps。
     """
     from nicegui import ui
+    from app.ui.handlers.settings_handlers import SettingsHandlers
     from app.ui.views import settings_view
 
-    handlers = SimpleNamespace(
-        test_ocr_connection=lambda *args: None,
-        save_settings_form=lambda *args: None,
-        test_message="", test_failed=False, testing=False,
-    )
+    form = {}
+    handlers = SettingsHandlers(form)
+    handlers.init_settings_form()
+    handlers.active_group = "ocr"
+    form["ocr_provider"] = "mineru"
     with ui.column() as container:
-        settings_view._render_ocr_settings({"ocr_provider": "mineru"}, handlers)
+        settings_view._render_ocr_settings(form, handlers)
 
     toggles = _find_elements(container, "Toggle")
     assert len(toggles) == 1, "解析后端应是一个三选一开关"

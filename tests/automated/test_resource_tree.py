@@ -149,9 +149,9 @@ def test_navigation_and_mode_controls_keep_identity_during_updates(knowledge_bas
         title = next(element for element in header_element.descendants()
                      if isinstance(element, ui.label) and "app-view-title" in element.classes)
         assert title.text == t(f"sidebar.{destination}")
-        search = next(element for element in header_element.descendants()
-                      if isinstance(element, ui.button) and element._props.get("icon") == "search")
-        assert search.visible == (destination != "settings")
+        settings = next(element for element in header_element.descendants()
+                        if isinstance(element, ui.button) and "data-open-settings" in element._props)
+        assert settings.visible
     container.delete()
 
 

@@ -17,7 +17,9 @@ def k(name):
 
 
 def gk(name):
-    return t("graph." + name)
+    key = "graph." + name
+    value = t(key)
+    return k(name) if value == key else value
 
 
 @pytest.fixture
@@ -66,7 +68,7 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             page.goto(service["url"])
             expect(page.locator(".resource-collection-row").first).to_be_visible(timeout=30000)
             page.get_by_role("button", name=t("sidebar.graph"), exact=True).click()
-            expect(page.get_by_text(k("empty"), exact=True)).to_be_visible()
+            expect(page.locator(".graph-stage").get_by_text(gk("empty"), exact=True)).to_be_visible()
 
             # GUI 新建图节点：没有 Wiki 正文，只有种类、标题与摘要。
             page.locator(".knowledge-catalog").get_by_role("button", name=gk("create"), exact=True).click()
@@ -84,7 +86,7 @@ def test_graph_browser_independent_roundtrip(graph_gui):
                                      "summary": "候选摘要"}])["refs"]["target"]["id"]
 
             # GUI 建立语义关系。
-            expect(page.get_by_role("button", name="目标图节点", exact=True)).to_be_visible(timeout=15000)
+            expect(page.locator(".knowledge-catalog").get_by_role("button", name="目标图节点", exact=True)).to_be_visible(timeout=15000)
             page.get_by_role("button", name=k("create_relation"), exact=True).click()
             dialog.get_by_label(k("target_search"), exact=True).fill("目标图节点")
             dialog.get_by_role("button", name=k("search"), exact=True).click()
@@ -110,7 +112,8 @@ def test_graph_browser_independent_roundtrip(graph_gui):
 
             # 局部图：节点、关系表与画布点击。
             page.get_by_role("button", name="图谱中心", exact=True).first.click()
-            page.get_by_role("button", name=k("view_graph"), exact=True).click()
+            page.locator(".graph-inspector").get_by_role("button", name=gk("center"), exact=True).click()
+            expect(page.get_by_role("button", name=gk("local_graph"), exact=True)).to_have_attribute("aria-pressed", "true")
             expect(page.locator(".nicegui-echart canvas")).to_be_visible(timeout=30000)
             middle = page.locator(".workspace-splitter").last.locator(":scope > .q-splitter__before")
             expect(middle).to_have_css("width", "260px")
@@ -124,15 +127,18 @@ def test_graph_browser_independent_roundtrip(graph_gui):
 
             expect(middle.get_by_role("button", name="目标图节点", exact=True)).to_be_visible()
             # 筛选控件要有可用宽度：多选框空值时没有值撑宽，只给 max-width 会被挤成窄缝。
-            widths = page.evaluate("""() => [...document.querySelectorAll('.graph-toolbar .q-select')]
+            page.locator(".graph-toolbar").get_by_role("button", name=gk("filters"), exact=True).click()
+            expect(page.locator(".graph-filter-menu")).to_be_visible()
+            widths = page.evaluate("""() => [...document.querySelectorAll('.graph-filter-menu .q-select')]
                 .map(s => s.offsetWidth)""")
             assert widths and min(widths) >= 100, widths
+            page.keyboard.press("Escape")
             # 关系表格默认收进底部抽屉，展开后才渲染关系行。
             table_title = page.get_by_text(k("table"), exact=True)
             expect(table_title).to_be_visible()
-            expect(page.get_by_role("button", name=k("related_to"), exact=True)).to_have_count(0)
+            expect(page.locator(".graph-drawer").get_by_role("button", name=k("related_to"), exact=True)).not_to_be_visible()
             table_title.click()
-            expect(page.get_by_role("button", name=k("related_to"), exact=True)).to_be_visible()
+            expect(page.locator(".graph-drawer").get_by_role("button", name=k("related_to"), exact=True)).to_be_visible()
             state = chart_state(page, "graph")
             assert state[0]["type"] == "graph"
             assert {node["id"] for node in state[0]["data"]} == {root, target}
@@ -141,7 +147,14 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             page.wait_for_function("""() => {
                 const el = document.querySelector('.nicegui-echart');
                 const data = getElement(el.id.slice(1)).chart.getModel().getSeriesByIndex(0).getEdgeData();
-                return data.getItemGraphicEl(0)?.getLinePath()?.shape.percent === 1;
+                const line = data.getItemGraphicEl(0);
+                const text = line?.getTextContent();
+                const transform = text?.getComputedTransform();
+                const path = line?.getLinePath();
+                if (!transform || path?.shape.percent !== 1) return false;
+                const middle = path.transformCoordToGlobal(...path.pointAt(0.5));
+                return Math.abs(Math.hypot(transform[0], transform[1])-1) < 0.000001 &&
+                    Math.hypot(transform[4]-middle[0], transform[5]-middle[1]) < 15;
             }""")
             labels = page.locator(".nicegui-echart").evaluate("""el => {
                 const data = getElement(el.id.slice(1)).chart.getModel().getSeriesByIndex(0).getEdgeData();
@@ -162,17 +175,23 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             assert labels[0]["scale"] == pytest.approx(1), labels
             assert labels[0]["middle_distance"] < 15, labels
             page.locator(".graph-stage").screenshot(path=str(service["path"] / "graph-local-labels.png"))
-            page.get_by_role("button", name=k("related_to"), exact=True).focus()
+            page.locator(".graph-drawer").get_by_role("button", name=k("related_to"), exact=True).focus()
             page.keyboard.press("Enter")
             expect(page.get_by_text(k("description") + " · 人工创建的关系", exact=True)).to_be_visible()
 
-            # 关系表选择会切到实体详情；重新打开局部图后再切换全局概览。
+            # 关系表选择留在画布，并在检查器读取真实端点名称。
+            expect(page.get_by_role("button", name=gk("graph"), exact=True)).to_have_attribute("aria-pressed", "true")
+            expect(page.locator(".graph-inspector .graph-relation-path").get_by_role("button", name="图谱中心", exact=True)).to_be_visible()
             page.get_by_role("button", name="图谱中心", exact=True).first.click()
-            page.get_by_role("button", name=k("view_graph"), exact=True).click()
-            # 全局概览使用 3D 球状布局，但不显示球体外壳。
+            expect(page.locator(".graph-inspector .graph-detail-title")).to_have_text("图谱中心")
+            # 全局默认二维，三维球面成为明确选择的辅助展示。
             page.get_by_role("button", name=gk("global_graph"), exact=True).click()
             expect(page.get_by_text(t("graph.overview_count", nodes=2, edges=1,
                                       total_nodes=2, total_edges=1), exact=True)).to_be_visible()
+            global_state = chart_state(page, "graph")
+            assert {node["id"] for node in global_state[0]["data"]} == {root, target}
+            page.locator(".graph-toolbar").get_by_role("button", name=gk("more"), exact=True).click()
+            page.get_by_text(gk("layout_3d"), exact=True).click()
             global_state = chart_state(page, "lines3D")
             assert [series["type"] for series in global_state] == ["lines3D", "scatter3D", "scatter3D"]
             global_nodes = [node for series in global_state[1:] for node in series["data"]]
@@ -187,7 +206,10 @@ def test_graph_browser_independent_roundtrip(graph_gui):
             assert globe_visible is False
             page.screenshot(path=str(service["path"] / "graph-overview.png"))
             page.get_by_role("button", name="目标图节点", exact=True).first.click()
-            expect(page.get_by_role("button", name=gk("local_graph"), exact=True)).to_be_visible()
+            expect(page.locator(".graph-inspector .graph-detail-title")).to_have_text("目标图节点")
+            assert chart_state(page, "lines3D")[0]["type"] == "lines3D"
+            page.locator(".graph-inspector").get_by_role("button", name=gk("center"), exact=True).click()
+            expect(page.get_by_role("button", name=gk("local_graph"), exact=True)).to_have_attribute("aria-pressed", "true")
             assert chart_state(page, "graph")[0]["type"] == "graph"
 
             # 实体页内展开只读结构检查（不改实体、关系、证据）。
@@ -223,7 +245,7 @@ def test_graph_right_pane_themes_and_narrow_layout(graph_gui):
 
     service = graph_gui
     expect = playwright.expect
-    output = Path(__file__).resolve().parents[2] / ".test-results" / "graph-rightbar"
+    output = service["path"] / "graph-rightbar"
     output.mkdir(parents=True, exist_ok=True)
     default = next(graph for graph in knowledge_service.list_graphs()["graphs"] if graph["is_default"])
     empty = knowledge_service.create_graph("用于检查空状态的知识空间")
@@ -262,12 +284,12 @@ def test_graph_right_pane_themes_and_narrow_layout(graph_gui):
                       if route.request.url.startswith(service["url"] + "/") else route.abort())
 
         def choose_space(name):
-            page.locator(".graph-space-picker").click()
+            page.locator(".graph-space-picker").get_by_role("combobox").click()
             page.get_by_role("option", name=name, exact=True).click()
             expect(page.locator(".graph-space-picker")).to_contain_text(name)
 
         def assert_widths():
-            overflow = page.locator(".graph-workbench").evaluate("""root => {
+            measure = """root => {
                 const boundary = root.getBoundingClientRect();
                 return [root, ...root.querySelectorAll(
                     '.workspace-toolbar, .graph-toolbar, .graph-detail, .graph-stage, .graph-canvas-tools')]
@@ -276,7 +298,14 @@ def test_graph_right_pane_themes_and_narrow_layout(graph_gui):
                         el.getBoundingClientRect().right > boundary.right + 2 ||
                         el.getBoundingClientRect().left < boundary.left - 2)
                     .map(el => ({classes: el.className, width: el.clientWidth, scroll: el.scrollWidth}));
-            }""")
+            }"""
+            try:
+                page.wait_for_function("() => (" + measure + ")(document.querySelector('.graph-workbench')).length === 0", timeout=5000)
+            except playwright.TimeoutError:
+                print("Persistent graph overflow:", page.locator(".graph-workbench").evaluate(measure))
+                print("Toolbar children:", page.locator(".graph-toolbar").evaluate("root => [...root.children].map(el => ({tag:el.tagName,text:el.textContent,classes:el.className,width:el.clientWidth,scroll:el.scrollWidth,rect:el.getBoundingClientRect().toJSON()}))"))
+                raise
+            overflow = page.locator(".graph-workbench").evaluate(measure)
             assert not overflow, overflow
 
         def capture(name, *, graph=False):
@@ -302,7 +331,7 @@ def test_graph_right_pane_themes_and_narrow_layout(graph_gui):
                 expect(page.locator(".graph-space-picker")).to_contain_text(
                     default["name"] if theme == "light" else preview["name"])
                 choose_space(empty["name"])
-                expect(page.locator(".graph-workbench").get_by_text(gk("choose_node"), exact=True)).to_be_visible()
+                expect(page.locator(".graph-stage").get_by_text(gk("empty"), exact=True)).to_be_visible()
                 page.locator(".graph-space-actions").click()
                 menu = page.locator(".q-menu").filter(has_text=gk("create_graph"))
                 for key in ("create_graph", "rename_graph", "delete_graph", "export_graph_json", "export_graphml", "import_graph"):
@@ -320,12 +349,13 @@ def test_graph_right_pane_themes_and_narrow_layout(graph_gui):
 
                 for width in (1540, 1024, 768):
                     page.set_viewport_size({"width": width, "height": 1000})
+                    page.get_by_role("button", name=gk("graph"), exact=True).click()
                     for index, title in enumerate((chinese_title, english_title)):
                         page.get_by_role("button", name=title, exact=True).first.click()
                         expect(page.locator(".graph-detail").get_by_role("heading", name=title, exact=True)).to_be_visible()
                         assert_widths()
                         capture(f"detail-{theme}-{width}-{'zh' if index == 0 else 'en'}.png")
-                    page.get_by_role("button", name=k("view_graph"), exact=True).click()
+                    page.locator(".graph-inspector").get_by_role("button", name=gk("center"), exact=True).click()
                     expect(page.locator(".nicegui-echart canvas")).to_be_visible(timeout=30000)
                     expect(page.locator(".graph-canvas-tools")).to_be_visible()
                     assert_widths()
@@ -339,7 +369,7 @@ def test_graph_right_pane_themes_and_narrow_layout(graph_gui):
                 page.locator(".knowledge-catalog").get_by_role("button", name="知识图谱", exact=True).click()
                 expect(page.locator(".graph-detail").get_by_role("heading", name="知识图谱", exact=True)).to_be_visible()
                 capture(f"preview-detail-{theme}.png")
-                page.get_by_role("button", name=k("view_graph"), exact=True).click()
+                page.locator(".graph-inspector").get_by_role("button", name=gk("center"), exact=True).click()
                 expect(page.locator(".nicegui-echart canvas")).to_be_visible(timeout=30000)
                 capture(f"preview-canvas-{theme}.png", graph=True)
             assert not errors, errors

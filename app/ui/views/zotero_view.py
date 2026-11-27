@@ -1,6 +1,7 @@
 """Zotero 文献工作区：先查阅，再选择附件；写入只执行确认过的服务端计划。"""
 
 import json
+import inspect
 from functools import partial
 from html.parser import HTMLParser
 
@@ -9,6 +10,7 @@ from nicegui import ui
 from app.i18n import t
 from app.ui.components import _open_dialog
 from app.ui.import_dialogs import _dialog_frame
+from app.ui.views.task_activity import _render_row as render_task_row
 from indexing.services import collection_service, file_service, task_service
 from indexing.services import zotero_service as zotero
 from indexing.services import zotero_write_service as writes
@@ -90,10 +92,11 @@ def render_zotero_sources(sources, on_open=None):
 
 
 class ZoteroWorkbench:
-    def __init__(self, *, open_file=None, refresh_files=None, open_settings=None):
+    def __init__(self, *, open_file=None, refresh_files=None, open_settings=None, open_activity=None):
         self.open_file = open_file
         self.refresh_files = refresh_files
         self.open_settings = open_settings
+        self.open_activity = open_activity
         self.busy = False
         self.error = ""
         self.last_error = None
@@ -675,11 +678,21 @@ class ZoteroWorkbench:
                             if self.open_file:
                                 ui.button(t("zotero.open_piece"), on_click=partial(open_result, row["file_id"]), color=None).props("flat dense no-caps")
                         for task in tasks:
-                            ui.label(f"#{task['id']} · {task['status']} · {task.get('progress', 0)}% · {task.get('error_message') or ''}").classes(
-                                "text-xs theme-text-secondary break-words")
+                            file_id = task.get("file_id")
+                            filename = next((row["filename"] for row in result["items"] if row["file_id"] == file_id), None)
+                            display_task = dict(task, original_filename=filename or task.get("original_filename"))
+                            render_task_row(display_task, {"open_task_file": open_result}, None, refresh_status)
                         for failure in result["failures"]:
                             ui.label(f"{failure.get('filename') or failure.get('attachment_key')} · {failure['reason']}").classes("text-xs theme-danger")
                         ui.button(t("zotero.refresh_status"), on_click=refresh_status, color=None).props("flat dense no-caps")
+                        if self.open_activity:
+                            async def show_activity():
+                                dialog.close()
+                                opened = self.open_activity()
+                                if inspect.isawaitable(opened):
+                                    await opened
+                            ui.button(t("zotero.show_activity"), icon="task_alt", on_click=show_activity).props("flat dense no-caps")
+                            ui.label(t("zotero.background_hint")).classes("text-xs theme-text-muted")
                     return any(task["status"] in task_service.ACTIVE_STATUSES for task in tasks)
                 finally:
                     state["polling"] = False

@@ -47,6 +47,7 @@ datas = [
     (str(PROJECT_ROOT / 'assets' / 'icon.ico'), 'assets'),
     # 国际化文件
     (str(PROJECT_ROOT / 'app' / 'i18n' / 'locales'), 'app/i18n/locales'),
+    (str(PROJECT_ROOT / 'app' / 'ui' / 'views' / 'graph_interactions.js'), 'app/ui/views'),
     # 内置 Skill（GUI 的 Skill 导出视图读取）
     (str(PROJECT_ROOT / 'skills'), 'skills'),
 ]

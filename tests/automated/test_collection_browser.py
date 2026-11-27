@@ -330,3 +330,67 @@ def test_collection_browser_roundtrip(gui_service):
             (service["path"] / "browser-errors.txt").write_text("\n".join(errors), encoding="utf-8")
             context.close()
             browser.close()
+
+
+def test_collection_row_single_click_toggles(gui_service):
+    service = gui_service
+    expect = playwright.expect
+    with playwright.sync_playwright() as automation:
+        browser = automation.chromium.launch(channel="msedge", headless=True)
+        context = browser.new_context(viewport={"width": 1280, "height": 900},
+                                      http_credentials={"username": "piece", "password": service["key"]})
+        page = context.new_page()
+        try:
+            page.goto(service["url"])
+            row = collection_row(page, service["root"])
+            child = collection_row(page, service["rag"])
+            document = document_row(page, service["file_id"], collection_id=service["rag"])
+            expect(row).to_be_visible(timeout=30000)
+            expect(row).to_have_attribute("aria-expanded", "false")
+            name = row.locator(".collection-tree-name")
+            name.click()
+            expect(row).to_have_attribute("aria-expanded", "true")
+            expect(row).to_have_attribute("data-loaded", "true")
+            expect(row).to_have_attribute("aria-selected", "true")
+            expect(child).to_be_visible()
+            name.click()
+            expect(row).to_have_attribute("aria-expanded", "false")
+            expect(child).to_have_count(0)
+            name.click()
+            expect(child).to_be_visible()
+            row.press("ArrowRight")
+            expect(child).to_be_focused()
+            expect(child).to_have_attribute("aria-selected", "true")
+            expect(child).to_have_attribute("aria-expanded", "false")
+            child.get_by_role("button", name=t("workspace.more"), exact=True).click()
+            expect(page.get_by_role("menuitem", name=t("collections.rename"), exact=True)).to_be_visible()
+            page.keyboard.press("Escape")
+            expect(child).to_have_attribute("aria-expanded", "false")
+            child.locator(".collection-tree-icon").click()
+            expect(document).to_be_visible()
+            expect(child).to_have_attribute("aria-selected", "true")
+            child.locator(".tree-expander").click()
+            expect(document).to_have_count(0)
+
+            browse_mode(page, "all")
+            browse_mode(page, "tree")
+            row.focus()
+            row.press("ArrowLeft")
+            expect(row).to_have_attribute("aria-expanded", "false")
+            expect(child).to_have_count(0)
+            row.press("ArrowRight")
+            expect(row).to_have_attribute("aria-expanded", "true")
+            expect(child).to_be_visible()
+            child.locator(".collection-tree-name").click()
+            expect(document).to_be_visible()
+            # 连续点箭头收起再点名称展开，后一次点击可能先于分支刷新完成。
+            old_row_id = child.evaluate("""row => {
+                row.querySelector('.tree-expander').click();
+                row.querySelector('.collection-tree-name').click();
+                return row.id;
+            }""")
+            expect(child).not_to_have_attribute("id", old_row_id)
+            expect(child).to_have_attribute("aria-expanded", "true")
+            expect(document).to_be_visible()
+        finally:
+            browser.close()

@@ -238,11 +238,12 @@ def test_zotero_import_uses_selected_available_attachments_once(workbench, monke
     _run(_click(button))
     assert calls == [{"attachment_keys": ["ATTAAAAA"], "collection_mode": "none", "collections": [],
                       "server_id": "SRVTEST1", "max_items": 50}]
-    assert any("processing" in label and "25%" in label for label in _labels(dialog))
+    assert any("25%" in label for label in _labels(dialog))
+    assert any(row._props.get("data-status") == "processing" for row in dialog.descendants())
     assert t("zotero.accepted_hint") in _labels(dialog)
     assert len(timers) == 1 and timers[0].interval == 2.0
     _run(timers[0].callback)
-    assert any("completed" in label for label in _labels(dialog))
+    assert t("task_activity.status_completed") in _labels(dialog)
     assert timers[0].cancelled
 
 

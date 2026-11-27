@@ -11,6 +11,52 @@
 """
 
 import sys
+import os
+import re
+from pathlib import Path
+from urllib.parse import urlsplit
+
+
+class _DirectoryApi:
+    """仅由本地工作台显式点击触发的目录操作；不接受命令或文件打开。"""
+
+    def __init__(self, url):
+        self._origin = self._url_origin(url)
+        self._window = None
+
+    @staticmethod
+    def _url_origin(url):
+        parsed = urlsplit(url or "")
+        return parsed.scheme, parsed.hostname, parsed.port
+
+    def _check_origin(self):
+        if self._window is None or self._url_origin(self._window.get_current_url()) != self._origin:
+            raise PermissionError("Directory actions are only available in the local workspace")
+        if self._origin[1] not in {"localhost", "127.0.0.1", "::1"}:
+            raise PermissionError("Directory actions require a local workspace")
+
+    def choose_directory(self, initial=""):
+        import webview
+        self._check_origin()
+        path = Path(str(initial)).expanduser() if initial else None
+        result = self._window.create_file_dialog(
+            webview.FileDialog.FOLDER, directory=str(path) if path and path.is_dir() else "")
+        return str(Path(result[0]).resolve()) if result else None
+
+    def open_directory(self, directory, exported):
+        self._check_origin()
+        path = Path(str(directory)).expanduser().resolve(strict=True)
+        if not path.is_dir() or not isinstance(exported, list) or not exported:
+            raise ValueError("No exported directory is available")
+        # 打开位置只接受本次结果里的 Skill 目录，并验证实际存在的产物。
+        for name in exported:
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+                raise ValueError("Invalid exported skill")
+            artifact = (path / name / "SKILL.md").resolve(strict=True)
+            if path not in artifact.parents or not artifact.is_file():
+                raise ValueError("Exported skill is no longer available")
+        os.startfile(str(path))
+        return True
 
 
 def run(url: str, icon: str | None = None) -> None:
@@ -20,11 +66,13 @@ def run(url: str, icon: str | None = None) -> None:
     # 默认禁止下载，导出原件/解析产物要靠它
     webview.settings["ALLOW_DOWNLOADS"] = True
 
-    webview.create_window(
+    directory_api = _DirectoryApi(url)
+    directory_api._window = webview.create_window(
         "Piece - 个人知识库",
         url,
         width=1100,
         height=700,
+        js_api=directory_api,
     )
     # private_mode 默认开启：不落 cookie、不存登录态，界面本身也不用浏览器存储
     webview.start(icon=icon)

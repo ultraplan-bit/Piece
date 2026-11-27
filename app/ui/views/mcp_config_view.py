@@ -763,6 +763,14 @@ def render_mcp_config_middle(
     """
     # 搜索状态放进 ui_refs，跨重建/跨视图保留
     search_state = ui_refs.setdefault("client_search", {"value": ""})
+    pinned = selected_client.setdefault("pinned", set())
+
+    def toggle_pin(client_id):
+        if client_id in pinned:
+            pinned.remove(client_id)
+        else:
+            pinned.add(client_id)
+        client_list.refresh()
 
     def matches(client: dict) -> bool:
         keyword = search_state["value"].strip().lower()
@@ -794,7 +802,7 @@ def render_mcp_config_middle(
         with ui.scroll_area().classes("flex-1 scroll-flush"):
             @ui.refreshable
             def client_list():
-                clients = [client for client in MCP_CLIENTS if matches(client)]
+                clients = sorted((client for client in MCP_CLIENTS if matches(client)), key=lambda client: client["id"] not in pinned)
                 with ui.column().classes("w-full gap-0.5 px-2 py-2"):
                     if not clients:
                         with ui.column().classes("w-full items-center py-6"):
@@ -807,12 +815,18 @@ def render_mcp_config_middle(
                         row_classes = "w-full px-3 py-2 rounded-md " + (
                             "theme-selected" if is_selected else "theme-hover"
                         )
-                        with ui.button(
-                            on_click=partial(on_select_client, client["id"])
-                        ).props("flat no-caps align=left no-ripple").classes(row_classes):
-                            with ui.row().classes("w-full items-center gap-2"):
-                                ui.icon(client["icon"], size="xs").classes("theme-text-muted")
-                                ui.label(client["name"]).classes("text-sm theme-text")
+                        with ui.row().classes("w-full items-center flex-nowrap gap-0"):
+                            with ui.button(
+                                on_click=partial(on_select_client, client["id"])
+                            ).props("flat no-caps align=left no-ripple").classes(row_classes + " flex-1 min-w-0") as button:
+                                button.props("aria-current=true" if is_selected else "")
+                                with ui.row().classes("w-full items-center gap-2"):
+                                    ui.icon(client["icon"], size="xs").classes("theme-text-muted")
+                                    ui.label(client["name"]).classes("text-sm theme-text")
+                            pin_text = t("mcp_config.unpin" if client["id"] in pinned else "mcp_config.pin")
+                            ui.button(icon="push_pin", on_click=partial(toggle_pin, client["id"])).props(
+                                f'flat dense round size=xs aria-label="{pin_text} {client["name"]}" aria-pressed={str(client["id"] in pinned).lower()}').classes(
+                                    "theme-text-accent" if client["id"] in pinned else "theme-text-muted").tooltip(pin_text)
 
             ui_refs["client_list"] = client_list
             client_list()
@@ -835,12 +849,13 @@ def _settings_handler(callback):
     return open_settings
 
 
-async def _copy_config_text(text: str) -> None:
+async def _copy_config_text(text: str) -> bool:
     ok = await _write_clipboard(text)
     ui.notify(
         t("mcp_config.copied") if ok else t("mcp_config.copy_failed"),
         type="positive" if ok else "negative",
     )
+    return ok
 
 
 def _entry_key(client: dict) -> str:
@@ -865,9 +880,13 @@ def _render_client_config(client: dict, selected_client: dict) -> None:
         has_services = bool(kept["value"])
         config_text = _get_config_json(client, kept["value"]) if has_services else ""
 
-        def copy_config():
+        async def copy_config():
             if has_services:
-                return _copy_config_text(config_text)
+                if await _copy_config_text(config_text):
+                    selected_client["copied_client"] = client["id"]
+                    selected_client["copied_services"] = sorted(kept["value"])
+                    if not next_step.is_deleted:
+                        next_step.set_text(t("mcp_config.after_copy"))
 
         with ui.row().classes("w-full items-center justify-between"):
             ui.label(t("mcp_config.config_heading")).classes(
@@ -885,6 +904,9 @@ def _render_client_config(client: dict, selected_client: dict) -> None:
         )
         # 内置复制入口会无条件显示成功；本页只使用上方有结果反馈的按钮。
         code.copy_button.classes("hidden").props("aria-hidden=true tabindex=-1")
+        copied = selected_client.get("copied_client") == client["id"] and selected_client.get("copied_services") == sorted(kept["value"])
+        next_step = ui.label(t("mcp_config.after_copy" if copied else "mcp_config.connection_note")).classes(
+            "text-xs theme-text-muted").props("role=status aria-live=polite")
 
     def toggle(name: str, checked: bool) -> None:
         if checked:
@@ -894,6 +916,9 @@ def _render_client_config(client: dict, selected_client: dict) -> None:
         config_block.refresh()
 
     with ui.column().classes("w-full p-5 gap-5"):
+        with ui.row().classes("tool-steps w-full items-center gap-2"):
+            for number, label in enumerate(("mcp_config.step_client", "mcp_config.step_services", "mcp_config.step_copy", "mcp_config.step_connect"), 1):
+                ui.label(f"{number} · {t(label)}").classes("text-xs theme-text-secondary")
         # 服务选择与用途：显示的端点与认证是真实服务状态，不代表客户端已连接
         with ui.column().classes("w-full gap-2"):
             ui.label(t("mcp_config.services_heading")).classes(
@@ -970,10 +995,15 @@ def render_mcp_config_right(
                     on_click=_settings_handler(on_open_settings),
                 ).props("flat dense no-caps size=sm").classes("theme-text-accent shrink-0")
 
-        with ui.scroll_area().classes("flex-1"):
+        scrolls = selected_client.setdefault("scrolls", {})
+        scroll_key = selected_client.get("value") or ""
+        position = scrolls.get(scroll_key, 0)
+        area = ui.scroll_area(on_scroll=lambda event: scrolls.update({scroll_key: event.vertical_position})).classes("flex-1")
+        with area:
             if client is None:
                 with ui.column().classes("w-full h-full items-center justify-center"):
                     ui.icon("settings_input_component", size="lg").classes("theme-text-muted")
                     ui.label(t("mcp_config.select_client")).classes("text-sm mt-2 theme-text-muted")
             else:
                 _render_client_config(client, selected_client)
+        ui.timer(0.05, lambda: area.scroll_to(pixels=position), once=True)

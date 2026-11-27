@@ -254,6 +254,7 @@ class GraphInput(ScopedInput):
     statuses: Annotated[list[Status], Field(max_length=3)] | None = None
     max_nodes: Annotated[int, Field(strict=True, ge=1, le=100)] = 100
     max_edges: Annotated[int, Field(strict=True, ge=1, le=300)] = 300
+    neighbor_offset: Offset = 0
 
 
 class GraphOverviewInput(ScopedInput):
@@ -261,6 +262,11 @@ class GraphOverviewInput(ScopedInput):
     statuses: Annotated[list[Status], Field(max_length=3)] | None = None
     max_nodes: Annotated[int, Field(strict=True, ge=1, le=400)] = 400
     max_edges: Annotated[int, Field(strict=True, ge=1, le=1000)] = 1000
+    offset: Offset = 0
+    edge_offset: Offset = 0
+    load_nodes: bool = True
+    isolated_only: bool = False
+    known_node_ids: Annotated[list[Uuid], Field(max_length=10000)] = Field(default_factory=list)
 
 
 class ReferencesInput(ScopedInput):

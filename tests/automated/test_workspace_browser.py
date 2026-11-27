@@ -171,7 +171,7 @@ def test_quick_navigation_keeps_the_last_click(knowledge_base, request):
             sidebar.get_by_role("button", name=t("sidebar.graph"), exact=True).click()
             expect(title).to_have_text(t("sidebar.graph"))
             page.get_by_role("button", name="切换测试节点", exact=True).click()
-            page.get_by_role("button", name=t("knowledge.view_graph"), exact=True).click()
+            page.locator(".graph-inspector").get_by_role("button", name=t("graph.center"), exact=True).click()
             expect(page.locator(".nicegui-echart canvas")).to_be_visible(timeout=30000)
 
             # 只暂存图谱位置回传，按指定顺序放行，真实复现异步导航乱序。

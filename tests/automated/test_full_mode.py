@@ -14,6 +14,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,12 +24,6 @@ ROOT = Path(__file__).resolve().parents[2]
 IGNORED_ENV = {"PIECE_DATA_DIR", "PIECE_API_KEY", "PIECE_INDEX_MCP_PORT",
                "PIECE_GRAPH_MCP_PORT", "PIECE_WIKI_MCP_PORT",
                "NICEGUI_STORAGE_PATH", "PYTHONPATH", "VIRTUAL_ENV"}
-
-
-def _free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _child_env():
@@ -72,23 +67,32 @@ def _cli(data_dir, port, *args, stdin=None, timeout=120):
 @pytest.fixture(scope="module")
 def full_service(tmp_path_factory):
     """完整模式服务：GUI 与 MCP 启用，MCP 端口避开默认值。"""
+    from indexing.settings import MCP_PORT_ENV
+
     data_dir = tmp_path_factory.mktemp("fullmode") / "知识库 目录"
     data_dir.mkdir()
-    port = _free_port()
-    mcp_port = _free_port()
-    assert _cli(data_dir, port, "config", "init").code == 0
-    patch = {"mcp": {"port": mcp_port}}
-    updated = _cli(data_dir, port, "config", "update", "--offline", "--input", "-",
-                   stdin=json.dumps(patch).encode("utf-8"))
-    assert updated.code == 0, updated.stderr
+    # 分别申请所有监听端口；仅探测基端口不能保证其派生端口空闲。
+    with ExitStack() as reserved:
+        ports = {}
+        for name in ("admin", "retrieval", *MCP_PORT_ENV):
+            sock = reserved.enter_context(socket.socket())
+            sock.bind(("127.0.0.1", 0))
+            ports[name] = sock.getsockname()[1]
+        port = ports.pop("admin")
+        assert _cli(data_dir, port, "config", "init").code == 0
+        patch = {"mcp": {"port": ports["retrieval"]}}
+        updated = _cli(data_dir, port, "config", "update", "--offline", "--input", "-",
+                       stdin=json.dumps(patch).encode("utf-8"))
+        assert updated.code == 0, updated.stderr
+    env = {**_child_env(), **{variable: str(ports[name]) for name, variable in MCP_PORT_ENV.items()}}
     config = json.loads((data_dir / "config.json").read_text("utf-8"))
     log = open(data_dir.parent / "serve.log", "wb")
     process = subprocess.Popen(
         [sys.executable, "-m", "app.cli", "serve", "--no-tray",
          "--data-dir", str(data_dir), "--port", str(port)],
-        cwd=ROOT, env=_child_env(), stdout=log, stderr=subprocess.STDOUT,
+        cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-    handle = SimpleNamespace(data_dir=data_dir, port=port, mcp_port=mcp_port,
+    handle = SimpleNamespace(data_dir=data_dir, port=port, mcp_ports=ports,
                              process=process, log=data_dir.parent / "serve.log",
                              admin_key=config["api"]["admin_key"],
                              retrieval_key=config["mcp"]["api_key"],
@@ -183,8 +187,8 @@ def test_mcp_auth_isolated_per_service(full_service):
                   "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                              "clientInfo": {"name": "pytest", "version": "1.0"}}}
     tools_list = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
-    services = {"retrieval": (full_service.mcp_port, full_service.retrieval_key, full_service.index_key),
-                "index": (full_service.mcp_port + 1, full_service.index_key, full_service.retrieval_key)}
+    services = {"retrieval": (full_service.mcp_ports["retrieval"], full_service.retrieval_key, full_service.index_key),
+                "index": (full_service.mcp_ports["index"], full_service.index_key, full_service.retrieval_key)}
     for label, (port, own_key, other_key) in services.items():
         status, headers, _ = _rpc(port, initialize, token=own_key)
         assert status == 200, f"{label} initialize 失败"

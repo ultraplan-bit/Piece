@@ -57,6 +57,7 @@ class SyncHandlers:
             "downloaded": len(result.downloaded),
             "skipped": len(result.skipped),
             "errors": len(result.errors),
+            "error_details": [str(error) for error in result.errors],
             "message": result.message,
             "finished_at": finished_at.strftime("%H:%M:%S") if finished_at else "",
         }
@@ -137,7 +138,7 @@ class SyncHandlers:
             return
 
         self._refresh("connection_status", "current_stage", "last_result_info",
-                      "sync_buttons", "last_sync_info", "sync_logs")
+                      "sync_buttons", "last_sync_info", "sync_logs", "sync_result_summary")
 
         if notify_finish and result is not None:
             ui.notify(

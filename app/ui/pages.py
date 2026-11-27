@@ -77,6 +77,7 @@ def register_pages(port: int = 8689):
         }
         task_handlers = TaskHandlers(state, ui_refs)
         settings_handlers = SettingsHandlers(settings_form)
+        settings_return_view = {"value": None}
         file_handlers = FileHandlers(state=state, ui_refs=ui_refs)
         task_handlers.set_file_handlers(file_handlers)
         sync_handlers = SyncHandlers(sync_state, ui_refs)
@@ -84,26 +85,36 @@ def register_pages(port: int = 8689):
         task_handlers.set_chunk_handlers(chunk_handlers)
         file_handlers.set_chunk_handlers(chunk_handlers)
 
-        async def switch_view(view):
+        async def switch_view(view, *, keep_settings_draft=False):
             nonlocal navigation_revision
             navigation_revision += 1
             revision = navigation_revision
             previous = current_view["value"]
             if previous == view:
                 return
-            if previous == "settings" and settings_handlers.dirty:
+            if previous == "settings" and settings_handlers.saving:
+                ui.notify(t("settings.saving"), type="info")
+                return
+            if previous == "settings" and settings_handlers.dirty and not keep_settings_draft:
                 dialog = ui_refs.get("settings_exit_dialog")
                 if dialog is not None and not dialog.is_deleted and dialog.value:
                     return
 
-                async def discard_and_leave():
-                    settings_handlers.discard_group()
-                    await switch_view(view)
-
-                ui_refs["settings_exit_dialog"] = confirm_dialog(
-                    t("settings.discard_title"), t("settings.discard_message"), discard_and_leave,
-                    confirm_text=t("settings.discard"), cancel_text=t("settings.keep_editing"),
-                )
+                with ui.dialog() as dialog, ui.card().classes("w-[480px] max-w-full theme-card"):
+                    ui.label(t("settings.discard_title")).classes("text-lg font-medium")
+                    ui.label(t("settings.draft_leave_hint")).classes("text-sm theme-text-secondary")
+                    async def leave(keep):
+                        if not keep:
+                            settings_handlers.init_settings_form()
+                        dialog.close()
+                        await switch_view(view, keep_settings_draft=True)
+                    with ui.row().classes("w-full justify-end gap-2"):
+                        ui.button(t("settings.keep_editing"), on_click=dialog.close).props("flat no-caps")
+                        ui.button(t("settings.discard"), on_click=lambda: leave(False)).props("flat no-caps")
+                        ui.button(t("settings.keep_draft_leave"), on_click=lambda: leave(True)).props("unelevated no-caps data-settings-keep-draft")
+                ui_refs["settings_exit_dialog"] = dialog
+                dialog.on("hide", dialog.delete)
+                dialog.open()
                 return
             if state.get("collection_edit"):
                 ui.notify(t("collections.finish_edit"), type="info")
@@ -125,7 +136,10 @@ def register_pages(port: int = 8689):
                                      remove="tool-full-width" if view != "logs" else "")
             adapt_navigation()
             if view == "settings":
-                settings_handlers.init_settings_form()
+                if previous != "settings":
+                    settings_return_view["value"] = previous
+                    ui_refs["return_label"] = t("settings.return_to", view=t(f"sidebar.{previous}"))
+                settings_handlers.resume_settings_form()
             header.refresh()
             sidebar_nav.refresh()
             middle_column.refresh()
@@ -133,17 +147,29 @@ def register_pages(port: int = 8689):
             source_column.refresh()
 
         def select_setting(key):
+            if settings_handlers.saving:
+                return
+            if selected_setting["value"] == key and not settings_handlers.focus_field:
+                return
             selected_setting["value"] = key
-            if ui_refs["settings_list"]:
-                ui_refs["settings_list"].refresh()
+            for group, button in ui_refs.get("settings_buttons", {}).items():
+                if not button.is_deleted:
+                    active = group == key
+                    button.classes(add="settings-nav-active" if active else "", remove="settings-nav-active" if not active else "")
+                    button.props(f'aria-current={"page" if active else "false"}')
             right_column.refresh()
 
         async def open_settings(group="appearance"):
             if current_view["value"] == "settings":
                 select_setting(group)
             else:
+                settings_return_view["value"] = current_view["value"]
+                ui_refs["return_label"] = t("settings.return_to", view=t(f'sidebar.{current_view["value"]}'))
                 selected_setting["value"] = group
                 await switch_view("settings")
+
+        async def return_from_settings():
+            await switch_view(settings_return_view["value"] or "files")
 
         def select_client(client_id):
             selected_client["value"] = client_id
@@ -163,7 +189,7 @@ def register_pages(port: int = 8689):
 
         async def open_knowledge_source(workbench, service, return_view, evidence):
             from indexing.services.errors import BusinessError
-            fresh = await workbench.call(service.get_record, kind="evidence", id=evidence["id"])
+            fresh = await workbench.call(workbench.service.get_record, kind="evidence", id=evidence["id"])
             if not fresh:
                 return
             destination = local_source(fresh["record"], fresh["library_id"])
@@ -278,7 +304,8 @@ def register_pages(port: int = 8689):
             await file_handlers.load_files()
 
         zotero = ZoteroWorkbench(open_file=open_task_file, refresh_files=refresh_zotero_files,
-                                 open_settings=lambda: open_settings("zotero"))
+                                 open_settings=lambda: open_settings("zotero"),
+                                 open_activity=lambda: ui_refs.get("open_task_activity", lambda: None)())
 
         async def open_zotero_item(key, server_id):
             await switch_view("zotero")
@@ -289,6 +316,8 @@ def register_pages(port: int = 8689):
                        open_task_file=open_task_file,
                        open_reader=open_reader, open_library=open_library,
                        open_recall_result=open_recall_result,
+                       open_recall_test=lambda: switch_view("recall_test"),
+                       return_to_tool=return_from_settings,
                        open_settings=open_settings, open_webdav_settings=lambda: open_settings("webdav"),
                        open_mcp_config=lambda: switch_view("mcp_config"),
                        open_zotero=lambda: switch_view("zotero"), open_zotero_item=open_zotero_item,
@@ -430,11 +459,20 @@ def register_pages(port: int = 8689):
                 client.run_javascript(f'try {{ localStorage.setItem({preferences_key}, {json.dumps(value)}); }} catch {{}}')
 
         ui_refs["remember_workspace"] = remember_workspace
+        ui.label().classes("sr-only").props("data-session-settings-draft").bind_visibility_from(settings_handlers, "dirty")
         ui.add_body_html("""<script>
             document.addEventListener('keydown', event => {
-                if (event.defaultPrevented || event.isComposing || event.altKey || event.shiftKey ||
+                if (event.defaultPrevented || event.isComposing || event.shiftKey ||
                     event.target.closest('.q-dialog, .q-menu')) return;
                 const key = event.key.toLowerCase();
+                const graph = document.querySelector('.graph-workbench');
+                if (graph && key === 'escape' && !event.target.closest('input, textarea, [contenteditable=true]')) {
+                    event.preventDefault(); graph.dispatchEvent(new CustomEvent('graph-escape')); return;
+                }
+                if (graph && event.altKey && key === 'arrowleft') {
+                    event.preventDefault(); graph.dispatchEvent(new CustomEvent('graph-back')); return;
+                }
+                if (event.altKey) return;
                 if (!(event.ctrlKey || event.metaKey)) return;
                 if (key === ',') {
                     const settings = document.querySelector('[data-open-settings]');
@@ -454,7 +492,7 @@ def register_pages(port: int = 8689):
                 }
             });
             window.addEventListener('beforeunload', event => {
-                const unsaved = document.querySelector('[data-settings-unsaved]');
+                const unsaved = document.querySelector('[data-session-settings-draft]');
                 if (unsaved?.getClientRects().length) {
                     event.preventDefault(); event.returnValue = '';
                 }

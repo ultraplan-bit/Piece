@@ -103,12 +103,20 @@ def test_right_panel_layout(gui_service):
             ):
                 page.locator(".workspace-primary").get_by_role("button", name=view, exact=True).click()
                 expect(header.locator(".app-view-title")).to_have_text(view)
-                focus = page.get_by_role("button", name="定位目录", exact=True)
+                # 标题可先于内容更新；只点击目标工作区中的控件，避免命中即将卸载的旧按钮。
+                toolbar, catalog_name = {
+                    "Wiki": (".wiki-workbench > .workspace-toolbar", "wiki"),
+                    "知识图谱": (".graph-header", "graph"),
+                    FILES: (".reader-toolbar", "files"),
+                }[view]
+                catalog = page.locator(f'[data-catalog="{catalog_name}"]')
+                expect(catalog).to_be_visible()
+                focus = page.locator(toolbar).get_by_role("button", name="定位目录", exact=True)
                 expect(focus).to_have_count(1)
                 expect(before).to_have_css("width", f"{width}px")
                 focus.click()
                 expect(before).to_have_css("width", f"{width}px")
-                expect(page.locator("[data-catalog] :focus")).to_have_count(1, timeout=5000)
+                expect(catalog.locator(":focus"), f"{view} 目录获得焦点").to_have_count(1)
                 page.locator(".workspace-primary").get_by_role("button", name=other, exact=True).click()
                 expect(header.locator(".app-view-title")).to_have_text(other)
                 expect(before).to_have_css("width", f"{other_width}px")

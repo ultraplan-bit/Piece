@@ -29,7 +29,8 @@ def test_right_panel_layout(gui_service):
                     header = page.locator(".app-header")
                     if view in ("MCP 配置", "Skill 导出", "召回测试", "日志"):
                         header.get_by_role("button", name="工具与集成", exact=True).click()
-                        page.locator(".q-menu").get_by_text(view, exact=True).click()
+                        page.get_by_role("menuitem", name=view, exact=True).click()
+                        expect(page.locator(".q-menu")).not_to_be_visible()
                     elif view in (FILES, "Wiki", "知识图谱"):
                         page.locator(".workspace-primary").get_by_role("button", name=view, exact=True).click()
                     else:
@@ -70,6 +71,7 @@ def test_right_panel_layout(gui_service):
                     page.screenshot(path=str(service["path"] / f"layout-{width}-{view}.png"))
             # 像素初始宽度不影响拖动；切换工作区后恢复用户调整的宽度。
             page.locator(".workspace-primary").get_by_role("button", name="Wiki", exact=True).click()
+            expect(header.locator(".app-view-title")).to_have_text("Wiki")
             splitter = page.locator(".workspace-splitter").last
             before = splitter.locator(":scope > .q-splitter__before")
             expect(before).to_have_css("width", "260px")
@@ -86,8 +88,10 @@ def test_right_panel_layout(gui_service):
                 return Math.abs(pane.clientWidth - 320) <= 1;
             }""")
             page.locator(".workspace-primary").get_by_role("button", name="知识图谱", exact=True).click()
+            expect(header.locator(".app-view-title")).to_have_text("知识图谱")
             expect(before).to_have_css("width", "260px")
             page.locator(".workspace-primary").get_by_role("button", name="Wiki", exact=True).click()
+            expect(header.locator(".app-view-title")).to_have_text("Wiki")
             expect(before).to_have_css("width", "320px")
             page.set_viewport_size({"width": 1920, "height": 900})
             expect(before).to_have_css("width", "320px")
@@ -98,6 +102,7 @@ def test_right_panel_layout(gui_service):
                 (FILES, "Wiki", 320, 320),
             ):
                 page.locator(".workspace-primary").get_by_role("button", name=view, exact=True).click()
+                expect(header.locator(".app-view-title")).to_have_text(view)
                 focus = page.get_by_role("button", name="定位目录", exact=True)
                 expect(focus).to_have_count(1)
                 expect(before).to_have_css("width", f"{width}px")
@@ -105,8 +110,10 @@ def test_right_panel_layout(gui_service):
                 expect(before).to_have_css("width", f"{width}px")
                 expect(page.locator("[data-catalog] :focus")).to_have_count(1, timeout=5000)
                 page.locator(".workspace-primary").get_by_role("button", name=other, exact=True).click()
+                expect(header.locator(".app-view-title")).to_have_text(other)
                 expect(before).to_have_css("width", f"{other_width}px")
                 page.locator(".workspace-primary").get_by_role("button", name=view, exact=True).click()
+                expect(header.locator(".app-view-title")).to_have_text(view)
                 expect(before).to_have_css("width", f"{width}px")
             # 重载页面也保留用户调过的目录宽度，而不是退回默认值或收起。
             page.wait_for_function("""() => Object.keys(localStorage).some(key =>
@@ -114,6 +121,7 @@ def test_right_panel_layout(gui_service):
             page.reload()
             expect(page.locator(".library-catalog")).to_be_visible(timeout=30000)
             page.locator(".workspace-primary").get_by_role("button", name="Wiki", exact=True).click()
+            expect(header.locator(".app-view-title")).to_have_text("Wiki")
             expect(page.locator(".results-splitter > .q-splitter__before")).to_have_css("width", "320px")
             assert not errors, errors
         finally:

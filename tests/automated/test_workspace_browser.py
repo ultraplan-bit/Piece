@@ -3,6 +3,7 @@ import pytest
 
 playwright = pytest.importorskip("playwright.sync_api")
 from test_collection_browser import gui_service  # noqa: F401
+from test_graph_browser import chart_state
 from app.i18n import t
 from tree_browser_helpers import browse_mode
 
@@ -171,7 +172,12 @@ def test_quick_navigation_keeps_the_last_click(knowledge_base, request):
             sidebar.get_by_role("button", name=t("sidebar.graph"), exact=True).click()
             expect(title).to_have_text(t("sidebar.graph"))
             page.get_by_role("button", name="切换测试节点", exact=True).click()
+            overview_canvas_id = page.locator(".nicegui-echart").get_attribute("id")
             page.locator(".graph-inspector").get_by_role("button", name=t("graph.center"), exact=True).click()
+            # 先完成全局到局部的切换，避免位置回传钩子截获切换自身尚未完成的请求。
+            expect(page.get_by_role("button", name=t("graph.local_graph"), exact=True)).to_have_attribute("aria-pressed", "true")
+            expect(page.locator(".nicegui-echart")).not_to_have_attribute("id", overview_canvas_id)
+            chart_state(page, "graph")
             expect(page.locator(".nicegui-echart canvas")).to_be_visible(timeout=30000)
 
             # 只暂存图谱位置回传，按指定顺序放行，真实复现异步导航乱序。
@@ -199,6 +205,7 @@ def test_quick_navigation_keeps_the_last_click(knowledge_base, request):
 
             # 点回当前工作区也算最后一次意图，应取消还未完成的离开请求。
             sidebar.get_by_role("button", name=t("sidebar.graph"), exact=True).click()
+            chart_state(page, "graph")
             expect(page.locator(".nicegui-echart canvas")).to_be_visible()
             sidebar.get_by_role("button", name=t("sidebar.files"), exact=True).click()
             page.wait_for_function("window.__positionReplies.length === 1")

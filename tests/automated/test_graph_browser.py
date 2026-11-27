@@ -313,7 +313,9 @@ def test_graph_right_pane_themes_and_narrow_layout(graph_gui):
             if graph:
                 page.wait_for_function("""() => {
                     const el = document.querySelector('.nicegui-echart');
-                    const data = el && getElement(el.id.slice(1))?.chart?.getModel()?.getSeriesByIndex(0)?.getEdgeData();
+                    const chart = el && getElement(el.id.slice(1))?.chart;
+                    if (chart?.getOption()?.series?.[0]?.pieceTopology !== false) return false;
+                    const data = chart.getModel()?.getSeriesByIndex(0)?.getEdgeData();
                     return data?.getItemGraphicEl(0)?.getLinePath()?.shape.percent === 1;
                 }""")
             page.screenshot(path=str(output / name), animations="disabled")
@@ -356,6 +358,7 @@ def test_graph_right_pane_themes_and_narrow_layout(graph_gui):
                         assert_widths()
                         capture(f"detail-{theme}-{width}-{'zh' if index == 0 else 'en'}.png")
                     page.locator(".graph-inspector").get_by_role("button", name=gk("center"), exact=True).click()
+                    expect(page.get_by_role("button", name=gk("local_graph"), exact=True)).to_have_attribute("aria-pressed", "true")
                     expect(page.locator(".nicegui-echart canvas")).to_be_visible(timeout=30000)
                     expect(page.locator(".graph-canvas-tools")).to_be_visible()
                     assert_widths()
@@ -370,6 +373,7 @@ def test_graph_right_pane_themes_and_narrow_layout(graph_gui):
                 expect(page.locator(".graph-detail").get_by_role("heading", name="知识图谱", exact=True)).to_be_visible()
                 capture(f"preview-detail-{theme}.png")
                 page.locator(".graph-inspector").get_by_role("button", name=gk("center"), exact=True).click()
+                expect(page.get_by_role("button", name=gk("local_graph"), exact=True)).to_have_attribute("aria-pressed", "true")
                 expect(page.locator(".nicegui-echart canvas")).to_be_visible(timeout=30000)
                 capture(f"preview-canvas-{theme}.png", graph=True)
             assert not errors, errors
